@@ -1,13 +1,122 @@
 #import "AppDelegate.h"
 #import <dlfcn.h>
 #import <objc/runtime.h>
+#import <QuartzCore/QuartzCore.h>
 
 // ============================================================
 // 控制App主页: 总开关 + 全局效果 + 七类界面开关 + 素材管理页
+// v1.8: 精致现代风 —— 渐变主色 / 卡片式分组 / 渐变徽章图标 / 现代滑杆
+//       (只动 UI 层, 配置与导入逻辑零改动)
 // ============================================================
 
 static char SVBSwitchAssocKey;
 static char SVBProxyAssocKey;
+
+#pragma mark - 主题
+
+// 主色: 玫红 -> 紫 (视频工具气质, 与素材气质呼应)
+static UIColor *SVBAccent(void)  { return [UIColor colorWithRed:0.98 green:0.27 blue:0.51 alpha:1.0]; }
+static UIColor *SVBAccent2(void) { return [UIColor colorWithRed:0.63 green:0.32 blue:0.98 alpha:1.0]; }
+// 卡片底色 (自动适配深色模式)
+static UIColor *SVBCardColor(void) { return [UIColor secondarySystemGroupedBackgroundColor]; }
+// 选中态卡片底色 (比卡片略深一档)
+static UIColor *SVBCardSelectedColor(void) { return [UIColor tertiarySystemGroupedBackgroundColor]; }
+
+// 圆角渐变底 + 白色 SF Symbol -> 行首徽章图标 (符号缺失时退化为纯渐变方块)
+static UIImage *SVBBadgeIcon(NSString *symbol, UIColor *c1, UIColor *c2) {
+    CGFloat s = 29;
+    UIGraphicsImageRendererFormat *fmt = [UIGraphicsImageRendererFormat new];
+    fmt.scale = [UIScreen mainScreen].scale;
+    UIGraphicsImageRenderer *r =
+        [[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(s, s) format:fmt];
+    return [r imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
+        UIBezierPath *p = [UIBezierPath bezierPathWithRoundedRect:CGRectMake(0, 0, s, s)
+                                                     cornerRadius:8.5];
+        [p addClip];
+        CGGradientRef g = CGGradientCreateWithColors(NULL, (__bridge CFArrayRef)(@[
+            (id)c1.CGColor, (id)c2.CGColor]), NULL);
+        if (g) {
+            CGContextDrawLinearGradient(ctx.CGContext, g, CGPointMake(0, 0), CGPointMake(s, s), 0);
+            CGGradientRelease(g);
+        }
+        UIImage *sym = symbol ? [UIImage systemImageNamed:symbol] : nil;
+        UIImage *white = sym ? [sym imageWithTintColor:[UIColor whiteColor]] : nil;
+        if (white) {
+            CGFloat box = 16.5;
+            CGFloat k = MIN(box / MAX(white.size.width, 0.5), box / MAX(white.size.height, 0.5));
+            CGSize ds = CGSizeMake(MAX(white.size.width * k, 1), MAX(white.size.height * k, 1));
+            [white drawInRect:CGRectMake((s - ds.width) / 2, (s - ds.height) / 2, ds.width, ds.height)];
+        }
+    }];
+}
+
+// 七类界面 + 功能行的徽章配色表
+static UIImage *SVBIconForKey(NSString *key) {
+    UIColor *p1 = [UIColor colorWithRed:0.98 green:0.27 blue:0.51 alpha:1];
+    UIColor *p2 = [UIColor colorWithRed:0.63 green:0.32 blue:0.98 alpha:1];
+    if ([key isEqualToString:SVBContextMain])    return SVBBadgeIcon(@"square.grid.2x2.fill", p1, p2);
+    if ([key isEqualToString:SVBContextAll])     return SVBBadgeIcon(@"bubble.left.and.bubble.right.fill",
+                                            [UIColor colorWithRed:0.25 green:0.55 blue:1.0 alpha:1],
+                                            [UIColor colorWithRed:0.35 green:0.78 blue:1.0 alpha:1]);
+    if ([key isEqualToString:SVBContextKnown])   return SVBBadgeIcon(@"person.crop.circle.fill",
+                                            [UIColor colorWithRed:0.00 green:0.72 blue:0.63 alpha:1],
+                                            [UIColor colorWithRed:0.20 green:0.85 blue:0.75 alpha:1]);
+    if ([key isEqualToString:SVBContextUnknown]) return SVBBadgeIcon(@"questionmark.circle.fill",
+                                            [UIColor colorWithRed:1.00 green:0.58 blue:0.00 alpha:1],
+                                            [UIColor colorWithRed:1.00 green:0.75 blue:0.20 alpha:1]);
+    if ([key isEqualToString:SVBContextUnread])  return SVBBadgeIcon(@"envelope.badge.fill",
+                                            [UIColor colorWithRed:1.00 green:0.29 blue:0.29 alpha:1],
+                                            [UIColor colorWithRed:1.00 green:0.50 blue:0.40 alpha:1]);
+    if ([key isEqualToString:SVBContextJunk])    return SVBBadgeIcon(@"trash.fill",
+                                            [UIColor colorWithRed:0.45 green:0.50 blue:0.60 alpha:1],
+                                            [UIColor colorWithRed:0.60 green:0.65 blue:0.75 alpha:1]);
+    if ([key isEqualToString:SVBContextDeleted]) return SVBBadgeIcon(@"arrow.uturn.left.circle.fill",
+                                            [UIColor colorWithRed:0.63 green:0.32 blue:0.98 alpha:1],
+                                            [UIColor colorWithRed:0.50 green:0.55 blue:1.00 alpha:1]);
+    if ([key isEqualToString:SVBContextChat])    return SVBBadgeIcon(@"message.fill",
+                                            [UIColor colorWithRed:1.00 green:0.36 blue:0.47 alpha:1],
+                                            [UIColor colorWithRed:1.00 green:0.55 blue:0.45 alpha:1]);
+    if ([key isEqualToString:@"__master"])       return SVBBadgeIcon(@"sparkles", p1, p2);
+    if ([key isEqualToString:@"__debug"])        return SVBBadgeIcon(@"ant.fill",
+                                            [UIColor colorWithRed:0.45 green:0.50 blue:0.60 alpha:1],
+                                            [UIColor colorWithRed:0.62 green:0.67 blue:0.77 alpha:1]);
+    if ([key isEqualToString:@"__folder"])       return SVBBadgeIcon(@"folder.fill",
+                                            [UIColor colorWithRed:0.25 green:0.55 blue:1.00 alpha:1],
+                                            [UIColor colorWithRed:0.45 green:0.70 blue:1.00 alpha:1]);
+    if ([key isEqualToString:@"__diag"])         return SVBBadgeIcon(@"doc.text.magnifyingglass",
+                                            [UIColor colorWithRed:0.35 green:0.35 blue:0.95 alpha:1],
+                                            [UIColor colorWithRed:0.55 green:0.45 blue:1.00 alpha:1]);
+    if ([key isEqualToString:@"__import"])       return SVBBadgeIcon(@"plus.circle.fill",
+                                            [UIColor colorWithRed:0.98 green:0.27 blue:0.51 alpha:1],
+                                            [UIColor colorWithRed:0.63 green:0.32 blue:0.98 alpha:1]);
+    if ([key isEqualToString:@"__video"])        return SVBBadgeIcon(@"video.fill",
+                                            [UIColor colorWithRed:0.30 green:0.69 blue:0.45 alpha:1],
+                                            [UIColor colorWithRed:0.45 green:0.82 blue:0.55 alpha:1]);
+    return nil;
+}
+
+// 卡片式单元格: 每行挂圆角背景 (首行上圆角/末行下圆角/中行直角), 组内成一体
+static void SVBApplyCardStyle(UITableViewCell *cell, NSInteger row, NSInteger rows) {
+    UIView *card = [[UIView alloc] init];
+    card.backgroundColor = SVBCardColor();
+    card.layer.cornerRadius = 16;
+    card.layer.maskedCorners = kCALayerMinXMinYCorner | kCALayerMaxXMinYCorner
+                             | kCALayerMinXMaxYCorner | kCALayerMaxXMaxYCorner;
+    if (rows > 1) {
+        if (row == 0)
+            card.layer.maskedCorners = kCALayerMinXMinYCorner | kCALayerMaxXMinYCorner;
+        else if (row == rows - 1)
+            card.layer.maskedCorners = kCALayerMinXMaxYCorner | kCALayerMaxXMaxYCorner;
+        else
+            card.layer.cornerRadius = 0;
+    }
+    cell.backgroundView = card;
+    UIView *sel = [[UIView alloc] init];
+    sel.backgroundColor = SVBCardSelectedColor();
+    sel.layer.cornerRadius = card.layer.cornerRadius;
+    sel.layer.maskedCorners = card.layer.maskedCorners;
+    cell.selectedBackgroundView = sel;
+}
 
 #pragma mark - AppDelegate
 
@@ -23,6 +132,7 @@ static char SVBProxyAssocKey;
     UINavigationController *nav = [[UINavigationController alloc]
         initWithRootViewController:[[SVBHomeViewController alloc] initWithStyle:UITableViewStyleInsetGrouped]];
     nav.navigationBar.prefersLargeTitles = YES;
+    nav.view.tintColor = SVBAccent();   // v1.8: 全局主色 (返回按钮/按钮/勾选)
     self.window.rootViewController = nav;
     [self.window makeKeyAndVisible];
     return YES;
@@ -331,13 +441,16 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
 - (instancetype)initWithStyle:(UITableViewCellStyle)style reuseIdentifier:(NSString *)reuseIdentifier {
     if ((self = [super initWithStyle:style reuseIdentifier:reuseIdentifier])) {
         _titleLabel = [UILabel new];
-        _titleLabel.font = [UIFont systemFontOfSize:17];
+        _titleLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightMedium];
         _valueLabel = [UILabel new];
-        _valueLabel.font = [UIFont monospacedDigitSystemFontOfSize:15 weight:UIFontWeightRegular];
-        _valueLabel.textColor = [UIColor secondaryLabelColor];
+        _valueLabel.font = [UIFont monospacedDigitSystemFontOfSize:14 weight:UIFontWeightSemibold];
+        _valueLabel.textColor = SVBAccent();
         _valueLabel.textAlignment = NSTextAlignmentRight;
         _slider = [UISlider new];
         _slider.continuous = YES;
+        _slider.minimumTrackTintColor = SVBAccent();
+        _slider.maximumTrackTintColor = [UIColor tertiarySystemFillColor];
+        _slider.tintColor = SVBAccent();
         [_slider addTarget:self action:@selector(sliderChanged:) forControlEvents:UIControlEventValueChanged];
         [_slider addTarget:self action:@selector(sliderEnded:) forControlEvents:UIControlEventTouchUpInside | UIControlEventTouchUpOutside];
 
@@ -395,10 +508,59 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
     return self;
 }
 
+// v1.8: 首页 Hero 渐变卡 (标题+版本+渐变图标, 替代系统大标题)
+- (UIView *)makeHeroHeader {
+    CGFloat w = [UIScreen mainScreen].bounds.size.width - 24;
+    CGFloat h = 112;
+    UIView *wrap = [[UIView alloc] initWithFrame:CGRectMake(0, 0, w + 24, h + 16)];
+
+    UIView *card = [[UIView alloc] initWithFrame:CGRectMake(12, 8, w, h)];
+    card.layer.cornerRadius = 20;
+    CAGradientLayer *g = [CAGradientLayer layer];
+    g.frame = card.bounds;
+    g.colors = @[(id)SVBAccent().CGColor, (id)SVBAccent2().CGColor];
+    g.startPoint = CGPointMake(0, 0.5);
+    g.endPoint   = CGPointMake(1, 0.5);
+    g.cornerRadius = 20;
+    [card.layer insertSublayer:g atIndex:0];
+    card.layer.shadowColor = [UIColor blackColor].CGColor;
+    card.layer.shadowOpacity = 0.20;
+    card.layer.shadowOffset = CGSizeMake(0, 6);
+    card.layer.shadowRadius = 12;
+
+    UIImageView *icon = [[UIImageView alloc] initWithImage:
+        SVBBadgeIcon(@"play.rectangle.on.rectangle.fill",
+                     [UIColor colorWithWhite:1 alpha:0.35],
+                     [UIColor colorWithWhite:1 alpha:0.15])];
+    icon.frame = CGRectMake(18, (h - 46) / 2, 46, 46);
+    icon.layer.cornerRadius = 13;
+    icon.layer.masksToBounds = YES;
+    [card addSubview:icon];
+
+    UILabel *title = [UILabel new];
+    title.text = @"信息视频背景";
+    title.font = [UIFont systemFontOfSize:22 weight:UIFontWeightBold];
+    title.textColor = [UIColor whiteColor];
+    title.frame = CGRectMake(76, h / 2 - 26, w - 96, 28);
+    [card addSubview:title];
+
+    UILabel *sub = [UILabel new];
+    sub.text = [NSString stringWithFormat:@"v%@ · 每个界面独立的视频背景", SVB_VERSION];
+    sub.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
+    sub.textColor = [UIColor colorWithWhite:1 alpha:0.82];
+    sub.frame = CGRectMake(76, h / 2 + 4, w - 96, 18);
+    [card addSubview:sub];
+
+    [wrap addSubview:card];
+    return wrap;
+}
+
 - (void)viewDidLoad {
     [super viewDidLoad];
-    self.navigationItem.largeTitleDisplayMode = UINavigationItemLargeTitleDisplayModeAlways;
-    self.tableView.backgroundColor = [UIColor systemBackgroundColor];
+    self.navigationItem.largeTitleDisplayMode = UINavigationItemLargeTitleDisplayModeNever;
+    self.tableView.backgroundColor = [UIColor systemGroupedBackgroundColor];
+    self.tableView.separatorStyle = UITableViewCellSeparatorStyleNone;
+    self.tableView.tableHeaderView = [self makeHeroHeader];
 }
 
 - (void)viewWillAppear:(BOOL)animated {
@@ -450,11 +612,15 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
         if (!c) {
             c = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:switchId];
             UISwitch *sw = [UISwitch new];
+            sw.onTintColor = SVBAccent();
             [sw addTarget:self action:@selector(masterToggled:) forControlEvents:UIControlEventValueChanged];
             c.accessoryView = sw;
         }
         c.textLabel.text = @"启用视频背景";
+        c.textLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
+        c.imageView.image = SVBIconForKey(@"__master");
         ((UISwitch *)c.accessoryView).on = [mgr masterEnabled];
+        SVBApplyCardStyle(c, 0, 1);
         return c;
     }
 
@@ -466,6 +632,7 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
         if (!c) {
             c = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:linkId];
             UISwitch *sw = [UISwitch new];
+            sw.onTintColor = SVBAccent();
             [sw addTarget:self action:@selector(contextToggled:) forControlEvents:UIControlEventValueChanged];
             [c.contentView addSubview:sw];
             sw.translatesAutoresizingMaskIntoConstraints = NO;
@@ -477,11 +644,15 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
         }
         UISwitch *sw = objc_getAssociatedObject(c, &SVBSwitchAssocKey);
         c.textLabel.text = def[1];
-        NSString *active = [mgr activeVideoNameForContext:key];
-        c.detailTextLabel.text = active.length ? active : @"未导入素材";
-        c.detailTextLabel.textColor = active.length ? [UIColor secondaryLabelColor] : [UIColor systemOrangeColor];
+        // v1.8: 不再显示素材文件名 (抖音长文件名又长又乱), 只显示数量状态
+        NSInteger cnt = (NSInteger)[mgr videosForContext:key].count;
+        c.detailTextLabel.text = cnt ? [NSString stringWithFormat:@"已导入 %ld 个", (long)cnt] : @"未导入素材";
+        c.detailTextLabel.textColor = cnt ? [UIColor secondaryLabelColor] : [UIColor systemOrangeColor];
+        c.detailTextLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
         sw.tag = 300 + indexPath.row;
         sw.on = [mgr isEnabledForContext:key];
+        c.imageView.image = SVBIconForKey(key);
+        SVBApplyCardStyle(c, indexPath.row, (NSInteger)_defs.count);
         return c;
     }
 
@@ -492,11 +663,14 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
         if (!c) {
             c = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:debugSwitchId];
             UISwitch *sw = [UISwitch new];
+            sw.onTintColor = SVBAccent();
             [sw addTarget:self action:@selector(bannerToggled:) forControlEvents:UIControlEventValueChanged];
             c.accessoryView = sw;
         }
         c.textLabel.text = @"显示注入诊断横幅";
+        c.imageView.image = SVBIconForKey(@"__debug");
         ((UISwitch *)c.accessoryView).on = [mgr debugBannerEnabled];
+        SVBApplyCardStyle(c, 0, 1);
         return c;
     }
 
@@ -506,11 +680,14 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
     if (indexPath.row == 0) {
         c.textLabel.text = @"素材总目录";
         c.detailTextLabel.text = @"查看/复制路径";
+        c.imageView.image = SVBIconForKey(@"__folder");
     } else {
         c.textLabel.text = @"诊断报告";
         c.detailTextLabel.text = @"排查问题";
+        c.imageView.image = SVBIconForKey(@"__diag");
     }
-    c.detailTextLabel.textColor = [UIColor systemBlueColor];
+    c.detailTextLabel.textColor = SVBAccent();
+    SVBApplyCardStyle(c, indexPath.row, 2);
     return c;
 }
 
@@ -587,7 +764,9 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
     self.navigationItem.rightBarButtonItem =
         [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemAdd
                                                       target:self action:@selector(importFromLibrary)];
-    self.tableView.backgroundColor = [UIColor systemBackgroundColor];
+    self.tableView.backgroundColor = [UIColor systemGroupedBackgroundColor];
+    self.tableView.separatorStyle = UITableViewCellSeparatorStyleNone;
+    self.refreshControl.tintColor = SVBAccent();
     // 下拉刷新 (方便 Filza 放完文件后刷新)
     UIRefreshControl *rc = [UIRefreshControl new];
     [rc addTarget:self action:@selector(refreshFiles) forControlEvents:UIControlEventValueChanged];
@@ -671,37 +850,50 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
                 [mgr postChangeNotification];
             };
         }
+        SVBApplyCardStyle(c, indexPath.row, [self.contextKey isEqualToString:SVBContextChat] ? 4 : 3);
         return c;
     }
 
     UITableViewCell *c = [tableView dequeueReusableCellWithIdentifier:cellId];
     if (!c) c = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:cellId];
+    c.detailTextLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
 
     NSArray<NSString *> *videos = [mgr videosForContext:self.contextKey];
     NSString *active = [mgr activeVideoNameForContext:self.contextKey];
+    NSInteger rows = (NSInteger)MAX(1, (NSInteger)videos.count) + 1;
 
     if (videos.count == 0 && indexPath.row == 0) {
         c.textLabel.text = @"素材文件夹为空，点右上角「＋」从相册导入";
         c.textLabel.textColor = [UIColor secondaryLabelColor];
         c.textLabel.font = [UIFont systemFontOfSize:15];
+        c.imageView.image = nil;
         c.detailTextLabel.text = nil;
         c.accessoryType = UITableViewCellAccessoryNone;
+        SVBApplyCardStyle(c, 0, 1);
         return c;
     }
     if (indexPath.row < (NSInteger)videos.count) {
-        c.textLabel.text = videos[indexPath.row];
+        // v1.8: 不直接铺文件名, 统一叫「素材 N」, 选中状态用勾+主色区分
+        c.textLabel.text = [NSString stringWithFormat:@"素材 %ld", (long)(indexPath.row + 1)];
         c.textLabel.textColor = [UIColor labelColor];
         c.textLabel.font = [UIFont systemFontOfSize:17];
-        c.detailTextLabel.text = @"视频";
-        c.accessoryType = [active isEqualToString:videos[indexPath.row]]
-                          ? UITableViewCellAccessoryCheckmark : UITableViewCellAccessoryNone;
+        BOOL isActive = [active isEqualToString:videos[indexPath.row]];
+        c.detailTextLabel.text = isActive ? @"使用中" : @"视频";
+        c.detailTextLabel.textColor = isActive ? SVBAccent() : [UIColor secondaryLabelColor];
+        c.detailTextLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
+        c.imageView.image = SVBIconForKey(@"__video");
+        c.accessoryType = isActive ? UITableViewCellAccessoryCheckmark : UITableViewCellAccessoryNone;
+        c.tintColor = SVBAccent();
+        SVBApplyCardStyle(c, indexPath.row, rows);
         return c;
     }
-    c.textLabel.text = @"＋ 从相册导入视频素材";
-    c.textLabel.textColor = [UIColor systemBlueColor];
-    c.textLabel.font = [UIFont systemFontOfSize:17];
+    c.textLabel.text = @"从相册导入视频素材";
+    c.textLabel.textColor = SVBAccent();
+    c.textLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightMedium];
+    c.imageView.image = SVBIconForKey(@"__import");
     c.detailTextLabel.text = nil;
     c.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+    SVBApplyCardStyle(c, indexPath.row, rows);
     return c;
 }
 
@@ -764,11 +956,15 @@ forRowAtIndexPath:(NSIndexPath *)indexPath {
 
 - (void)viewDidLoad {
     [super viewDidLoad];
-    self.view.backgroundColor = [UIColor systemBackgroundColor];
+    self.view.backgroundColor = [UIColor systemGroupedBackgroundColor];
     self.title = @"诊断报告";
-    UITextView *tv = [[UITextView alloc] initWithFrame:self.view.bounds];
+    // v1.8: 报告装进圆角卡片, 等宽字体 + 内边距, 不再是贴边的白板
+    UITextView *tv = [[UITextView alloc] initWithFrame:CGRectInset(self.view.bounds, 10, 10)];
     tv.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     tv.editable = NO;
+    tv.backgroundColor = SVBCardColor();
+    tv.layer.cornerRadius = 16;
+    tv.textContainerInset = UIEdgeInsetsMake(12, 12, 12, 12);
     tv.font = [UIFont monospacedSystemFontOfSize:12 weight:UIFontWeightRegular];
     tv.text = [self buildReport];
     self.navigationItem.rightBarButtonItem =
