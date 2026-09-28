@@ -644,11 +644,8 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
         }
         UISwitch *sw = objc_getAssociatedObject(c, &SVBSwitchAssocKey);
         c.textLabel.text = def[1];
-        // v1.8: 不再显示素材文件名 (抖音长文件名又长又乱), 只显示数量状态
-        NSInteger cnt = (NSInteger)[mgr videosForContext:key].count;
-        c.detailTextLabel.text = cnt ? [NSString stringWithFormat:@"已导入 %ld 个", (long)cnt] : @"未导入素材";
-        c.detailTextLabel.textColor = cnt ? [UIColor secondaryLabelColor] : [UIColor systemOrangeColor];
-        c.detailTextLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
+        // v1.8.1: 最外层不显示任何素材信息, 只有图标+标题+开关
+        c.detailTextLabel.text = nil;
         sw.tag = 300 + indexPath.row;
         sw.on = [mgr isEnabledForContext:key];
         c.imageView.image = SVBIconForKey(key);
@@ -873,14 +870,11 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
         return c;
     }
     if (indexPath.row < (NSInteger)videos.count) {
-        // v1.8: 不直接铺文件名, 统一叫「素材 N」, 选中状态用勾+主色区分
+        // v1.8.1: 只有标题和选中勾, 不显示任何素材信息文字
         c.textLabel.text = [NSString stringWithFormat:@"素材 %ld", (long)(indexPath.row + 1)];
         c.textLabel.textColor = [UIColor labelColor];
         c.textLabel.font = [UIFont systemFontOfSize:17];
         BOOL isActive = [active isEqualToString:videos[indexPath.row]];
-        c.detailTextLabel.text = isActive ? @"使用中" : @"视频";
-        c.detailTextLabel.textColor = isActive ? SVBAccent() : [UIColor secondaryLabelColor];
-        c.detailTextLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
         c.imageView.image = SVBIconForKey(@"__video");
         c.accessoryType = isActive ? UITableViewCellAccessoryCheckmark : UITableViewCellAccessoryNone;
         c.tintColor = SVBAccent();
