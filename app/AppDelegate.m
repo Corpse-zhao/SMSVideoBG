@@ -1011,7 +1011,7 @@ trailingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
         alertControllerWithTitle:@"重命名素材"
                          message:@"留空或无改动则取消"
                   preferredStyle:UIAlertControllerStyleAlert];
-    [ac addTextField:^(UITextField *tf) {
+    [ac addTextFieldWithConfigurationHandler:^(UITextField *tf) {
         tf.text = name.stringByDeletingPathExtension;
         tf.clearButtonMode = UITextFieldViewModeAlways;
         tf.returnKeyType = UIReturnKeyDone;
@@ -1173,7 +1173,7 @@ static void SVBAppPickImage(UIViewController *host, void (^done)(UIImage *image)
     NSString *cur = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleDisplayName"] ?: @"信息视频背景";
     UIAlertController *ac = [UIAlertController
         alertControllerWithTitle:@"App 名称" message:@"注销（Respring）后生效" preferredStyle:UIAlertControllerStyleAlert];
-    [ac addTextField:^(UITextField *tf) { tf.text = cur; }];
+    [ac addTextFieldWithConfigurationHandler:^(UITextField *tf) { tf.text = cur; }];
     [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
     [ac addAction:[UIAlertAction actionWithTitle:@"保存" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
         NSString *name = ac.textFields.firstObject.text;
