@@ -23,6 +23,7 @@
 //   配置里同时带上 config_version, 便于诊断「插件读到的开关是否最新」。
 // ============================================================
 
+NSString * const SVBContextMain     = @"main";
 NSString * const SVBContextAll      = @"all";
 NSString * const SVBContextKnown    = @"known";
 NSString * const SVBContextUnknown  = @"unknown";
@@ -36,7 +37,8 @@ static NSString * const SVBAliveFileName   = @"_tweak_alive";
 static NSString * const SVBLogFileName     = @"_tweak.log";
 
 NSArray<NSArray<NSString *> *> *SVBContextDefinitions(void) {
-    return @[ @[SVBContextAll,     @"所有信息",     @"信息主列表(所有会话)"],
+    return @[ @[SVBContextMain,    @"主页面",       @"打开信息App 的第一屏(过滤器列表)"],
+              @[SVBContextAll,     @"所有信息",     @"信息主列表(所有会话)"],
               @[SVBContextKnown,   @"已知发件人",   @"已知发件人列表"],
               @[SVBContextUnknown, @"未知发件人",   @"未知发件人列表"],
               @[SVBContextUnread,  @"未读信息",     @"未读信息列表"],

@@ -84,6 +84,16 @@ static NSString *SVBDetectListContext(UIViewController *vc, NSString *fallback) 
         if (title.length) {
             [[SVBManager shared] logClassOnce:
                 [NSString stringWithFormat:@"title「%@」on %@", title, cls] context:@"(标题探测)"];
+
+            // v1.7.15: 主页面 = 信息App 根页 (过滤器列表: 所有信息/已知发件人/...那屏)。
+            // 判别: 它是导航栈的根 + 标题恰好是「信息/Messages」(点进去的「所有信息」
+            // 列表标题可能相同, 但不是导航根, 以此区分)。
+            BOOL isNavRoot = (self.navigationController.viewControllers.firstObject == self);
+            if (isNavRoot &&
+                ([title isEqualToString:@"信息"] ||
+                 [title localizedCaseInsensitiveCompare:@"Messages"] == NSOrderedSame))
+                return SVBContextMain;
+
             if ([title containsString:@"已知发件人"] ||
                 [title localizedCaseInsensitiveContainsString:@"Known Senders"])
                 return SVBContextKnown;
@@ -220,6 +230,13 @@ static void SVBRefreshBanner(NSString *ctx) {
 }
 %end
 
+// v1.7.15: 列表语境兜底 —— 标题探测失败时, 导航栈根 = 主页面, 其余 = 所有信息
+static NSString *SVBListFallback(UIViewController *vc) {
+    if (vc.navigationController.viewControllers.firstObject == vc)
+        return SVBContextMain;
+    return SVBContextAll;
+}
+
 // 会话列表 (所有信息 / 已知 / 未知 / 未读 过滤器尽力细分)
 // v1.4: viewDidAppear 复用 viewWillAppear 的检测结果, 不再强制按 all 铺背景
 // v1.5: viewDidAppear 重新检测一次 (标题可能迟设); 离开页面时摘除背景
@@ -230,7 +247,7 @@ static char SVBDetectedCtxKey;
 - (void)viewWillAppear:(BOOL)animated {
     %orig;
     SVB_SMS_GUARD()
-    NSString *ctx = SVBDetectListContext(self, SVBContextAll);
+    NSString *ctx = SVBDetectListContext(self, SVBListFallback(self));
     objc_setAssociatedObject(self, &SVBDetectedCtxKey, ctx, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     [[SVBManager shared] logClassOnce:NSStringFromClass([self class]) context:ctx];
     SVB_SAFE_APPLY(ctx)
@@ -240,7 +257,7 @@ static char SVBDetectedCtxKey;
     %orig;
     SVB_SMS_GUARD()
     NSString *ctx = SVBDetectListContext(self,
-        objc_getAssociatedObject(self, &SVBDetectedCtxKey) ?: SVBContextAll);
+        objc_getAssociatedObject(self, &SVBDetectedCtxKey) ?: SVBListFallback(self));
     objc_setAssociatedObject(self, &SVBDetectedCtxKey, ctx, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     SVB_SAFE_APPLY(ctx)
 }
@@ -279,7 +296,7 @@ static char SVBDetectedCtxKey;
 - (void)viewWillAppear:(BOOL)animated {
     %orig;
     SVB_SMS_GUARD()
-    NSString *ctx = SVBDetectListContext(self, SVBContextAll);
+    NSString *ctx = SVBDetectListContext(self, SVBListFallback(self));
     objc_setAssociatedObject(self, &SVBDetectedCtxKey, ctx, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     [[SVBManager shared] logClassOnce:NSStringFromClass([self class]) context:ctx];
     SVB_SAFE_APPLY(ctx)
@@ -289,7 +306,7 @@ static char SVBDetectedCtxKey;
     %orig;
     SVB_SMS_GUARD()
     NSString *ctx = SVBDetectListContext(self,
-        objc_getAssociatedObject(self, &SVBDetectedCtxKey) ?: SVBContextAll);
+        objc_getAssociatedObject(self, &SVBDetectedCtxKey) ?: SVBListFallback(self));
     objc_setAssociatedObject(self, &SVBDetectedCtxKey, ctx, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     SVB_SAFE_APPLY(ctx)
 }
