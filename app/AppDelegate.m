@@ -509,7 +509,13 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
     return self;
 }
 
-// v1.8: 首页 Hero 渐变卡 (标题+版本+渐变图标, 替代系统大标题)
+// v1.8: 首页 Hero 渐变卡 (标题+副标题+渐变图标, 替代系统大标题)
+// v1.8.6: 副标题可自定义 (默认「不要为了升级而放弃越狱的快乐」, 长按 Hero 卡编辑)
+- (NSString *)heroSubtitle {
+    NSString *s = [[SVBManager shared] configValueForKey:@"hero_subtitle"];
+    return [s isKindOfClass:[NSString class]] && s.length ? s : @"不要为了升级而放弃越狱的快乐";
+}
+
 - (UIView *)makeHeroHeader {
     CGFloat w = [UIScreen mainScreen].bounds.size.width - 24;
     CGFloat h = 112;
@@ -546,14 +552,40 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
     [card addSubview:title];
 
     UILabel *sub = [UILabel new];
-    sub.text = [NSString stringWithFormat:@"v%@ · 每个界面独立的视频背景", SVB_VERSION];
+    sub.text = [self heroSubtitle];
     sub.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
     sub.textColor = [UIColor colorWithWhite:1 alpha:0.82];
     sub.frame = CGRectMake(76, h / 2 + 4, w - 96, 18);
     [card addSubview:sub];
 
+    // v1.8.6: 长按 Hero 卡编辑副标题 (存配置, 立即刷新)
+    UILongPressGestureRecognizer *lp = [[UILongPressGestureRecognizer alloc]
+        initWithTarget:self action:@selector(editHeroSubtitle:)];
+    [card addGestureRecognizer:lp];
+
     [wrap addSubview:card];
     return wrap;
+}
+
+- (void)editHeroSubtitle:(UILongPressGestureRecognizer *)gr {
+    if (gr.state != UIGestureRecognizerStateBegan) return;
+    UIAlertController *ac = [UIAlertController
+        alertControllerWithTitle:@"自定义副标题"
+                         message:@"长按首页顶部渐变卡随时改"
+                  preferredStyle:UIAlertControllerStyleAlert];
+    [ac addTextFieldWithConfigurationHandler:^(UITextField *tf) {
+        tf.text = [self heroSubtitle];
+        tf.clearButtonMode = UITextFieldViewModeAlways;
+    }];
+    [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    [ac addAction:[UIAlertAction actionWithTitle:@"保存" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+        NSString *t = ac.textFields.firstObject.text;
+        t = [t stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        [[SVBManager shared] setConfigValue:t.length ? t : @"不要为了升级而放弃越狱的快乐"
+                                     forKey:@"hero_subtitle"];
+        self.tableView.tableHeaderView = [self makeHeroHeader];
+    }]];
+    [self presentViewController:ac animated:YES completion:nil];
 }
 
 - (void)viewDidLoad {
