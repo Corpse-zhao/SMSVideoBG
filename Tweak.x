@@ -88,7 +88,7 @@ static NSString *SVBDetectListContext(UIViewController *vc, NSString *fallback) 
             // v1.7.15: 主页面 = 信息App 根页 (过滤器列表: 所有信息/已知发件人/...那屏)。
             // 判别: 它是导航栈的根 + 标题恰好是「信息/Messages」(点进去的「所有信息」
             // 列表标题可能相同, 但不是导航根, 以此区分)。
-            BOOL isNavRoot = (self.navigationController.viewControllers.firstObject == self);
+            BOOL isNavRoot = (vc.navigationController.viewControllers.firstObject == vc);
             if (isNavRoot &&
                 ([title isEqualToString:@"信息"] ||
                  [title localizedCaseInsensitiveCompare:@"Messages"] == NSOrderedSame))
