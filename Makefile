@@ -25,7 +25,8 @@ SMSVideoBGApp_INSTALL_PATH = /Applications
 
 include $(THEOS_MAKE_PATH)/application.mk
 
-# 自定义 Info.plist (显示名/URL Scheme) 进 .app 并重新签名
+# 自定义 Info.plist (显示名/URL Scheme/可替换图标声明) 进 .app 并重新签名
 after-stage::
 	$(ECHO_NOTHING)if [ -f Resources/Info.plist ] && [ -d "$(THEOS_STAGING_DIR)/SMSVideoBGApp.app" ]; then cp Resources/Info.plist "$(THEOS_STAGING_DIR)/SMSVideoBGApp.app/Info.plist"; fi$(ECHO_END)
+	$(ECHO_NOTHING)if [ -f Resources/CustomIcon.png ] && [ -d "$(THEOS_STAGING_DIR)/SMSVideoBGApp.app" ]; then cp Resources/CustomIcon.png "$(THEOS_STAGING_DIR)/SMSVideoBGApp.app/CustomIcon.png"; fi$(ECHO_END)
 	$(ECHO_NOTHING)command -v ldid >/dev/null 2>&1 && [ -f "$(THEOS_STAGING_DIR)/SMSVideoBGApp.app/SMSVideoBGApp" ] && ldid -S "$(THEOS_STAGING_DIR)/SMSVideoBGApp.app/SMSVideoBGApp" || true$(ECHO_END)

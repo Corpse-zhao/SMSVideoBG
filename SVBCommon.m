@@ -887,6 +887,63 @@ static BOOL SVBCopyInto(NSString *srcPath, NSString *dir, NSString *name, NSErro
     [self postChangeNotification];
 }
 
+// v1.8.3: 重命名素材 —— 所有根目录副本一并改名 (导入是多根同步的), 返回最终名字
+// (输入已消毒/去重)。改名的是使用中素材时同步更新配置。
+- (NSString *)renameVideoName:(NSString *)name to:(NSString *)newName forContext:(NSString *)ctx {
+    // 消毒: 去首尾空白, 剔除路径分隔符与控制字符, 不允许为空
+    newName = [newName stringByTrimmingCharactersInSet:
+               [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    NSCharacterSet *bad = [[NSCharacterSet characterSetWithCharactersInString:@"/\\:?%*|\"<>"]
+                           unionWithSet:[NSCharacterSet controlCharacterSet]];
+    newName = [[newName componentsSeparatedByCharactersInSet:bad]
+               componentsJoinedByString:@"_"];
+    if (!newName.length) return nil;
+
+    // 保留原扩展名 (视频文件识别依赖扩展名)
+    NSString *oldExt = name.pathExtension;
+    if (oldExt.length && ![newName.pathExtension.lowercaseString isEqualToString:oldExt.lowercaseString])
+        newName = [newName stringByAppendingPathExtension:oldExt];
+
+    // 与现存素材重名 -> 自动加序号
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *finalName = newName;
+    NSArray<NSString *> *dirs = [self directoriesForContext:ctx includeRootFallback:YES];
+    __block BOOL exists = NO;
+    for (int i = 2; i < 100; i++) {
+        exists = NO;
+        for (NSString *dir in dirs) {
+            if ([fm fileExistsAtPath:[dir stringByAppendingPathComponent:finalName]]) { exists = YES; break; }
+        }
+        if (!exists) break;
+        NSString *base = newName.stringByDeletingPathExtension;
+        finalName = [NSString stringWithFormat:@"%@ (%d).%@", base, i, newName.pathExtension];
+    }
+    if (exists) return nil; // 尝试 100 次仍重名, 放弃
+
+    // 逐个根目录改名
+    BOOL renamed = NO;
+    for (NSString *dir in dirs) {
+        NSString *src = [dir stringByAppendingPathComponent:name];
+        if ([fm fileExistsAtPath:src]) {
+            NSError *err = nil;
+            if ([fm moveItemAtPath:src
+                            toPath:[dir stringByAppendingPathComponent:finalName]
+                             error:&err]) {
+                renamed = YES;
+            } else {
+                [self log:@"重命名失败 %@ -> %@: %@", name, finalName, err.localizedDescription];
+            }
+        }
+    }
+    if (!renamed) return nil;
+
+    // 使用中素材改名 -> 配置同步
+    if ([[self configValueForKey:[ctx stringByAppendingString:@"_video"]] isEqualToString:name])
+        [self setActiveVideoName:finalName forContext:ctx];
+    [self postChangeNotification];
+    return finalName;
+}
+
 #pragma mark - 播放器 (每界面一个, 播完回开头循环)
 
 - (AVPlayer *)playerForContext:(NSString *)ctx forceRebuild:(BOOL)force {

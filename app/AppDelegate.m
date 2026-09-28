@@ -577,7 +577,7 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
     if (section == 0) return 1;
     if (section == 1) return (NSInteger)_defs.count;
     if (section == 2) return 1; // 注入诊断横幅
-    return 2;
+    return 3; // 素材总目录 / 诊断报告 / App名称与图标 (v1.8.3)
 }
 
 - (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
@@ -679,13 +679,19 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
         c.textLabel.text = @"素材总目录";
         c.detailTextLabel.text = @"查看/复制路径";
         c.imageView.image = SVBIconForKey(@"__folder");
-    } else {
+    } else if (indexPath.row == 1) {
         c.textLabel.text = @"诊断报告";
         c.detailTextLabel.text = @"排查问题";
         c.imageView.image = SVBIconForKey(@"__diag");
+    } else {
+        c.textLabel.text = @"App 名称与图标";
+        c.detailTextLabel.text = @"自定义外观";
+        c.imageView.image = SVBBadgeIcon(@"paintbrush.fill",
+            [UIColor colorWithRed:1.00 green:0.62 blue:0.20 alpha:1],
+            [UIColor colorWithRed:1.00 green:0.45 blue:0.55 alpha:1]);
     }
     c.detailTextLabel.textColor = SVBAccent();
-    SVBApplyCardStyle(c, indexPath.row, 2);
+    SVBApplyCardStyle(c, indexPath.row, 3);
     return c;
 }
 
@@ -728,6 +734,10 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
     if (indexPath.section == 3) {
         if (indexPath.row == 1) {
             [self.navigationController pushViewController:[[SVBDiagnosticsController alloc] init] animated:YES];
+            return;
+        }
+        if (indexPath.row == 2) {
+            [self.navigationController pushViewController:[[SVBAppIdentityController alloc] init] animated:YES];
             return;
         }
         NSString *path = [NSString stringWithFormat:
@@ -963,9 +973,273 @@ forRowAtIndexPath:(NSIndexPath *)indexPath {
     [tableView reloadData];
 }
 
+// v1.8.3: 左滑动作 = 重命名 + 删除 (系统会自动优先用滑动动作, commitEditingStyle 保留兜底)
+- (UISwipeActionsConfiguration *)tableView:(UITableView *)tableView
+trailingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
+    if (indexPath.section != 1) return nil;
+    NSArray<NSString *> *videos = [[SVBManager shared] videosForContext:self.contextKey];
+    if (indexPath.row >= (NSInteger)videos.count) return nil; // 占位提示行不参与
+    NSString *name = videos[indexPath.row];
+    __weak typeof(self) wself = self;
+
+    UIContextualAction *rename = [UIContextualAction
+        contextualActionWithStyle:UIContextualActionStyleNormal
+                            title:@"重命名"
+                          handler:^(UIContextualAction *a, UIView *v, void (^done)(BOOL)) {
+        [wself renameVideoNamed:name];
+        done(YES);
+    }];
+    rename.backgroundColor = [UIColor systemIndigoColor];
+
+    UIContextualAction *del = [UIContextualAction
+        contextualActionWithStyle:UIContextualActionStyleDestructive
+                            title:@"删除"
+                          handler:^(UIContextualAction *a, UIView *v, void (^done)(BOOL)) {
+        [[SVBManager shared] deleteVideoName:name forContext:wself.contextKey];
+        [[SVBManager shared] refreshVisibleBackgrounds];
+        [wself.tableView reloadData];
+        done(YES);
+    }];
+
+    return [UISwipeActionsConfiguration configurationWithActions:@[rename, del]];
+}
+
+// 重命名弹窗: 文本框预填原名, 确认后改名 (改名的是使用中素材时配置自动同步)
+- (void)renameVideoNamed:(NSString *)name {
+    __weak typeof(self) wself = self;
+    UIAlertController *ac = [UIAlertController
+        alertControllerWithTitle:@"重命名素材"
+                         message:@"留空或无改动则取消"
+                  preferredStyle:UIAlertControllerStyleAlert];
+    [ac addTextField:^(UITextField *tf) {
+        tf.text = name.stringByDeletingPathExtension;
+        tf.clearButtonMode = UITextFieldViewModeAlways;
+        tf.returnKeyType = UIReturnKeyDone;
+    }];
+    [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    [ac addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+        NSString *input = ac.textFields.firstObject.text;
+        if (!input.length) return;
+        NSString *final = [[SVBManager shared] renameVideoName:name
+                                                            to:input
+                                                    forContext:wself.contextKey];
+        if (final) {
+            [[SVBManager shared] refreshVisibleBackgrounds];
+            [wself.tableView reloadData];
+        } else {
+            UIAlertController *fail = [UIAlertController
+                alertControllerWithTitle:@"重命名失败"
+                                 message:@"名字无效或与现有素材重名"
+                          preferredStyle:UIAlertControllerStyleAlert];
+            [fail addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
+            [wself presentViewController:fail animated:YES completion:nil];
+        }
+    }]];
+    [self presentViewController:ac animated:YES completion:nil];
+}
+
 - (void)importFromLibrary {
     // v1.7: 多选批量导入 + 进度提示 + 失败原因汇总 (实现见文件顶部 SVBAppImportFromLibrary)
     SVBAppImportFromLibrary(self, self.contextKey);
+}
+
+@end
+
+#pragma mark - App 名称与图标 (v1.8.3)
+
+// 调起相册选「一张图片」(图标用), 复用视频选择器的运行时代理套路
+static void SVBAppPickImage(UIViewController *host, void (^done)(UIImage *image)) {
+    void *h = dlopen("/System/Library/Frameworks/PhotosUI.framework/PhotosUI", RTLD_LAZY);
+    Class pickerCls = h ? NSClassFromString(@"PHPickerViewController") : nil;
+    Class cfgCls    = h ? NSClassFromString(@"PHPickerConfiguration") : nil;
+    if (!pickerCls || !cfgCls) {
+        UIAlertController *ac = [UIAlertController
+            alertControllerWithTitle:@"暂不可用" message:@"无法调起相册选择器"
+                      preferredStyle:UIAlertControllerStyleAlert];
+        [ac addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
+        [host presentViewController:ac animated:YES completion:nil];
+        return;
+    }
+    id cfg = [[cfgCls alloc] init];
+    Class filterCls = NSClassFromString(@"PHPickerFilter");
+    if (filterCls) {
+        id filter = ((id (*)(id, SEL))objc_msgSend)(filterCls, @selector(imagesFilter));
+        ((void (*)(id, SEL, id))objc_msgSend)(cfg, @selector(setFilter:), filter);
+    }
+    ((void (*)(id, SEL, long))objc_msgSend)(cfg, @selector(setSelectionLimit:), (long)1);
+
+    id pc = ((id (*)(id, SEL))objc_msgSend)(pickerCls, @selector(alloc));
+    pc    = ((id (*)(id, SEL, id))objc_msgSend)(pc, @selector(initWithConfiguration:), cfg);
+
+    Class proxyCls = objc_getClass("SVBPickerProxy");
+    if (!proxyCls) {
+        proxyCls = objc_allocateClassPair([NSObject class], "SVBPickerProxy", 0);
+        class_addMethod(proxyCls, @selector(picker:didFinishPicking:),
+                        imp_implementationWithBlock(^(id self, id picker, NSArray *results) {
+            NSArray *list = [results isKindOfClass:[NSArray class]] ? results : @[];
+            void (^handler)(NSArray *) = objc_getAssociatedObject(picker, "doneBlock");
+            [picker dismissViewControllerAnimated:YES completion:^{
+                if (list.count && handler) handler(list);
+            }];
+        }), "v@:@@");
+        objc_registerClassPair(proxyCls);
+    }
+    id proxy = [[proxyCls alloc] init];
+    objc_setAssociatedObject(pc, &SVBProxyAssocKey, proxy, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(pc, "doneBlock", ^(NSArray *results) {
+        // 取出图片 (loadObjectOfClass 是 UIKit 公开分类方法)
+        NSItemProvider *provider = [results.firstObject respondsToSelector:@selector(itemProvider)]
+                                   ? [results.firstObject itemProvider] : nil;
+        if (!provider) { if (done) done(nil); return; }
+        [provider loadObjectOfClass:[UIImage class]
+                  completionHandler:^(id obj, NSError *err) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                UIImage *img = [obj isKindOfClass:[UIImage class]] ? obj : nil;
+                // PNG/HEIC 拿到的可能是带方向的 -> 规范化重绘
+                if (img && img.imageOrientation != UIImageOrientationUp) {
+                    UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc]
+                        initWithSize:img.size];
+                    img = [r imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
+                        [img drawInRect:(CGRect){CGPointZero, img.size}];
+                    }];
+                }
+                if (done) done(img);
+            });
+        }];
+    }, OBJC_ASSOCIATION_COPY_NONATOMIC);
+    ((void (*)(id, SEL, id))objc_msgSend)(pc, @selector(setDelegate:), proxy);
+    [host presentViewController:pc animated:YES completion:nil];
+}
+
+@implementation SVBAppIdentityController {
+    UIImageView *_iconPreview;
+}
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.title = @"App 名称与图标";
+    self.tableView.backgroundColor = [UIColor systemGroupedBackgroundColor];
+}
+
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView { return 1; }
+- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section { return 2; }
+
+- (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
+    return @"名称：保存后注销（Respring）生效。\n图标：从相册选一张方图即可，系统会弹窗确认，立即生效；想改回来再选一次原图就行。";
+}
+
+- (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
+    // 两行分开复用符: 防图标预览 accessoryView 串到名称行
+    static NSString *idName  = @"svb-identity-name";
+    static NSString *idIcon  = @"svb-identity-icon";
+    UITableViewCell *c = [tableView dequeueReusableCellWithIdentifier:
+                          indexPath.row == 0 ? idName : idIcon];
+    if (!c) c = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1
+                                       reuseIdentifier:indexPath.row == 0 ? idName : idIcon];
+    if (indexPath.row == 0) {
+        c.textLabel.text = @"App 名称";
+        NSString *cur = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleDisplayName"];
+        c.detailTextLabel.text = cur.length ? cur : @"信息视频背景";
+    } else {
+        c.textLabel.text = @"App 图标";
+        // 预览当前图标 (bundle 根目录 CustomIcon.png)
+        NSString *iconPath = [[NSBundle mainBundle] pathForResource:@"CustomIcon" ofType:@"png"];
+        UIImage *img = iconPath ? [UIImage imageWithContentsOfFile:iconPath] : nil;
+        if (!c.accessoryView) {
+            _iconPreview = [[UIImageView alloc] initWithFrame:CGRectMake(0, 0, 44, 44)];
+            _iconPreview.layer.cornerRadius = 10;
+            _iconPreview.layer.masksToBounds = YES;
+            _iconPreview.contentMode = UIViewContentModeScaleAspectFill;
+            _iconPreview.layer.borderWidth = 0.5;
+            _iconPreview.layer.borderColor = [UIColor separatorColor].CGColor;
+            c.accessoryView = _iconPreview;
+        }
+        _iconPreview.image = img;
+    }
+    c.detailTextLabel.textColor = [UIColor secondaryLabelColor];
+    c.textLabel.font = [UIFont systemFontOfSize:17];
+    SVBApplyCardStyle(c, indexPath.row, 2);
+    return c;
+}
+
+- (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
+    [tableView deselectRowAtIndexPath:indexPath animated:YES];
+    if (indexPath.row == 0) [self renameApp];
+    else [self changeIcon];
+}
+
+// 改名称: 写回 bundle 的 Info.plist (CFBundleDisplayName + CFBundleName), 注销后生效
+- (void)renameApp {
+    NSString *cur = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleDisplayName"] ?: @"信息视频背景";
+    UIAlertController *ac = [UIAlertController
+        alertControllerWithTitle:@"App 名称" message:@"注销（Respring）后生效" preferredStyle:UIAlertControllerStyleAlert];
+    [ac addTextField:^(UITextField *tf) { tf.text = cur; }];
+    [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    [ac addAction:[UIAlertAction actionWithTitle:@"保存" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+        NSString *name = ac.textFields.firstObject.text;
+        name = [name stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (!name.length) return;
+        NSString *plistPath = [[NSBundle mainBundle] pathForResource:@"Info" ofType:@"plist"];
+        NSMutableDictionary *plist = [NSMutableDictionary dictionaryWithContentsOfFile:plistPath];
+        if (!plist) { [self alert:@"写入失败" msg:@"Info.plist 不可读"]; return; }
+        plist[@"CFBundleDisplayName"] = name;
+        plist[@"CFBundleName"]        = name;
+        if ([plist writeToFile:plistPath atomically:YES]) {
+            [self alert:@"已保存" msg:@"名称已写入，注销后生效。"];
+        } else {
+            [self alert:@"写入失败" msg:@"App 包目录不可写。"];
+        }
+        [self.tableView reloadData];
+    }]];
+    [self presentViewController:ac animated:YES completion:nil];
+}
+
+// 换图标: 居中裁方 -> 1024 PNG 覆写 bundle 里的 CustomIcon.png -> 系统换图标 API
+- (void)changeIcon {
+    __weak typeof(self) wself = self;
+    SVBAppPickImage(self, ^(UIImage *image) {
+        if (!image) return;
+        // 居中裁方
+        CGFloat side = MIN(image.size.width, image.size.height);
+        CGRect crop = CGRectMake((image.size.width - side) / 2,
+                                 (image.size.height - side) / 2, side, side);
+        CGImageRef cg = CGImageCreateWithImageInRect(image.CGImage, crop);
+        if (!cg) { [wself alert:@"处理失败" msg:@"图片无法读取"]; return; }
+        UIImage *square = [UIImage imageWithCGImage:cg];
+        CGImageRelease(cg);
+        // 缩到 1024 并转 PNG 写入 bundle
+        UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc]
+            initWithSize:CGRectMake(0, 0, 1024, 1024).size];
+        UIImage *out = [r imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
+            [square drawInRect:CGRectMake(0, 0, 1024, 1024)];
+        }];
+        NSData *png = UIImagePNGRepresentation(out);
+        NSString *iconPath = [[NSBundle mainBundle] pathForResource:@"CustomIcon" ofType:@"png"];
+        if (!png || !iconPath || ![png writeToFile:iconPath atomically:YES]) {
+            [wself alert:@"写入失败" msg:@"App 包目录不可写，无法更新图标文件。"];
+            return;
+        }
+        // 系统 API 换图标 (会弹系统确认框, 立即生效)
+        if (@available(iOS 10.3, *)) {
+            [[UIApplication sharedApplication]
+                setAlternateIconName:@"CustomIcon"
+                   completionHandler:^(NSError *err) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    if (err) [wself alert:@"换图标失败" msg:err.localizedDescription];
+                    else     [wself alert:@"已更换"  msg:@"桌面图标已更新。"];
+                });
+            }];
+        }
+        [wself.tableView reloadData];
+    });
+}
+
+- (void)alert:(NSString *)title msg:(NSString *)msg {
+    UIAlertController *ac = [UIAlertController alertControllerWithTitle:title
+                                                               message:msg
+                                                        preferredStyle:UIAlertControllerStyleAlert];
+    [ac addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
+    [self presentViewController:ac animated:YES completion:nil];
 }
 
 @end

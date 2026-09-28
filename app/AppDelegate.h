@@ -24,3 +24,6 @@
 
 @interface SVBDiagnosticsController : UIViewController
 @end
+
+@interface SVBAppIdentityController : UITableViewController
+@end
