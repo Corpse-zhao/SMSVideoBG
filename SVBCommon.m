@@ -170,6 +170,7 @@ static char SVBBGKey;
 static char SVBBubbleOrigColorKey;   // 气泡原始底色 (v1.7.4: 半透明化时保留文字清晰)
 static char SVBBubbleOrigContentsKey; // v1.7.5: 气泡原始 layer.contents (气泡底图)
 static char SVBBubbleOrigAlphaKey;    // v1.7.9: 气泡原始 alpha (最低档彻底隐藏时缓存)
+static char SVBOrigEffectKey;         // v1.7.13: 原始 UIVisualEffectView.effect (原样档恢复材质)
 static BOOL SVBBalloonDrawSwizzled = NO; // v1.7.7: 气泡 drawRect 拦截只做一次
 static BOOL SVBHierarchyDumped = NO;     // v1.7.8: 聊天页层级转储只做一次
 static NSString *SVBLastHeartbeatTag = nil;
@@ -1121,9 +1122,25 @@ static void SVBCollectToolbars(UIView *view, NSMutableArray<UIToolbar *> *out_, 
         // 键盘整棵子树跳过 (拆键盘模糊会毁掉键盘观感)
         if ([low containsString:@"keyboard"]) continue;
         if (depth <= 3) [self logClassOnce:cls context:ctx];
-        // 材质模糊层: 底部栏/输入条的白雾就是它 -> 直接拆
+        // 材质模糊层: 底部栏/输入条的白雾就是它 -> 直接拆。
+        // v1.7.13: 先缓存原始 effect; **聊天页「原样」档不拆** —— iOS16 的 backdrop 特效
+        // 视图被拆成 nil 后会渲染成纯黑块 (用户截图实锤: 原样档气泡=黑块+隐约文字),
+        // 原样=看消息模式, 材质恢复原样; 透明/隐藏档才拆。
         if ([sub isKindOfClass:[UIVisualEffectView class]]) {
-            ((UIVisualEffectView *)sub).effect = nil;
+            UIVisualEffectView *ev = (UIVisualEffectView *)sub;
+            id origEff = objc_getAssociatedObject(ev, &SVBOrigEffectKey);
+            if (!origEff && ev.effect) {
+                objc_setAssociatedObject(ev, &SVBOrigEffectKey, ev.effect,
+                                         OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                origEff = ev.effect;
+            }
+            BOOL restoreNow = [ctx isEqualToString:SVBContextChat] &&
+                              [self bubbleAlphaForContext:ctx] >= 0.999;
+            if (restoreNow) {
+                if (origEff && !ev.effect) ev.effect = origEff;
+            } else {
+                ev.effect = nil;
+            }
             continue;
         }
         if ([sub isKindOfClass:[UILabel class]] || [sub isKindOfClass:[UIButton class]]) {
