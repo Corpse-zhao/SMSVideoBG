@@ -175,6 +175,13 @@ static NSString *SVBDetectListContext(UIViewController *vc, NSString *fallback) 
     return fallback;
 }
 
+// 横幅刷新 (注入探针进程也能用, 内容会标明是哪个 App)
+static void SVBRefreshBanner(NSString *ctx) {
+    @try {
+        SVBShowDebugBanner([[SVBManager shared] bannerTextForContext:ctx]);
+    } @catch (NSException *e) {}
+}
+
 // v1.7.18: 主页面容器清扫 —— 选择页的单元格是 CK 私有类, 不是 UICollectionViewListCell
 // (全局清底 hook 对它无效), 白色圆角底来自 cell 或其内部容器的 backgroundColor。
 // 递归清掉所有普通容器的底色 (文字/图标/控件/输入框/材质视图不动), 延迟补扫两次
@@ -234,12 +241,6 @@ static void SVBPrefsChanged(CFNotificationCenterRef center, void *observer,
     [[SVBManager shared] refreshVisibleBackgrounds];
 }
 
-// 横幅刷新 (注入探针进程也能用, 内容会标明是哪个 App)
-static void SVBRefreshBanner(NSString *ctx) {
-    @try {
-        SVBShowDebugBanner([[SVBManager shared] bannerTextForContext:ctx]);
-    } @catch (NSException *e) {}
-}
 
 #pragma mark - 信息 App Hook
 
