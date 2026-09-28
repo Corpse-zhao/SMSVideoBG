@@ -423,7 +423,9 @@ static void SVBApplyMainPage(UIViewController *vc) {
     SVBClearContainerBGs(vc.view, 0);
     SVBRefreshBanner(SVBContextMain);
     __weak UIViewController *wvc = vc;
-    for (NSTimeInterval t in (@[@0.45, @1.2])) {
+    NSTimeInterval delays[2] = {0.45, 1.2};
+    for (int i = 0; i < 2; i++) {
+        NSTimeInterval t = delays[i];
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(t * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
             @try {
