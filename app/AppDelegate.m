@@ -659,9 +659,11 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
             };
         } else {
             // v1.7.3: 气泡不透明度 (仅对话详情; v1.7.4 只调气泡底色, 文字始终清晰)
+            // v1.7.9: 最低档 = 气泡连文字彻底隐藏 (看视频时全透明, 看消息拉高)
             [c setTitle:@"气泡不透明度" value:[mgr bubbleAlphaForContext:self.contextKey] max:1.0
                     display:^NSString *(double v) {
                         if (v >= 0.999) return @"原样";
+                        if (v <= 0.001) return @"隐藏气泡";
                         if (v <= 0.06)  return @"仅文字";
                         return [NSString stringWithFormat:@"%.0f%%", v * 100];
                     }];

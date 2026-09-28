@@ -169,6 +169,7 @@ static BOOL SVBDirWritable(NSString *dir) {
 static char SVBBGKey;
 static char SVBBubbleOrigColorKey;   // 气泡原始底色 (v1.7.4: 半透明化时保留文字清晰)
 static char SVBBubbleOrigContentsKey; // v1.7.5: 气泡原始 layer.contents (气泡底图)
+static char SVBBubbleOrigAlphaKey;    // v1.7.9: 气泡原始 alpha (最低档彻底隐藏时缓存)
 static BOOL SVBBalloonDrawSwizzled = NO; // v1.7.7: 气泡 drawRect 拦截只做一次
 static BOOL SVBHierarchyDumped = NO;     // v1.7.8: 聊天页层级转储只做一次
 static NSString *SVBLastHeartbeatTag = nil;
@@ -205,6 +206,9 @@ BOOL SVBDirWritablePath(NSString *dir) {
 - (void)deepChromePass:(UIView *)view depth:(NSInteger)depth ctx:(NSString *)ctx;
 - (void)bubblePass:(UIView *)view depth:(NSInteger)depth inCell:(BOOL)inCell ctx:(NSString *)ctx;
 - (void)applyBubbleAlpha:(UIView *)balloon ctx:(NSString *)ctx;
+- (void)hideViewTemporarily:(UIView *)v;   // v1.7.9
+- (void)restoreViewAlpha:(UIView *)v;      // v1.7.9
+- (BOOL)subtreeContainsVideoBg:(UIView *)view depth:(NSInteger)depth; // v1.7.9
 - (BOOL)viewHasTextDescendant:(UIView *)view depth:(NSInteger)depth;
 - (BOOL)viewHasImageDescendant:(UIView *)view depth:(NSInteger)depth;
 - (void)clearDrawnBackgroundsOf:(UIView *)view depth:(NSInteger)depth on:(BOOL)on;
@@ -1155,7 +1159,25 @@ static void SVBCollectToolbars(UIView *view, NSMutableArray<UIToolbar *> *out_, 
         BOOL cell = inCell || [sub isKindOfClass:[UICollectionViewCell class]] ||
                                [sub isKindOfClass:[UITableViewCell class]];
         if (cell && depth <= 5) [self logClassOnce:cls context:ctx];
+        CGFloat ba = [self bubbleAlphaForContext:ctx];
         if (cell) {
+            // v1.7.9: 最低档把气泡/装饰/背景类容器连内容彻底隐藏 (雾的宿主不一定是 balloon 命名)
+            BOOL hideCandidate = [low containsString:@"balloon"] ||
+                                 [low containsString:@"bubble"] ||
+                                 [low containsString:@"background"] ||
+                                 [low containsString:@"decoration"] ||
+                                 [low containsString:@"platter"] ||
+                                 [low containsString:@"mask"] ||
+                                 [low containsString:@"shape"] ||
+                                 [low containsString:@"fill"];
+            if (hideCandidate && ![sub isKindOfClass:[UIImageView class]] &&
+                ![sub isKindOfClass:[UILabel class]]) {
+                if (ba <= 0.001 && ![self subtreeContainsVideoBg:sub depth:0]) {
+                    [self hideViewTemporarily:sub];
+                } else {
+                    [self restoreViewAlpha:sub]; // 拉高滑条: 恢复曾被隐藏的容器
+                }
+            }
             if ([low containsString:@"balloon"] || [low containsString:@"bubble"]) {
                 [self applyBubbleAlpha:sub ctx:ctx];
             } else if (![sub isKindOfClass:[UILabel class]] &&
@@ -1167,6 +1189,23 @@ static void SVBCollectToolbars(UIView *view, NSMutableArray<UIToolbar *> *out_, 
             }
             // v1.7.6: 文字可读性 —— 气泡底被拆掉后, 白字压亮视频会看不清, 加深色投影
             if ([self bubbleAlphaForContext:ctx] < 0.999) [self applyTextShadow:sub];
+        }
+        // v1.7.9: 最低档把消息区里非 cell 层的装饰/背景类容器也隐藏 (雾可能横跨整组消息,
+        // 宿主不在任何 cell 里); 拉高滑条时恢复。控件/文字/图片/输入框不误伤。
+        if (ba <= 0.001 &&
+            ([low containsString:@"background"] || [low containsString:@"decoration"] ||
+             [low containsString:@"platter"] || [low containsString:@"balloon"] ||
+             [low containsString:@"bubble"] || [low containsString:@"mask"] ||
+             [low containsString:@"shape"] || [low containsString:@"fill"]) &&
+            ![sub isKindOfClass:[UIImageView class]] &&
+            ![sub isKindOfClass:[UILabel class]] &&
+            ![sub isKindOfClass:[UIControl class]] &&
+            ![sub isKindOfClass:[UITextField class]] &&
+            ![sub isKindOfClass:[UIVisualEffectView class]] &&
+            ![self subtreeContainsVideoBg:sub depth:0]) {
+            [self hideViewTemporarily:sub];
+        } else {
+            [self restoreViewAlpha:sub];
         }
         // v1.7.6: 浅雾兜底 —— 残留的半透明白容器可能不在 cell 内 (transcript 与 cell 之间的
         // 中间层), 气泡透明开启时聊天页内所有普通容器一律清底色 (控件/文字/图片/效果视图除外)
@@ -1204,6 +1243,14 @@ static void SVBCollectToolbars(UIView *view, NSMutableArray<UIToolbar *> *out_, 
 - (void)applyBubbleAlpha:(UIView *)balloon ctx:(NSString *)ctx {
     CGFloat ba = [self bubbleAlphaForContext:ctx];
     @try {
+        // v1.7.9: 滑条最低档 (ba<=0.001) = 气泡连文字**彻底隐藏** (用户方案)。
+        // 整个视图 alpha=0 —— 文字、底色、底图、甚至拦不住的 drawRect 自绘内容全部一起
+        // 消失 (alpha 作用于整棵子树的合成结果), 视频完整透出来; 想看消息拉高滑条即可。
+        if (ba <= 0.001 && ![self subtreeContainsVideoBg:balloon depth:0]) {
+            [self hideViewTemporarily:balloon];
+            return;
+        }
+        [self restoreViewAlpha:balloon]; // 从隐藏档拉回来时恢复
         UIColor *orig = objc_getAssociatedObject(balloon, &SVBBubbleOrigColorKey);
         if (!orig) { // 第一次遇到: 记下原始底色
             UIColor *cur = balloon.backgroundColor;
@@ -1254,6 +1301,35 @@ static void SVBCollectToolbars(UIView *view, NSMutableArray<UIToolbar *> *out_, 
     for (UIView *sub in view.subviews) {
         if ([sub isKindOfClass:[UIImageView class]]) return YES;
         if ([self viewHasImageDescendant:sub depth:depth + 1]) return YES;
+    }
+    return NO;
+}
+
+// v1.7.9: 彻底隐藏视图 —— 缓存原 alpha 后置 0 (连 drawRect 自绘内容一起消失)。
+- (void)hideViewTemporarily:(UIView *)v {
+    NSNumber *orig = objc_getAssociatedObject(v, &SVBBubbleOrigAlphaKey);
+    if (!orig) {
+        orig = @(v.alpha);
+        objc_setAssociatedObject(v, &SVBBubbleOrigAlphaKey, orig,
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    v.alpha = 0.0;
+}
+
+// v1.7.9: 从隐藏档拉回来时恢复原 alpha。
+- (void)restoreViewAlpha:(UIView *)v {
+    NSNumber *orig = objc_getAssociatedObject(v, &SVBBubbleOrigAlphaKey);
+    if (orig && v.alpha <= 0.001 && [orig doubleValue] > 0.001) {
+        v.alpha = [orig doubleValue];
+    }
+}
+
+// v1.7.9: 安全阀 —— 视频背景视图若在某容器子树里, 该容器绝不能整体隐藏 (会把视频也藏了)。
+- (BOOL)subtreeContainsVideoBg:(UIView *)view depth:(NSInteger)depth {
+    if (depth > 8) return NO;
+    for (UIView *sub in view.subviews) {
+        if ([sub isKindOfClass:[SVBVideoBackgroundView class]]) return YES;
+        if ([self subtreeContainsVideoBg:sub depth:depth + 1]) return YES;
     }
     return NO;
 }
