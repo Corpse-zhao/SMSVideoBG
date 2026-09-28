@@ -1207,7 +1207,7 @@ static void SVBCollectToolbars(UIView *view, NSMutableArray<UIToolbar *> *out_, 
         // 这就是「气泡还是实心白、白底上白字看不见」的来源。文字在子视图里, 清 contents 不影响文字。
         id origImg = objc_getAssociatedObject(balloon, &SVBBubbleOrigContentsKey);
         if (!origImg && balloon.layer.contents) {
-            origImg = (__bridge id)balloon.layer.contents;
+            origImg = balloon.layer.contents;
             objc_setAssociatedObject(balloon, &SVBBubbleOrigContentsKey, origImg,
                                      OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         }
