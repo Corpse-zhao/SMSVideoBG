@@ -168,6 +168,7 @@ static BOOL SVBDirWritable(NSString *dir) {
 
 static char SVBBGKey;
 static char SVBBubbleOrigColorKey;   // 气泡原始底色 (v1.7.4: 半透明化时保留文字清晰)
+static char SVBBubbleOrigContentsKey; // v1.7.5: 气泡原始 layer.contents (气泡底图)
 static NSString *SVBLastHeartbeatTag = nil;
 
 // 从视图向上找宿主 VC (chrome 节流补扫需要)
@@ -203,6 +204,8 @@ BOOL SVBDirWritablePath(NSString *dir) {
 - (void)bubblePass:(UIView *)view depth:(NSInteger)depth inCell:(BOOL)inCell ctx:(NSString *)ctx;
 - (void)applyBubbleAlpha:(UIView *)balloon ctx:(NSString *)ctx;
 - (BOOL)viewHasTextDescendant:(UIView *)view depth:(NSInteger)depth;
+- (BOOL)viewHasImageDescendant:(UIView *)view depth:(NSInteger)depth;
+- (void)clearDrawnBackgroundsOf:(UIView *)view depth:(NSInteger)depth on:(BOOL)on;
 - (void)refreshInView:(UIView *)view;
 - (void)playerDidEnd:(NSNotification *)n;
 @end
@@ -1200,7 +1203,52 @@ static void SVBCollectToolbars(UIView *view, NSMutableArray<UIToolbar *> *out_, 
             balloon.layer.backgroundColor = NULL;
             if (ba < 0.999 && ![self viewHasTextDescendant:balloon depth:0]) balloon.alpha = ba;
         }
+        // v1.7.5: 气泡底如果画在 layer.contents (可拉伸气泡图片) 上, 清底色是没用的——
+        // 这就是「气泡还是实心白、白底上白字看不见」的来源。文字在子视图里, 清 contents 不影响文字。
+        id origImg = objc_getAssociatedObject(balloon, &SVBBubbleOrigContentsKey);
+        if (!origImg && balloon.layer.contents) {
+            origImg = (__bridge id)balloon.layer.contents;
+            objc_setAssociatedObject(balloon, &SVBBubbleOrigContentsKey, origImg,
+                                     OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+        if (ba < 0.999) {
+            if (origImg) balloon.layer.contents = NULL; // 拆掉气泡底图
+            [self clearDrawnBackgroundsOf:balloon depth:0 on:YES];
+        } else if (origImg) {
+            balloon.layer.contents = origImg;           // 拉回「原样」时恢复底图
+            [self clearDrawnBackgroundsOf:balloon depth:0 on:NO];
+        }
     } @catch (NSException *e) {}
+}
+
+// 视图树里有没有 UIImageView (有图片内容的气泡——如照片消息——不能拆底图, 会把照片也拆掉)
+- (BOOL)viewHasImageDescendant:(UIView *)view depth:(NSInteger)depth {
+    if (depth > 5) return NO;
+    for (UIView *sub in view.subviews) {
+        if ([sub isKindOfClass:[UIImageView class]]) return YES;
+        if ([self viewHasImageDescendant:sub depth:depth + 1]) return YES;
+    }
+    return NO;
+}
+
+// v1.7.5: 清除/恢复气泡里「画背景」的子视图 (类名含 background/mask/shape/fill 的绘制视图)。
+// 只动没有文字、没有图片内容的子视图; on=NO 时按缓存恢复 (恢复路径简单起见仅清层内容——
+// 实际使用中滑到「原样」的场景少见, 主要保证不崩、可恢复底图)。
+- (void)clearDrawnBackgroundsOf:(UIView *)view depth:(NSInteger)depth on:(BOOL)on {
+    if (depth > 4) return;
+    for (UIView *sub in view.subviews) {
+        NSString *low = NSStringFromClass([sub class]).lowercaseString;
+        BOOL drawer = [low containsString:@"background"] || [low containsString:@"mask"] ||
+                      [low containsString:@"shape"] || [low containsString:@"fill"];
+        if (drawer && ![self viewHasTextDescendant:sub depth:0] &&
+            ![self viewHasImageDescendant:sub depth:0]) {
+            if (on) {
+                sub.backgroundColor = nil;
+                sub.layer.contents = NULL;
+            }
+        }
+        [self clearDrawnBackgroundsOf:sub depth:depth + 1 on:on];
+    }
 }
 
 - (void)refreshVisibleBackgrounds {
