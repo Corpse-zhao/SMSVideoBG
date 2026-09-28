@@ -205,6 +205,8 @@ BOOL SVBDirWritablePath(NSString *dir) {
 - (void)clearBackgroundsOfView:(UIView *)view depth:(NSInteger)depth;
 - (void)deepChromePass:(UIView *)view depth:(NSInteger)depth ctx:(NSString *)ctx;
 - (void)bubblePass:(UIView *)view depth:(NSInteger)depth inCell:(BOOL)inCell ctx:(NSString *)ctx;
+- (void)dumpVisibleResidue:(UIView *)view ctx:(NSString *)ctx;   // v1.7.12
+- (void)collectResidue:(UIView *)v depth:(NSInteger)depth effAlpha:(CGFloat)ea into:(NSMutableString *)out; // v1.7.12
 - (void)applyBubbleAlpha:(UIView *)balloon ctx:(NSString *)ctx;
 - (void)hideViewTemporarily:(UIView *)v;   // v1.7.9
 - (void)restoreViewAlpha:(UIView *)v;      // v1.7.9
@@ -1181,15 +1183,16 @@ static void SVBCollectToolbars(UIView *view, NSMutableArray<UIToolbar *> *out_, 
             // v1.7.6: 文字可读性 —— 气泡底被拆掉后, 白字压亮视频会看不清, 加深色投影
             if ([self bubbleAlphaForContext:ctx] < 0.999) [self applyTextShadow:sub];
         }
-        // v1.7.11: 隐藏档非 cell 层同样无差别全藏 (黑块/雾宿主类名未知, 不再枚举关键词),
-        // 控件/输入框/图片/效果视图除外; 拉高滑条时全部恢复。
+        // v1.7.12: 隐藏档非 cell 层全藏, 豁免名单再缩——UIVisualEffectView (暗色材质)
+        // 也拆 effect + 藏掉 (deepChromePass 已拆过 effect, 这里双保险)。
         if (ba <= 0.06 &&
             ![sub isKindOfClass:[UIImageView class]] &&
             ![sub isKindOfClass:[UIButton class]] &&
             ![sub isKindOfClass:[UIControl class]] &&
             ![sub isKindOfClass:[UITextField class]] &&
-            ![sub isKindOfClass:[UIVisualEffectView class]] &&
             ![self subtreeContainsVideoBg:sub depth:0]) {
+            if ([sub isKindOfClass:[UIVisualEffectView class]])
+                ((UIVisualEffectView *)sub).effect = nil;
             [self hideViewTemporarily:sub];
         } else {
             [self restoreViewAlpha:sub];
@@ -1207,6 +1210,40 @@ static void SVBCollectToolbars(UIView *view, NSMutableArray<UIToolbar *> *out_, 
             if (sub.layer.backgroundColor) sub.layer.backgroundColor = NULL;
         }
         [self bubblePass:sub depth:depth + 1 inCell:cell ctx:ctx];
+    }
+    // v1.7.12: 隐藏档跑完后扫一遍「还没藏住」的视图写诊断日志 (有效 alpha 计算到根)
+    if (depth == 0 && [self bubbleAlphaForContext:ctx] <= 0.06) {
+        [self dumpVisibleResidue:view ctx:ctx];
+    }
+}
+
+// v1.7.12: 残留元素报告 —— 隐藏档开启时, 把消息区里**还没被藏住**的视图 (有效 alpha>0.01
+// 且未 hidden) 写进诊断日志; 用户再反馈黑块/白雾时可直接指认宿主类名。10s 节流。
+- (void)dumpVisibleResidue:(UIView *)view ctx:(NSString *)ctx {
+    static NSTimeInterval lastDump = 0;
+    NSTimeInterval now = [NSDate date].timeIntervalSince1970;
+    if (now - lastDump < 10) return;
+    lastDump = now;
+    NSMutableString *out = [NSMutableString stringWithFormat:@"=== 隐藏档残留报告 (%@) ===\n", ctx];
+    [self collectResidue:view depth:0 effAlpha:1.0 into:out];
+    [out appendString:@"=== 残留报告结束 ===\n"];
+    [self log:@"%@", out];
+}
+
+- (void)collectResidue:(UIView *)v depth:(NSInteger)depth effAlpha:(CGFloat)ea into:(NSMutableString *)out {
+    if (depth > 12) return;
+    for (UIView *sub in v.subviews) {
+        if ([sub isKindOfClass:[SVBVideoBackgroundView class]]) continue;
+        NSString *low = NSStringFromClass([sub class]).lowercaseString;
+        if ([low containsString:@"keyboard"]) continue;
+        CGFloat e = ea * sub.alpha;
+        if (e > 0.01 && !sub.hidden &&
+            sub.frame.size.width > 2 && sub.frame.size.height > 2) {
+            [out appendFormat:@"  RESIDUE d=%ld %@ f=%@ al=%.2f eff=%.2f\n",
+             (long)depth, NSStringFromClass([sub class]),
+             NSStringFromCGRect(sub.frame), sub.alpha, e];
+        }
+        [self collectResidue:sub depth:depth + 1 effAlpha:e into:out];
     }
 }
 
