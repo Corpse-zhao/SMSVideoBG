@@ -1328,7 +1328,7 @@ static void SVBCollectToolbars(UIView *view, NSMutableArray<UIToolbar *> *out_, 
         // (雾可能横跨整组消息 = 分组装饰背景 decoration view, 不一定是气泡)
         int num = objc_getClassList(NULL, 0);
         if (num > 0) {
-            Class *classes = (__bridge Class *)malloc(sizeof(Class) * num);
+            __unsafe_unretained Class *classes = (__unsafe_unretained Class *)malloc(sizeof(Class) * num);
             if (classes) {
                 num = objc_getClassList(classes, num);
                 for (int i = 0; i < num; i++) {
@@ -1373,7 +1373,7 @@ static void SVBCollectToolbars(UIView *view, NSMutableArray<UIToolbar *> *out_, 
     if (v.backgroundColor) { hasBg = [v.backgroundColor getRed:&r_ green:&g_ blue:&b_ alpha:&a_] || CGColorGetAlpha(v.backgroundColor.CGColor) > 0; a_ = CGColorGetAlpha(v.backgroundColor.CGColor); }
     BOOL isEffect = [v isKindOfClass:[UIVisualEffectView class]];
     [out appendFormat:@"%*s%@ f=%@ bg=%s%.2f ctn=%d fx=%d al=%.2f hd=%d\n",
-     depth * 2, "", NSStringFromClass(v.class), NSStringFromCGRect(v.frame),
+     (int)(depth * 2), "", NSStringFromClass(v.class), NSStringFromCGRect(v.frame),
      hasBg ? "y" : "n", a_, v.layer.contents != nil, isEffect, v.alpha, v.hidden];
     for (UIView *s in v.subviews) [self dumpHierarchyRec:s depth:depth + 1 into:out];
 }
