@@ -78,6 +78,17 @@ static BOOL SVBReturnsObject(Class cls, SEL s) {
 // 导航根判别失效 (信息App 内部用 split 容器, 主页面不是 nav 根), 标题判别失效
 // (主页面与「所有信息」列表同类同名, 日志实锤均为 CKConversationListCollectionViewController
 // + title「信息」)。过滤器行文字是选择页独有的, 列表页绝不会有。
+static void SVBScanForFilterRows(UIView *v, NSInteger depth, NSUInteger *hits, NSArray<NSString *> *rows) {
+    if (!v || depth > 8) return;
+    if ([v isKindOfClass:[UILabel class]]) {
+        NSString *t = ((UILabel *)v).text ?: @"";
+        for (NSString *row in rows) {
+            if ([t isEqualToString:row]) { (*hits)++; break; }
+        }
+    }
+    for (UIView *s in v.subviews) SVBScanForFilterRows(s, depth + 1, hits, rows);
+}
+
 static BOOL SVBIsFilterPickerScreen(UIViewController *vc) {
     if (!vc.view) return NO;
     static NSArray<NSString *> *rowTitles = nil;
@@ -85,18 +96,8 @@ static BOOL SVBIsFilterPickerScreen(UIViewController *vc) {
                                   @"未读信息", @"垃圾信息", @"最近删除",
                                   @"Known Senders", @"Unknown Senders",
                                   @"Unread Messages", @"Junk", @"Recently Deleted"];
-    __block NSUInteger hits = 0;
-    void (^scan)(UIView *, NSInteger) = ^(UIView *v, NSInteger d) {
-        if (!v || d > 8) return;
-        if ([v isKindOfClass:[UILabel class]]) {
-            NSString *t = ((UILabel *)v).text ?: @"";
-            for (NSString *row in rowTitles) {
-                if ([t isEqualToString:row]) { hits++; break; }
-            }
-        }
-        for (UIView *s in v.subviews) scan(s, d + 1);
-    };
-    scan(vc.view, 0);
+    NSUInteger hits = 0;
+    SVBScanForFilterRows(vc.view, 0, &hits, rowTitles);
     return hits >= 2;
 }
 
