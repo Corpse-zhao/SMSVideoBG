@@ -182,20 +182,110 @@ static void SVBRefreshBanner(NSString *ctx) {
     } @catch (NSException *e) {}
 }
 
-// v1.7.18: 主页面容器清扫 —— 选择页的单元格是 CK 私有类, 不是 UICollectionViewListCell
-// (全局清底 hook 对它无效), 白色圆角底来自 cell 或其内部容器的 backgroundColor。
-// 递归清掉所有普通容器的底色 (文字/图标/控件/输入框/材质视图不动), 延迟补扫两次
-// 防系统重设。与其它列表页的透明效果对齐 (用户要求)。
+// v1.7.20: 主页面容器清扫升级。v1.7.18 只清 UIView.backgroundColor, 实测白卡依旧
+// (用户截图实锤), 白色来源还有三类:
+//   a) 直接设在 CALayer 上的底色 (圆角卡片常这么画, UIView 层是 nil);
+//   b) UIVisualEffectView 模糊卡 / UIImageView 背景图 (此前豁免不敢动);
+//   c) 滚动复用后系统重新铺白 (定时补扫覆盖不到)。
+// 对策:
+//   a) layer 层底色一并清;
+//   b) 「大面积 + 无文字/控件」的视图判为卡片底, 整体藏掉 (alpha 记录可恢复);
+//      cell 的 backgroundView/selectedBackgroundView 只藏不清 (v1.7.14 实锤安全);
+//   c) 给主页面的 UICollectionView 打标记, layoutSubviews 节流重扫 (持续补扫)。
+// 总开关或主页面开关关闭时, 恢复所有被藏的卡片。
+static char SVBMainSweepTagKey;
+static char SVBSweepLastKey;
+static char SVBOrigAlphaKey;
+static char SVBOrigHiddenKey;
+static NSMutableArray<UIView *> *SVBHiddenCards;
+
+// 子树里有没有「必须可见」的内容 (文字/控件/输入框) —— 有就不能整体藏
+static BOOL SVBSubtreeHasContent(UIView *v, NSInteger depth) {
+    if (!v || depth > 8) return NO;
+    if ([v isKindOfClass:[UILabel class]] || [v isKindOfClass:[UIControl class]] ||
+        [v isKindOfClass:[UITextField class]]) return YES;
+    for (UIView *s in v.subviews)
+        if (SVBSubtreeHasContent(s, depth + 1)) return YES;
+    return NO;
+}
+
+// 子树里有没有视频背景视图 (绝不能藏到它的祖先)
+static BOOL SVBSubtreeHasVideoBg(UIView *v, NSInteger depth) {
+    if (!v || depth > 10) return NO;
+    if ([v isKindOfClass:[SVBVideoBackgroundView class]]) return YES;
+    for (UIView *s in v.subviews)
+        if (SVBSubtreeHasVideoBg(s, depth + 1)) return YES;
+    return NO;
+}
+
+// 大面积卡片判定: 横贯版面 (>=55% 父宽) 且有一定高度, 里面没有文字/控件
+static BOOL SVBIsBigCard(UIView *v) {
+    CGSize sz = v.bounds.size;
+    if (sz.width < 120 || sz.height < 36) return NO;
+    CGFloat supW = v.superview ? v.superview.bounds.size.width : 0;
+    if (supW > 0 && sz.width < supW * 0.55) return NO;
+    if (SVBSubtreeHasContent(v, 0)) return NO;
+    if (SVBSubtreeHasVideoBg(v, 0)) return NO;
+    return YES;
+}
+
+static void SVBRecordHideCard(UIView *v) {
+    if (!v || v.hidden) return;
+    if (!SVBHiddenCards) SVBHiddenCards = [NSMutableArray new];
+    // 清理已脱离视图树的旧记录, 防数组随滚动膨胀
+    NSIndexSet *dead = [SVBHiddenCards indexesOfObjectsPassingTest:
+        ^BOOL(UIView *h, NSUInteger i, BOOL *stop) { return h.superview == nil; }];
+    if (dead.count) [SVBHiddenCards removeObjectsAtIndexes:dead];
+    if (objc_getAssociatedObject(v, &SVBOrigAlphaKey)) { v.hidden = YES; return; }
+    objc_setAssociatedObject(v, &SVBOrigAlphaKey, @(v.alpha), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(v, &SVBOrigHiddenKey, @(v.hidden), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    [SVBHiddenCards addObject:v];
+    v.hidden = YES;
+}
+
+static void SVBRestoreHiddenCards(void) {
+    if (!SVBHiddenCards.count) return;
+    for (UIView *v in [SVBHiddenCards copy]) {
+        NSNumber *a = objc_getAssociatedObject(v, &SVBOrigAlphaKey);
+        NSNumber *h = objc_getAssociatedObject(v, &SVBOrigHiddenKey);
+        if (a) v.alpha = a.doubleValue;
+        if (h) v.hidden = h.boolValue;
+    }
+    [SVBHiddenCards removeAllObjects];
+}
+
+static BOOL SVBMainSweepActive(void) {
+    SVBManager *m = [SVBManager shared];
+    return m.masterEnabled && [m isEnabledForContext:SVBContextMain];
+}
+
 static void SVBClearContainerBGs(UIView *v, NSInteger depth) {
     if (!v || depth > 14) return;
     if ([v isKindOfClass:[SVBVideoBackgroundView class]]) return;
+    if (!SVBMainSweepActive()) { SVBRestoreHiddenCards(); return; }
+    // 给集合视图打标记 -> layoutSubviews 节流重扫 (滚动复用后持续清白)
+    if ([v isKindOfClass:[UICollectionView class]])
+        objc_setAssociatedObject(v, &SVBMainSweepTagKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    // cell 的系统托管背景: 只藏不清 (清会干扰 backgroundConfiguration 流程, 已实锤崩溃)
+    if ([v isKindOfClass:[UICollectionViewCell class]]) {
+        UICollectionViewCell *c = (UICollectionViewCell *)v;
+        if (c.backgroundView) SVBRecordHideCard(c.backgroundView);
+        if (c.selectedBackgroundView) SVBRecordHideCard(c.selectedBackgroundView);
+    }
     BOOL isProtected = [v isKindOfClass:[UILabel class]] ||
                        [v isKindOfClass:[UIImageView class]] ||
                        [v isKindOfClass:[UIControl class]] ||
                        [v isKindOfClass:[UITextField class]] ||
                        [v isKindOfClass:[UIVisualEffectView class]];
-    if (!isProtected && v.backgroundColor && ![v.backgroundColor isEqual:[UIColor clearColor]])
-        v.backgroundColor = [UIColor clearColor];
+    if (!isProtected) {
+        if (v.backgroundColor && ![v.backgroundColor isEqual:[UIColor clearColor]])
+            v.backgroundColor = [UIColor clearColor];
+        // v1.7.20: layer 层底色 (圆角白卡常直接设在 CALayer 上, UIView 层是 nil)
+        if (v.layer.backgroundColor && !CGColorEqualToColor(v.layer.backgroundColor, [UIColor clearColor].CGColor))
+            v.layer.backgroundColor = NULL;
+    }
+    // v1.7.20: 大面积无内容的白卡/模糊卡/背景图 -> 整体藏掉 (文字图标小控件不动)
+    if (SVBIsBigCard(v)) SVBRecordHideCard(v);
     for (UIView *s in v.subviews) SVBClearContainerBGs(s, depth + 1);
 }
 
@@ -205,8 +295,8 @@ static void SVBApplyMainPage(UIViewController *vc) {
     SVBClearContainerBGs(vc.view, 0);
     SVBRefreshBanner(SVBContextMain);
     __weak UIViewController *wvc = vc;
-    NSTimeInterval delays[2] = {0.45, 1.2};
-    for (int i = 0; i < 2; i++) {
+    NSTimeInterval delays[3] = {0.45, 1.2, 2.5};
+    for (int i = 0; i < 3; i++) {
         NSTimeInterval t = delays[i];
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(t * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
@@ -513,6 +603,24 @@ static char SVBDetectedCtxKey;
         NSString *applied = [[SVBManager shared] appliedContextForViewController:self];
         if (applied.length)
             [[SVBManager shared] setContextActive:NO context:applied];
+    } @catch (NSException *e) {}
+}
+%end
+
+// v1.7.20: 主页面集合视图持续补扫 —— cell 滚动复用/系统重铺白色时, layoutSubviews
+// 触发节流重扫 (0.3s 一次), 不再只靠 apply 时的 3 次定时补扫。
+// 只对被 SVBClearContainerBGs 打过标记的集合视图生效, 其它列表零开销。
+%hook UICollectionView
+- (void)layoutSubviews {
+    %orig;
+    @try {
+        if (!SVBIsSMSProcess()) return;
+        if (!objc_getAssociatedObject(self, &SVBMainSweepTagKey)) return;
+        double now = [[NSDate date] timeIntervalSince1970];
+        NSNumber *last = objc_getAssociatedObject(self, &SVBSweepLastKey);
+        if (last && now - [last doubleValue] < 0.3) return;
+        objc_setAssociatedObject(self, &SVBSweepLastKey, @(now), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        if (SVBMainSweepActive()) SVBClearContainerBGs(self, 0);
     } @catch (NSException *e) {}
 }
 %end
