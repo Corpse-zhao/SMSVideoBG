@@ -1161,24 +1161,12 @@ static void SVBCollectToolbars(UIView *view, NSMutableArray<UIToolbar *> *out_, 
         if (cell && depth <= 5) [self logClassOnce:cls context:ctx];
         CGFloat ba = [self bubbleAlphaForContext:ctx];
         if (cell) {
-            // v1.7.9: 隐藏档把气泡/装饰/背景类容器连内容彻底隐藏 (雾的宿主不一定是 balloon 命名)
-            // v1.7.10: 时间戳等 UILabel 也一起藏 (用户要求时间也别显示); 隐藏阈值放宽到 0.06
-            BOOL hideCandidate = [low containsString:@"balloon"] ||
-                                 [low containsString:@"bubble"] ||
-                                 [low containsString:@"background"] ||
-                                 [low containsString:@"decoration"] ||
-                                 [low containsString:@"platter"] ||
-                                 [low containsString:@"mask"] ||
-                                 [low containsString:@"shape"] ||
-                                 [low containsString:@"fill"] ||
-                                 [low containsString:@"timestamp"] ||
-                                 [low containsString:@"typewriter"];
-            BOOL isLabel = [sub isKindOfClass:[UILabel class]];
-            if (ba <= 0.06 && (hideCandidate || isLabel) &&
-                ![sub isKindOfClass:[UIImageView class]] &&
-                ![self subtreeContainsVideoBg:sub depth:0]) {
+            // v1.7.11: 隐藏档 cell 内**无差别全藏** —— 用户截图实锤黑块宿主类名不含任何
+            // 关键词 (balloon/bubble/background...全不沾), 猜类名没有意义; 只要子树里没有
+            // 视频背景视图就一律 alpha=0, 拉高滑条时全部恢复。
+            if (ba <= 0.06 && ![self subtreeContainsVideoBg:sub depth:0]) {
                 [self hideViewTemporarily:sub];
-            } else if (hideCandidate || isLabel) {
+            } else {
                 [self restoreViewAlpha:sub]; // 拉高滑条: 恢复曾被隐藏的容器/标签
             }
             if ([low containsString:@"balloon"] || [low containsString:@"bubble"]) {
@@ -1193,16 +1181,11 @@ static void SVBCollectToolbars(UIView *view, NSMutableArray<UIToolbar *> *out_, 
             // v1.7.6: 文字可读性 —— 气泡底被拆掉后, 白字压亮视频会看不清, 加深色投影
             if ([self bubbleAlphaForContext:ctx] < 0.999) [self applyTextShadow:sub];
         }
-        // v1.7.9: 隐藏档把消息区里非 cell 层的装饰/背景类容器也隐藏 (雾可能横跨整组消息,
-        // 宿主不在任何 cell 里); v1.7.10: 日期分隔头等 UILabel 也一起藏; 拉高滑条时恢复。
+        // v1.7.11: 隐藏档非 cell 层同样无差别全藏 (黑块/雾宿主类名未知, 不再枚举关键词),
+        // 控件/输入框/图片/效果视图除外; 拉高滑条时全部恢复。
         if (ba <= 0.06 &&
-            ([low containsString:@"background"] || [low containsString:@"decoration"] ||
-             [low containsString:@"platter"] || [low containsString:@"balloon"] ||
-             [low containsString:@"bubble"] || [low containsString:@"mask"] ||
-             [low containsString:@"shape"] || [low containsString:@"fill"] ||
-             [low containsString:@"timestamp"] || [low containsString:@"typewriter"] ||
-             [sub isKindOfClass:[UILabel class]]) &&
             ![sub isKindOfClass:[UIImageView class]] &&
+            ![sub isKindOfClass:[UIButton class]] &&
             ![sub isKindOfClass:[UIControl class]] &&
             ![sub isKindOfClass:[UITextField class]] &&
             ![sub isKindOfClass:[UIVisualEffectView class]] &&
