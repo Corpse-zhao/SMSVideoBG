@@ -863,6 +863,12 @@ forRowAtIndexPath:(NSIndexPath *)indexPath {
     if (logText.length > 3000) logText = [logText substringFromIndex:logText.length - 3000];
     [r appendString:logText];
 
+    // v1.7.14: 层级转储独立收录 (主日志通道只留 12K, 大转储会被挤掉)
+    [r appendString:@"\n--- chat 层级转储 (隐藏/透明排查用) ---\n"];
+    NSString *dumpText = [ud stringForKey:@"svb_debug_dump"] ?: @"(无转储 —— 打开一次聊天页后重新生成报告)";
+    if (dumpText.length > 40000) dumpText = [dumpText substringFromIndex:dumpText.length - 40000];
+    [r appendString:dumpText];
+
     // --- 崩溃日志 (最近一次 MobileSMS, 闪退排查用) ---
     [r appendString:@"\n--- 信息App 崩溃日志 (最近一次) ---\n"];
     @try {

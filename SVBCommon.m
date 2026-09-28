@@ -205,7 +205,7 @@ BOOL SVBDirWritablePath(NSString *dir) {
 - (void)detachBackground:(SVBVideoBackgroundView *)bg fromViewController:(UIViewController *)vc;
 - (void)clearBackgroundsOfView:(UIView *)view depth:(NSInteger)depth;
 - (void)deepChromePass:(UIView *)view depth:(NSInteger)depth ctx:(NSString *)ctx;
-- (void)bubblePass:(UIView *)view depth:(NSInteger)depth inCell:(BOOL)inCell ctx:(NSString *)ctx;
+- (void)bubblePass:(UIView *)view depth:(NSInteger)depth inCell:(BOOL)inCell ctx:(NSString *)ctx sysBg:(BOOL)sysBg;
 - (void)dumpVisibleResidue:(UIView *)view ctx:(NSString *)ctx;   // v1.7.12
 - (void)collectResidue:(UIView *)v depth:(NSInteger)depth effAlpha:(CGFloat)ea into:(NSMutableString *)out; // v1.7.12
 - (void)applyBubbleAlpha:(UIView *)balloon ctx:(NSString *)ctx;
@@ -1007,7 +1007,7 @@ static void SVBCollectToolbars(UIView *view, NSMutableArray<UIToolbar *> *out_, 
                     SVBHierarchyDumped = YES;
                     [self dumpHierarchyForDiagnosis:vc.view];
                 }
-                [self bubblePass:vc.view depth:0 inCell:NO ctx:ctx];
+                [self bubblePass:vc.view depth:0 inCell:NO ctx:ctx sysBg:NO];
             }
             for (UIWindow *w in UIApplication.sharedApplication.windows) {
                 if (w == vc.view.window) continue;
@@ -1122,6 +1122,10 @@ static void SVBCollectToolbars(UIView *view, NSMutableArray<UIToolbar *> *out_, 
         // 键盘整棵子树跳过 (拆键盘模糊会毁掉键盘观感)
         if ([low containsString:@"keyboard"]) continue;
         if (depth <= 3) [self logClassOnce:cls context:ctx];
+        // v1.7.14: 聊天页「原样」档 (ba>=0.999) = 看消息模式, 页面内部完全收手
+        // (透明化只作用于透明/隐藏档), 杜绝一切对原样外观的干扰
+        BOOL originMode = [ctx isEqualToString:SVBContextChat] &&
+                          [self bubbleAlphaForContext:ctx] >= 0.999;
         // 材质模糊层: 底部栏/输入条的白雾就是它 -> 直接拆。
         // v1.7.13: 先缓存原始 effect; **聊天页「原样」档不拆** —— iOS16 的 backdrop 特效
         // 视图被拆成 nil 后会渲染成纯黑块 (用户截图实锤: 原样档气泡=黑块+隐约文字),
@@ -1145,8 +1149,8 @@ static void SVBCollectToolbars(UIView *view, NSMutableArray<UIToolbar *> *out_, 
         }
         if ([sub isKindOfClass:[UILabel class]] || [sub isKindOfClass:[UIButton class]]) {
             // 文字/按钮不动
-        } else {
-            // chrome 容器关键词命中即清背景 (工具栏/输入条/头部/抽屉/导航等)
+        } else if (!originMode) {
+            // chrome 容器关键词命中即清背景 (工具栏/输入条/头部/抽屉/导航等); 原样档不碰
             BOOL chrome = [low containsString:@"toolbar"] || [low containsString:@"input"] ||
                           [low containsString:@"header"] || [low containsString:@"navbar"] ||
                           [low containsString:@"navigationbar"] || [low containsString:@"drawer"] ||
@@ -1169,7 +1173,7 @@ static void SVBCollectToolbars(UIView *view, NSMutableArray<UIToolbar *> *out_, 
 // 气泡类 (类名含 balloon/bubble) 按用户设置的不透明度整体调低;
 // 其余普通容器清底色 (文字标签/头像图片/按钮保留), 让视频从气泡后面透出来。
 // 气泡内类名会写进诊断日志, 万一某一版没识别到可以精准校准。
-- (void)bubblePass:(UIView *)view depth:(NSInteger)depth inCell:(BOOL)inCell ctx:(NSString *)ctx {
+- (void)bubblePass:(UIView *)view depth:(NSInteger)depth inCell:(BOOL)inCell ctx:(NSString *)ctx sysBg:(BOOL)sysBg {
     if (depth > 12) return;
     for (UIView *sub in view.subviews) {
         if ([sub isKindOfClass:[SVBVideoBackgroundView class]]) continue;
@@ -1177,20 +1181,31 @@ static void SVBCollectToolbars(UIView *view, NSMutableArray<UIToolbar *> *out_, 
         NSString *low = cls.lowercaseString;
         BOOL cell = inCell || [sub isKindOfClass:[UICollectionViewCell class]] ||
                                [sub isKindOfClass:[UITableViewCell class]];
+        // v1.7.14: 系统托管的 cell 背景视图 (backgroundView/selectedBackgroundView) 只藏不清 ——
+        // 直接清它们的底色会干扰系统的 backgroundConfiguration 重应用流程, 已实锤导致
+        // UICollectionView 崩溃 (SIGABRT in _applyBackgroundViewConfiguration)
+        BOOL isSysBg = sysBg;
+        UIView *pv = sub.superview;
+        if ([pv isKindOfClass:[UICollectionViewCell class]]) {
+            UICollectionViewCell *pc = (UICollectionViewCell *)pv;
+            if ((pc.backgroundView && sub == pc.backgroundView) ||
+                (pc.selectedBackgroundView && sub == pc.selectedBackgroundView)) isSysBg = YES;
+        }
         if (cell && depth <= 5) [self logClassOnce:cls context:ctx];
         CGFloat ba = [self bubbleAlphaForContext:ctx];
         if (cell) {
             // v1.7.11: 隐藏档 cell 内**无差别全藏** —— 用户截图实锤黑块宿主类名不含任何
             // 关键词 (balloon/bubble/background...全不沾), 猜类名没有意义; 只要子树里没有
             // 视频背景视图就一律 alpha=0, 拉高滑条时全部恢复。
-            if (ba <= 0.06 && ![self subtreeContainsVideoBg:sub depth:0]) {
+            if (ba <= 0.06 && !isSysBg && ![self subtreeContainsVideoBg:sub depth:0]) {
                 [self hideViewTemporarily:sub];
             } else {
                 [self restoreViewAlpha:sub]; // 拉高滑条: 恢复曾被隐藏的容器/标签
             }
             if ([low containsString:@"balloon"] || [low containsString:@"bubble"]) {
                 [self applyBubbleAlpha:sub ctx:ctx];
-            } else if (![sub isKindOfClass:[UILabel class]] &&
+            } else if (ba < 0.999 && !isSysBg &&
+                       ![sub isKindOfClass:[UILabel class]] &&
                        ![sub isKindOfClass:[UIButton class]] &&
                        ![sub isKindOfClass:[UIImageView class]] &&
                        ![sub isKindOfClass:[UIVisualEffectView class]]) {
@@ -1202,7 +1217,7 @@ static void SVBCollectToolbars(UIView *view, NSMutableArray<UIToolbar *> *out_, 
         }
         // v1.7.12: 隐藏档非 cell 层全藏, 豁免名单再缩——UIVisualEffectView (暗色材质)
         // 也拆 effect + 藏掉 (deepChromePass 已拆过 effect, 这里双保险)。
-        if (ba <= 0.06 &&
+        if (ba <= 0.06 && !isSysBg &&
             ![sub isKindOfClass:[UIImageView class]] &&
             ![sub isKindOfClass:[UIButton class]] &&
             ![sub isKindOfClass:[UIControl class]] &&
@@ -1214,9 +1229,8 @@ static void SVBCollectToolbars(UIView *view, NSMutableArray<UIToolbar *> *out_, 
         } else {
             [self restoreViewAlpha:sub];
         }
-        // v1.7.6: 浅雾兜底 —— 残留的半透明白容器可能不在 cell 内 (transcript 与 cell 之间的
-        // 中间层), 气泡透明开启时聊天页内所有普通容器一律清底色 (控件/文字/图片/效果视图除外)
-        if ([self bubbleAlphaForContext:ctx] < 0.999 &&
+        // v1.7.6/14: 浅雾兜底 (ba<0.999 才动手, 原样档完全收手; 系统托管背景不清)
+        if (ba < 0.999 && !isSysBg &&
             ![sub isKindOfClass:[UILabel class]] &&
             ![sub isKindOfClass:[UIButton class]] &&
             ![sub isKindOfClass:[UIImageView class]] &&
@@ -1226,7 +1240,7 @@ static void SVBCollectToolbars(UIView *view, NSMutableArray<UIToolbar *> *out_, 
             sub.backgroundColor = nil;
             if (sub.layer.backgroundColor) sub.layer.backgroundColor = NULL;
         }
-        [self bubblePass:sub depth:depth + 1 inCell:cell ctx:ctx];
+        [self bubblePass:sub depth:depth + 1 inCell:cell ctx:ctx sysBg:isSysBg];
     }
     // v1.7.12: 隐藏档跑完后扫一遍「还没藏住」的视图写诊断日志 (有效 alpha 计算到根)
     if (depth == 0 && [self bubbleAlphaForContext:ctx] <= 0.06) {
@@ -1475,13 +1489,24 @@ static void SVBCollectToolbars(UIView *view, NSMutableArray<UIToolbar *> *out_, 
 // 若雾仍在, 下一版不用猜 —— 日志直接指出雾的宿主。
 - (void)dumpHierarchyForDiagnosis:(UIView *)view {
     NSMutableString *out = [NSMutableString stringWithCapacity:1024];
-    [out appendFormat:@"=== chat 层级转储 (ba=%.2f) ===\n", [self bubbleAlphaForContext:SVBContextChat]];
+    [out appendFormat:@"=== chat 层级转储 v%@ (ba=%.2f) ===\n", SVB_VERSION,
+        [self bubbleAlphaForContext:SVBContextChat]];
     [self dumpHierarchyRec:view depth:0 into:out];
+    [out appendFormat:@"=== 转储结束 ===\n"];
     [self log:@"%@", out];
+    // v1.7.14: 独立存储键 —— prefs 日志通道只留 12K, 大转储会被新日志挤掉导致报告永远看不到
+    @try {
+        NSUserDefaults *ud = [[NSUserDefaults alloc] initWithSuiteName:SVB_SUITE];
+        NSString *old = [ud stringForKey:@"svb_debug_dump"] ?: @"";
+        NSString *nu = [old stringByAppendingString:out];
+        if (nu.length > 60000) nu = [nu substringFromIndex:nu.length - 60000];
+        [ud setObject:nu forKey:@"svb_debug_dump"];
+        [ud synchronize];
+    } @catch (NSException *e) {}
 }
 
 - (void)dumpHierarchyRec:(UIView *)v depth:(NSInteger)depth into:(NSMutableString *)out {
-    if (depth > 12 || out.length > 12000) return;
+    if (depth > 12 || out.length > 40000) return;
     if ([v isKindOfClass:[SVBVideoBackgroundView class]]) {
         [out appendFormat:@"%*s<SVBVideoBackgroundView>\n", (int)(depth * 2), ""];
         return;
@@ -1490,9 +1515,14 @@ static void SVBCollectToolbars(UIView *view, NSMutableArray<UIToolbar *> *out_, 
     BOOL hasBg = NO;
     if (v.backgroundColor) { hasBg = [v.backgroundColor getRed:&r_ green:&g_ blue:&b_ alpha:&a_] || CGColorGetAlpha(v.backgroundColor.CGColor) > 0; a_ = CGColorGetAlpha(v.backgroundColor.CGColor); }
     BOOL isEffect = [v isKindOfClass:[UIVisualEffectView class]];
-    [out appendFormat:@"%*s%@ f=%@ bg=%s%.2f ctn=%d fx=%d al=%.2f hd=%d\n",
+    // v1.7.14: 补充 RGB 颜色值 (黑块=暗色底还是黑材质, 只有 alpha 分不出来) 与 effect 内容
+    NSString *bgInfo;
+    if (!hasBg) bgInfo = @"n";
+    else if (r_ || g_ || b_) bgInfo = [NSString stringWithFormat:@"y(%.2f,%.2f,%.2f a%.2f)", r_, g_, b_, a_];
+    else bgInfo = [NSString stringWithFormat:@"y(gray a%.2f)", a_];
+    [out appendFormat:@"%*s%@ f=%@ bg=%@ ctn=%d fx=%d al=%.2f hd=%d\n",
      (int)(depth * 2), "", NSStringFromClass(v.class), NSStringFromCGRect(v.frame),
-     hasBg ? "y" : "n", a_, v.layer.contents != nil, isEffect, v.alpha, v.hidden];
+     bgInfo, v.layer.contents != nil, isEffect, v.alpha, v.hidden];
     for (UIView *s in v.subviews) [self dumpHierarchyRec:s depth:depth + 1 into:out];
 }
 
@@ -1563,7 +1593,7 @@ static void SVBCollectToolbars(UIView *view, NSMutableArray<UIToolbar *> *out_, 
         if (host.isViewLoaded && host.view && ctx.length) {
             [[SVBManager shared] deepChromePass:host.view depth:0 ctx:ctx];
             if ([ctx isEqualToString:SVBContextChat])
-                [[SVBManager shared] bubblePass:host.view depth:0 inCell:NO ctx:ctx];
+                [[SVBManager shared] bubblePass:host.view depth:0 inCell:NO ctx:ctx sysBg:NO];
             for (UIWindow *w in UIApplication.sharedApplication.windows) {
                 if (w == host.view.window) continue;
                 [[SVBManager shared] deepChromePass:w depth:0 ctx:ctx];

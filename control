@@ -1,6 +1,6 @@
 Package: com.nvb.smsvideobg
 Name: 信息视频背景
-Version: 1.7.13
+Version: 1.7.14
 Architecture: iphoneos-arm64
 Description: 信息视频背景 - 为苹果信息 App 的所有信息/已知发件人/未知发件人/未读信息/垃圾信息/最近删除/对话详情注入视频背景，每界面独立开关与素材文件夹，全局透明度/模糊度/音量(默认关)。附独立控制 App（相册导入/Filza 素材/诊断报告）。v1.3 起素材以「信息App 数据容器」为主根并多根齐写，进信息App 窗口顶部会显示注入诊断横幅。
 Maintainer: 板栗仁
