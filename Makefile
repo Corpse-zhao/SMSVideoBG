@@ -19,7 +19,7 @@ include $(THEOS_MAKE_PATH)/tweak.mk
 # 且用户偏好独立 App 控制, 功能完全等价)
 APPLICATION_NAME = SMSVideoBGApp
 SMSVideoBGApp_FILES = app/main.m app/AppDelegate.m SVBCommon.m
-SMSVideoBGApp_FRAMEWORKS = UIKit AVFoundation CoreMedia
+SMSVideoBGApp_FRAMEWORKS = UIKit AVFoundation AVKit CoreMedia
 SMSVideoBGApp_CFLAGS = -fobjc-arc -fno-threadsafe-statics -Wno-deprecated-declarations
 SMSVideoBGApp_INSTALL_PATH = /Applications
 

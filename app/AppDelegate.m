@@ -2,6 +2,7 @@
 #import <dlfcn.h>
 #import <objc/runtime.h>
 #import <QuartzCore/QuartzCore.h>
+#import <AVKit/AVKit.h>
 
 // ============================================================
 // 控制App主页: 总开关 + 全局效果 + 七类界面开关 + 素材管理页
@@ -758,9 +759,7 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.title = self.contextTitle;
-    self.navigationItem.rightBarButtonItem =
-        [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemAdd
-                                                      target:self action:@selector(importFromLibrary)];
+    // v1.8.2: 去掉右上角「＋」, 导入只保留「从相册导入视频素材」一个入口
     self.tableView.backgroundColor = [UIColor systemGroupedBackgroundColor];
     self.tableView.separatorStyle = UITableViewCellSeparatorStyleNone;
     self.refreshControl.tintColor = SVBAccent();
@@ -860,7 +859,7 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
     NSInteger rows = (NSInteger)MAX(1, (NSInteger)videos.count) + 1;
 
     if (videos.count == 0 && indexPath.row == 0) {
-        c.textLabel.text = @"素材文件夹为空，点右上角「＋」从相册导入";
+        c.textLabel.text = @"素材文件夹为空，点下方「从相册导入视频素材」";
         c.textLabel.textColor = [UIColor secondaryLabelColor];
         c.textLabel.font = [UIFont systemFontOfSize:15];
         c.imageView.image = nil;
@@ -901,8 +900,12 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
     }
     NSString *name = videos[indexPath.row];
     __weak typeof(self) wself = self;
+    // v1.8.2: 标题不露文件名; 新增「预览此素材」全屏播放
     UIAlertController *ac = [UIAlertController
-        alertControllerWithTitle:name message:@"选择操作" preferredStyle:UIAlertControllerStyleAlert];
+        alertControllerWithTitle:@"素材操作" message:nil preferredStyle:UIAlertControllerStyleAlert];
+    [ac addAction:[UIAlertAction actionWithTitle:@"预览此素材" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+        [wself previewVideoNamed:name];
+    }]];
     [ac addAction:[UIAlertAction actionWithTitle:@"选用此素材" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
         [[SVBManager shared] setActiveVideoName:name forContext:wself.contextKey];
         [[SVBManager shared] refreshVisibleBackgrounds];
@@ -915,6 +918,29 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
     }]];
     [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
     [self presentViewController:ac animated:YES completion:nil];
+}
+
+// v1.8.2: 素材预览 —— AVPlayerViewController 全屏播放, 关闭即停
+- (void)previewVideoNamed:(NSString *)name {
+    NSString *path = nil;
+    NSFileManager *fm = [NSFileManager defaultManager];
+    for (NSString *root in [[SVBManager shared] mediaRoots]) {
+        NSString *p = [[root stringByAppendingPathComponent:self.contextKey]
+                       stringByAppendingPathComponent:name];
+        if ([fm fileExistsAtPath:p]) { path = p; break; }
+    }
+    if (!path.length) {
+        UIAlertController *ac = [UIAlertController
+            alertControllerWithTitle:@"找不到文件" message:@"素材可能已被移动或删除"
+                      preferredStyle:UIAlertControllerStyleAlert];
+        [ac addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
+        [self presentViewController:ac animated:YES completion:nil];
+        return;
+    }
+    AVPlayer *player = [AVPlayer playerWithURL:[NSURL fileURLWithPath:path]];
+    AVPlayerViewController *pvc = [[AVPlayerViewController alloc] init];
+    pvc.player = player;
+    [self presentViewController:pvc animated:YES completion:^{ [player play]; }];
 }
 
 // 左滑删除素材 (v1.4, v1.6 起仅素材分区可编辑)
