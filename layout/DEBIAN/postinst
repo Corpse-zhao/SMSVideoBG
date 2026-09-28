@@ -1,44 +1,55 @@
 #!/bin/bash
 # ============================================================
-# SMSVideoBG v1.3.0 postinst
+# SMSVideoBG postinst (v1.7.4 精简版 —— 安装提速)
 #  1) 共享素材目录 (jbroot 主根 + Documents 辅根)
-#  2) 信息App 数据容器内的素材目录  <- v1.3 插件在信息App 进程里必可达
+#  2) 信息App 数据容器内的素材目录
 #  3) 控制App 图标注册
-#  4) 安装自检清单
+#  4) 精简自检 (日志带轮转)
+#
+#  v1.7.4 提速要点 (旧版装得慢的三个真凶):
+#   a) 旧版对每个 App 容器逐个 fork 一次 grep 找信息App容器 —— 设备上几十上百个
+#      容器 = 几十上百次进程创建+读盘。现改为「一次 grep 批量扫全部容器」。
+#   b) 旧版对素材目录 chmod/chown -R 递归 —— 目录里存了视频时要遍历每个文件。
+#      现只对目录层级本身设权限 (视频文件由 App 写入时属主本就是 mobile)。
+#   c) 旧版自检日志无限追加 (>>) 越滚越大。现超过 64KB 自动轮转。
 # ============================================================
 
 CTXS="all known unknown unread junk deleted chat"
+LOG=/var/mobile/Documents/smsvideobg_install.log
 
-# 1. 共享素材目录 (mobile 可读写, Filza 友好)
+# 1. 共享素材目录 (mobile 可读写, Filza 友好; 只设目录本身的权限, 不递归)
 for MEDIA in "/var/jb/Library/SMSVideoBG" "/var/mobile/Documents/SMSVideoBG"; do
   for ctx in $CTXS; do
     mkdir -p "$MEDIA/$ctx" 2>/dev/null
-    chmod 777 "$MEDIA" "$MEDIA/$ctx" 2>/dev/null
-    chown -R mobile:mobile "$MEDIA" 2>/dev/null
   done
+  chmod 777 "$MEDIA" 2>/dev/null
+  chown mobile:mobile "$MEDIA" 2>/dev/null
+  chmod 777 "$MEDIA"/* 2>/dev/null
+  chown mobile:mobile "$MEDIA"/* 2>/dev/null
 done
 
 # 2. 信息App 数据容器内的素材目录
+#    一次 grep 批量命中 (旧版是每容器一次 grep, 这是装得慢的主因)
 SMS_C=""
 for base in /var/mobile/Containers/Data/Application \
             /private/var/mobile/Containers/Data/Application \
             /rootfs/var/mobile/Containers/Data/Application; do
   [ -d "$base" ] || continue
-  for d in "$base"/*; do
-    [ -f "$d/.com.apple.mobile_container_manager.metadata.plist" ] || continue
-    if grep -qa "com.apple.MobileSMS" "$d/.com.apple.mobile_container_manager.metadata.plist" 2>/dev/null; then
-      SMS_C="$d"; break
-    fi
-  done
-  [ -n "$SMS_C" ] && break
+  hit=$(grep -la -m1 -e "com.apple.MobileSMS" \
+        "$base"/*/.com.apple.mobile_container_manager.metadata.plist 2>/dev/null \
+        | head -n 1)
+  if [ -n "$hit" ]; then
+    SMS_C=$(dirname "$hit")
+    break
+  fi
 done
 
 if [ -n "$SMS_C" ]; then
   for ctx in $CTXS; do
     mkdir -p "$SMS_C/Library/SMSVideoBG/$ctx" 2>/dev/null
   done
-  chmod -R 777 "$SMS_C/Library/SMSVideoBG" 2>/dev/null
-  chown -R mobile:mobile "$SMS_C/Library/SMSVideoBG" 2>/dev/null
+  chmod 777 "$SMS_C/Library/SMSVideoBG" "$SMS_C/Library/SMSVideoBG"/* 2>/dev/null
+  chown mobile:mobile "$SMS_C/Library/SMSVideoBG" "$SMS_C/Library/SMSVideoBG"/* 2>/dev/null
 fi
 
 # 3. 注册控制 App 图标 (尽力而为, 失败不影响安装)
@@ -51,34 +62,16 @@ done
 # 让信息App 下次启动时加载新插件
 killall -9 MobileSMS >/dev/null 2>&1 || true
 
-# 4. 安装自检清单 (root 执行, 必然可写)
-LOG=/var/mobile/Documents/smsvideobg_install.log
+# 4. 精简自检 (root 执行, 必然可写; 日志超 64KB 自动轮转)
+if [ -f "$LOG" ] && [ "$(stat -c%s "$LOG" 2>/dev/null || echo 0)" -gt 65536 ]; then
+  mv -f "$LOG" "$LOG.1" 2>/dev/null
+fi
 {
-  echo "=== postinst $(date) v1.3.0"
-  echo "--- /var/jb -> $(readlink -f /var/jb 2>/dev/null)"
-  for base in /var/jb /var/mobile/.jbroot* /var/containers/Bundle/Application/.jbroot*; do
-    [ -d "$base" ] || continue
-    D="$base/Library/MobileSubstrate/DynamicLibraries"
-    if [ -f "$D/SMSVideoBG.dylib" ]; then
-      echo "--- dylib: $D"
-      ls -la "$D" | grep SMSVideoBG
-      md5sum "$D/SMSVideoBG.dylib" 2>/dev/null
-      echo "--- filter plist:"
-      cat "$D/SMSVideoBG.plist" 2>/dev/null
-    fi
-    A="$base/Applications/SMSVideoBGApp.app"
-    if [ -d "$A" ]; then
-      echo "--- app: $A"
-      ls -la "$A"
-    fi
-  done
-  echo "--- hook 库:"
-  ls -la /var/jb/usr/lib/libellekit* /var/jb/usr/lib/libsubstrate* /var/jb/Library/Frameworks/CydiaSubstrate.framework 2>/dev/null
-  echo "--- 素材根目录:"
-  ls -la /var/jb/Library/SMSVideoBG 2>/dev/null
-  ls -la /var/mobile/Documents/SMSVideoBG 2>/dev/null
-  echo "--- 信息App 数据容器素材目录: (SMS_C=$SMS_C)"
-  ls -la "$SMS_C/Library/SMSVideoBG" 2>/dev/null
+  echo "=== postinst $(date) v1.7.4"
+  echo "jbroot: $(readlink -f /var/jb 2>/dev/null)"
+  D=/var/jb/Library/MobileSubstrate/DynamicLibraries
+  [ -f "$D/SMSVideoBG.dylib" ] && echo "dylib: OK $(stat -c%s "$D/SMSVideoBG.dylib" 2>/dev/null) bytes" || echo "dylib: MISSING"
+  echo "SMS container: ${SMS_C:-NOT-FOUND}"
 } >> "$LOG" 2>&1
 chmod 644 "$LOG" 2>/dev/null
 exit 0

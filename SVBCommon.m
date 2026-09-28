@@ -167,6 +167,7 @@ static BOOL SVBDirWritable(NSString *dir) {
 }
 
 static char SVBBGKey;
+static char SVBBubbleOrigColorKey;   // 气泡原始底色 (v1.7.4: 半透明化时保留文字清晰)
 static NSString *SVBLastHeartbeatTag = nil;
 
 // 从视图向上找宿主 VC (chrome 节流补扫需要)
@@ -200,6 +201,8 @@ BOOL SVBDirWritablePath(NSString *dir) {
 - (void)clearBackgroundsOfView:(UIView *)view depth:(NSInteger)depth;
 - (void)deepChromePass:(UIView *)view depth:(NSInteger)depth ctx:(NSString *)ctx;
 - (void)bubblePass:(UIView *)view depth:(NSInteger)depth inCell:(BOOL)inCell ctx:(NSString *)ctx;
+- (void)applyBubbleAlpha:(UIView *)balloon ctx:(NSString *)ctx;
+- (BOOL)viewHasTextDescendant:(UIView *)view depth:(NSInteger)depth;
 - (void)refreshInView:(UIView *)view;
 - (void)playerDidEnd:(NSNotification *)n;
 @end
@@ -1138,10 +1141,7 @@ static void SVBCollectToolbars(UIView *view, NSMutableArray<UIToolbar *> *out_, 
         if (cell && depth <= 5) [self logClassOnce:cls context:ctx];
         if (cell) {
             if ([low containsString:@"balloon"] || [low containsString:@"bubble"]) {
-                CGFloat ba = [self bubbleAlphaForContext:ctx];
-                if (ba < 0.999) sub.alpha = ba;
-                sub.backgroundColor = [UIColor clearColor];
-                sub.layer.backgroundColor = NULL;
+                [self applyBubbleAlpha:sub ctx:ctx];
             } else if (![sub isKindOfClass:[UILabel class]] &&
                        ![sub isKindOfClass:[UIButton class]] &&
                        ![sub isKindOfClass:[UIImageView class]] &&
@@ -1152,6 +1152,55 @@ static void SVBCollectToolbars(UIView *view, NSMutableArray<UIToolbar *> *out_, 
         }
         [self bubblePass:sub depth:depth + 1 inCell:cell ctx:ctx];
     }
+}
+
+// 气泡是否含文字子视图 (决定能不能安全地用 alpha 整体调淡)
+- (BOOL)viewHasTextDescendant:(UIView *)view depth:(NSInteger)depth {
+    if (depth > 6) return NO;
+    for (UIView *sub in view.subviews) {
+        if ([sub isKindOfClass:[UILabel class]] || [sub isKindOfClass:[UITextView class]] ||
+            [sub isKindOfClass:[UITextField class]]) return YES;
+        if ([self viewHasTextDescendant:sub depth:depth + 1]) return YES;
+    }
+    return NO;
+}
+
+// v1.7.4: 气泡半透明, 但**文字必须保持清晰**。
+// 关键: 不能用 view.alpha —— alpha 会被子视图继承, 气泡里的文字会跟着一起消失
+// (v1.7.3 的 bug 就是这个)。正确做法 = 只把气泡自己的底色换成「同色 + 目标透明度」,
+// 文字层不透明度完全不动。
+// 拿不到底色时 (图片/纯绘制型气泡) 才考虑 alpha 兜底, 且只在确认气泡内没有文字时用;
+// 否则宁可让气泡整块透明 (视频透出来) 也绝不让文字看不见。
+- (void)applyBubbleAlpha:(UIView *)balloon ctx:(NSString *)ctx {
+    CGFloat ba = [self bubbleAlphaForContext:ctx];
+    @try {
+        UIColor *orig = objc_getAssociatedObject(balloon, &SVBBubbleOrigColorKey);
+        if (!orig) { // 第一次遇到: 记下原始底色
+            UIColor *cur = balloon.backgroundColor;
+            if (cur && CGColorGetAlpha(cur.CGColor) > 0.01) {
+                objc_setAssociatedObject(balloon, &SVBBubbleOrigColorKey, cur,
+                                         OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                orig = cur;
+            }
+        }
+        if (!orig && balloon.layer.backgroundColor) { // 底色画在 layer 上
+            UIColor *lc = [UIColor colorWithCGColor:balloon.layer.backgroundColor];
+            if (lc && CGColorGetAlpha(lc.CGColor) > 0.01) {
+                objc_setAssociatedObject(balloon, &SVBBubbleOrigColorKey, lc,
+                                         OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                orig = lc;
+            }
+        }
+        balloon.alpha = 1.0; // 永远恢复整体不透明 (文字清晰)
+        if (orig) {
+            balloon.layer.backgroundColor = NULL; // 统一由 view 底色控制
+            balloon.backgroundColor = (ba < 0.999) ? [orig colorWithAlphaComponent:ba] : orig;
+        } else {
+            balloon.backgroundColor = [UIColor clearColor];
+            balloon.layer.backgroundColor = NULL;
+            if (ba < 0.999 && ![self viewHasTextDescendant:balloon depth:0]) balloon.alpha = ba;
+        }
+    } @catch (NSException *e) {}
 }
 
 - (void)refreshVisibleBackgrounds {

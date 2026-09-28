@@ -658,9 +658,13 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
                 [mgr postChangeNotification];
             };
         } else {
-            // v1.7.3: 气泡不透明度 (仅对话详情)
+            // v1.7.3: 气泡不透明度 (仅对话详情; v1.7.4 只调气泡底色, 文字始终清晰)
             [c setTitle:@"气泡不透明度" value:[mgr bubbleAlphaForContext:self.contextKey] max:1.0
-                    display:^NSString *(double v) { return v >= 0.999 ? @"原样" : [NSString stringWithFormat:@"%.0f%%", v * 100]; }];
+                    display:^NSString *(double v) {
+                        if (v >= 0.999) return @"原样";
+                        if (v <= 0.06)  return @"仅文字";
+                        return [NSString stringWithFormat:@"%.0f%%", v * 100];
+                    }];
             c.onValue = ^(double v) {
                 [mgr setConfigValue:@(v) forKey:[wself.contextKey stringByAppendingString:@"_bubble_alpha"]];
                 [mgr postChangeNotification];
