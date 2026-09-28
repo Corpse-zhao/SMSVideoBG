@@ -879,11 +879,15 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
         return c;
     }
     if (indexPath.row < (NSInteger)videos.count) {
-        // v1.8.1: 只有标题和选中勾, 不显示任何素材信息文字
-        c.textLabel.text = [NSString stringWithFormat:@"素材 %ld", (long)(indexPath.row + 1)];
+        // v1.8.4: 显示素材本名 (用户会自己重命名; 隐藏扩展名, 超长中间截断)
+        NSString *show = videos[indexPath.row].stringByDeletingPathExtension;
+        if (!show.length) show = videos[indexPath.row];
+        c.textLabel.text = show;
         c.textLabel.textColor = [UIColor labelColor];
         c.textLabel.font = [UIFont systemFontOfSize:17];
         BOOL isActive = [active isEqualToString:videos[indexPath.row]];
+        c.detailTextLabel.text = isActive ? @"使用中" : nil;
+        c.detailTextLabel.textColor = isActive ? SVBAccent() : [UIColor secondaryLabelColor];
         c.imageView.image = SVBIconForKey(@"__video");
         c.accessoryType = isActive ? UITableViewCellAccessoryCheckmark : UITableViewCellAccessoryNone;
         c.tintColor = SVBAccent();
