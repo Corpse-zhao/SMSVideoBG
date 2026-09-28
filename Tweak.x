@@ -190,11 +190,12 @@ static void SVBRefreshBanner(NSString *ctx) {
 // 对策:
 //   a) layer 层底色一并清;
 //   b) 「大面积 + 无文字/控件」的视图判为卡片底, 整体藏掉 (alpha 记录可恢复);
-//      cell 的 backgroundView/selectedBackgroundView 只藏不清 (v1.7.14 实锤安全);
-//   c) 给主页面的 UICollectionView 打标记, layoutSubviews 节流重扫 (持续补扫)。
+//      cell 的 backgroundView/selectedBackgroundView 子树整体跳过 (v1.7.20 实锤:
+//      任何改动都会和 backgroundConfiguration 重应用撞车, 点选时 SIGABRT);
+//   c) 白色改在「赋色源头」拦: UICollectionViewListCell 背景配置 setter + 默认外观
+//      重铺 (_updateDefaultBackgroundAppearance) + 分区背景装饰视图的
+//      setBackgroundColor: (系统每赋一次色就被改回透明)。
 // 总开关或主页面开关关闭时, 恢复所有被藏的卡片。
-static char SVBMainSweepTagKey;
-static char SVBSweepLastKey;
 static char SVBOrigAlphaKey;
 static char SVBOrigHiddenKey;
 static NSMutableArray<UIView *> *SVBHiddenCards;
@@ -263,14 +264,16 @@ static void SVBClearContainerBGs(UIView *v, NSInteger depth) {
     if (!v || depth > 14) return;
     if ([v isKindOfClass:[SVBVideoBackgroundView class]]) return;
     if (!SVBMainSweepActive()) { SVBRestoreHiddenCards(); return; }
-    // 给集合视图打标记 -> layoutSubviews 节流重扫 (滚动复用后持续清白)
-    if ([v isKindOfClass:[UICollectionView class]])
-        objc_setAssociatedObject(v, &SVBMainSweepTagKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    // cell 的系统托管背景: 只藏不清 (清会干扰 backgroundConfiguration 流程, 已实锤崩溃)
+    // v1.7.21: cell 的系统托管背景子树整体跳过 (不藏不清)。v1.7.20 曾藏
+    // backgroundView/selectedBackgroundView + layoutSubviews 持续重扫, 与系统的
+    // backgroundConfiguration 重应用撞车 —— 点选单元格时 SIGABRT (崩溃日志实锤:
+    // _applyBackgroundViewConfiguration -> invalidateLayout 期间再被我们改动)。
+    // 白色改为在「赋色源头」拦 (见下面 UICollectionViewListCell / 分区装饰视图钩子)。
+    UIView *cellBg = nil, *cellSelBg = nil;
     if ([v isKindOfClass:[UICollectionViewCell class]]) {
         UICollectionViewCell *c = (UICollectionViewCell *)v;
-        if (c.backgroundView) SVBRecordHideCard(c.backgroundView);
-        if (c.selectedBackgroundView) SVBRecordHideCard(c.selectedBackgroundView);
+        cellBg = c.backgroundView;
+        cellSelBg = c.selectedBackgroundView;
     }
     BOOL isProtected = [v isKindOfClass:[UILabel class]] ||
                        [v isKindOfClass:[UIImageView class]] ||
@@ -286,7 +289,10 @@ static void SVBClearContainerBGs(UIView *v, NSInteger depth) {
     }
     // v1.7.20: 大面积无内容的白卡/模糊卡/背景图 -> 整体藏掉 (文字图标小控件不动)
     if (SVBIsBigCard(v)) SVBRecordHideCard(v);
-    for (UIView *s in v.subviews) SVBClearContainerBGs(s, depth + 1);
+    for (UIView *s in v.subviews) {
+        if (s == cellBg || s == cellSelBg) continue;   // 托管背景子树不碰
+        SVBClearContainerBGs(s, depth + 1);
+    }
 }
 
 // 主页面挂背景 + 清扫 + 延迟补扫 (cell 滚动复用/系统重设底色后再清)
@@ -354,11 +360,10 @@ static void SVBPrefsChanged(CFNotificationCenterRef center, void *observer,
     SVBRefreshBanner(c); \
 } @catch (NSException *e) {}
 
-// iOS16 列表 cell 的白色底色来自 backgroundConfiguration (滚动复用被系统重设)。
-// v1.5 曾在 layoutSubviews 里反复置空 -> 触发集合布局失效循环 -> SIGABRT (崩溃日志实锤:
-// _updateVisibleCellsNow 递归中 _cellBackgroundChanged -> _invalidateLayout -> 抛异常)。
-// v1.5.3 改法: 钩 setter, 把系统设置的背景配置就地改成透明 (一次性赋值, 无自触发循环);
-// layoutSubviews 只清 UIView 底色, 绝不再碰 backgroundConfiguration。
+// v1.7.21: 白色一律在「赋色源头」拦, 不做任何 layout 中途改动 (v1.7.20 的
+// layoutSubviews 持续重扫已撤 —— 与 backgroundConfiguration 重应用撞车崩溃)。
+
+// 1) 选中态白卡: 见下方 _updateDefaultBackgroundAppearance 钩子说明。
 %hook UICollectionViewListCell
 - (void)setBackgroundConfiguration:(UIBackgroundConfiguration *)cfg {
     @try {
@@ -366,6 +371,27 @@ static void SVBPrefsChanged(CFNotificationCenterRef center, void *observer,
             cfg.backgroundColor = [UIColor clearColor];
     } @catch (NSException *e) {}
     %orig(cfg);
+}
+// v1.7.21: 选中/高亮白卡 —— 点一下单元格出现的白, 来自系统的默认选中外观重铺
+// (崩溃日志实锤路径: _setLayoutAttributes -> _updateDefaultBackgroundAppearance ->
+// _applyBackgroundViewConfiguration, 不经过公开的 setBackgroundConfiguration:
+// setter, 所以之前拦不到)。对策: 系统铺完默认外观后, 异步 (避开 layout 重入)
+// 给 cell 补一个全透明 backgroundConfiguration —— 走公共 API, 是 UIKit 设计内的
+// 合法赋值路径, 之后选中/高亮状态都基于这份透明配置, 白卡不再回来。
+- (void)_updateDefaultBackgroundAppearance {
+    %orig;
+    @try {
+        if (!SVBIsSMSProcess()) return;
+        if (![[SVBManager shared] masterEnabled]) return;
+        if (self.backgroundConfiguration) return;
+        __weak UICollectionViewListCell *wcell = self;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            @try {
+                if (!wcell.backgroundConfiguration)
+                    wcell.backgroundConfiguration = [UIBackgroundConfiguration clearConfiguration];
+            } @catch (NSException *e) {}
+        });
+    } @catch (NSException *e) {}
 }
 - (void)layoutSubviews {
     %orig;
@@ -607,20 +633,20 @@ static char SVBDetectedCtxKey;
 }
 %end
 
-// v1.7.20: 主页面集合视图持续补扫 —— cell 滚动复用/系统重铺白色时, layoutSubviews
-// 触发节流重扫 (0.3s 一次), 不再只靠 apply 时的 3 次定时补扫。
-// 只对被 SVBClearContainerBGs 打过标记的集合视图生效, 其它列表零开销。
-%hook UICollectionView
-- (void)layoutSubviews {
+// v1.7.21: 分区背景装饰视图 —— 分组白卡其实是 compositional list layout 的
+// section 背景装饰 (报告实锤: _UICollectionViewListLayoutSectionBackgroundColorDecorationView)。
+// 系统在布局失效时会反复重新赋色 (点选单元格/滚动都会触发) —— 钩它的
+// setBackgroundColor:, 系统每铺一次白我就地改回透明, 事件驱动、零布局干扰。
+// (装饰视图不是 cell, 改它的颜色不走 cell 背景变更流程, 安全。)
+@interface _UICollectionViewListLayoutSectionBackgroundColorDecorationView : UIView @end
+%hook _UICollectionViewListLayoutSectionBackgroundColorDecorationView
+- (void)setBackgroundColor:(UIColor *)color {
     %orig;
     @try {
         if (!SVBIsSMSProcess()) return;
-        if (!objc_getAssociatedObject(self, &SVBMainSweepTagKey)) return;
-        double now = [[NSDate date] timeIntervalSince1970];
-        NSNumber *last = objc_getAssociatedObject(self, &SVBSweepLastKey);
-        if (last && now - [last doubleValue] < 0.3) return;
-        objc_setAssociatedObject(self, &SVBSweepLastKey, @(now), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        if (SVBMainSweepActive()) SVBClearContainerBGs(self, 0);
+        if (!SVBMainSweepActive()) return;
+        if (color && ![color isEqual:[UIColor clearColor]])
+            %orig([UIColor clearColor]);
     } @catch (NSException *e) {}
 }
 %end
