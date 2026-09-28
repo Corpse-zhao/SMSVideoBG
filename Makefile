@@ -29,4 +29,5 @@ include $(THEOS_MAKE_PATH)/application.mk
 after-stage::
 	$(ECHO_NOTHING)if [ -f Resources/Info.plist ] && [ -d "$(THEOS_STAGING_DIR)/SMSVideoBGApp.app" ]; then cp Resources/Info.plist "$(THEOS_STAGING_DIR)/SMSVideoBGApp.app/Info.plist"; fi$(ECHO_END)
 	$(ECHO_NOTHING)if [ -f Resources/CustomIcon.png ] && [ -d "$(THEOS_STAGING_DIR)/SMSVideoBGApp.app" ]; then cp Resources/CustomIcon.png "$(THEOS_STAGING_DIR)/SMSVideoBGApp.app/CustomIcon.png"; fi$(ECHO_END)
+	$(ECHO_NOTHING)if [ -f Resources/CustomIconB.png ] && [ -d "$(THEOS_STAGING_DIR)/SMSVideoBGApp.app" ]; then cp Resources/CustomIconB.png "$(THEOS_STAGING_DIR)/SMSVideoBGApp.app/CustomIconB.png"; fi$(ECHO_END)
 	$(ECHO_NOTHING)command -v ldid >/dev/null 2>&1 && [ -f "$(THEOS_STAGING_DIR)/SMSVideoBGApp.app/SMSVideoBGApp" ] && ldid -S "$(THEOS_STAGING_DIR)/SMSVideoBGApp.app/SMSVideoBGApp" || true$(ECHO_END)

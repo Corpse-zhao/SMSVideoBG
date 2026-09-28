@@ -332,6 +332,12 @@ BOOL SVBDirWritablePath(NSString *dir) {
     return v ? [v boolValue] : YES; // 默认开
 }
 
+// v1.8.5: 自定义 App 显示名 (SpringBoard 的 SBApplication.displayName 钩子读这个)
+- (NSString *)appDisplayName {
+    id v = [self configValueForKey:@"app_display_name"];
+    return [v isKindOfClass:[NSString class]] ? v : nil;
+}
+
 - (CGFloat)numForKey:(NSString *)k default:(CGFloat)d {
     id v = [self configValueForKey:k];
     return v ? [v doubleValue] : d;

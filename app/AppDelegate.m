@@ -1129,7 +1129,7 @@ static void SVBAppPickImage(UIViewController *host, void (^done)(UIImage *image)
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section { return 2; }
 
 - (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
-    return @"名称：保存后注销（Respring）生效。\n图标：从相册选一张方图即可，系统会弹窗确认，立即生效；想改回来再选一次原图就行。";
+    return @"名称：保存后桌面即时生效（若未刷新，注销一次）。\n图标：从相册选一张方图即可，系统会弹窗确认，立即生效；想改回来再选一次原图就行。";
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
@@ -1142,12 +1142,17 @@ static void SVBAppPickImage(UIViewController *host, void (^done)(UIImage *image)
                                        reuseIdentifier:indexPath.row == 0 ? idName : idIcon];
     if (indexPath.row == 0) {
         c.textLabel.text = @"App 名称";
-        NSString *cur = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleDisplayName"];
+        // 优先显示已生效的自定义名 (桌面显示的就是它), 否则显示包内名
+        NSString *custom = [[SVBManager shared] appDisplayName];
+        NSString *cur = custom.length ? custom :
+            [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleDisplayName"];
         c.detailTextLabel.text = cur.length ? cur : @"信息视频背景";
     } else {
         c.textLabel.text = @"App 图标";
-        // 预览当前图标 (bundle 根目录 CustomIcon.png)
-        NSString *iconPath = [[NSBundle mainBundle] pathForResource:@"CustomIcon" ofType:@"png"];
+        // 预览当前生效图标: setAlternateIconName 换过之后当前图在 A/B 两个文件之一
+        NSString *cur = [[UIApplication sharedApplication] alternateIconName];
+        NSString *file = [cur isEqualToString:@"CustomIconB"] ? @"CustomIconB" : @"CustomIcon";
+        NSString *iconPath = [[NSBundle mainBundle] pathForResource:file ofType:@"png"];
         UIImage *img = iconPath ? [UIImage imageWithContentsOfFile:iconPath] : nil;
         if (!c.accessoryView) {
             _iconPreview = [[UIImageView alloc] initWithFrame:CGRectMake(0, 0, 44, 44)];
@@ -1172,33 +1177,43 @@ static void SVBAppPickImage(UIViewController *host, void (^done)(UIImage *image)
     else [self changeIcon];
 }
 
-// 改名称: 写回 bundle 的 Info.plist (CFBundleDisplayName + CFBundleName), 注销后生效
+// 改名称: v1.8.5 改走「SpringBoard 显示层」方案 —— installd 缓存 Info.plist 的
+// 显示名, 改 plist+注销无效 (用户实测)。名字写入共享配置 (app_display_name),
+// SpringBoard 里的 SBApplication.displayName 钩子读到即替换, 即存即显。
+// Info.plist 照旧同步写一份 (uicache/重装后保持一致)。
 - (void)renameApp {
-    NSString *cur = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleDisplayName"] ?: @"信息视频背景";
+    NSString *custom = [[SVBManager shared] appDisplayName];
+    NSString *cur = custom.length ? custom :
+        [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleDisplayName"] ?: @"信息视频背景";
     UIAlertController *ac = [UIAlertController
-        alertControllerWithTitle:@"App 名称" message:@"注销（Respring）后生效" preferredStyle:UIAlertControllerStyleAlert];
+        alertControllerWithTitle:@"App 名称" message:@"保存后桌面立即生效（若未刷新，注销一次）"
+                  preferredStyle:UIAlertControllerStyleAlert];
     [ac addTextFieldWithConfigurationHandler:^(UITextField *tf) { tf.text = cur; }];
     [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
     [ac addAction:[UIAlertAction actionWithTitle:@"保存" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
         NSString *name = ac.textFields.firstObject.text;
         name = [name stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
         if (!name.length) return;
+        SVBManager *mgr = [SVBManager shared];
+        [mgr setConfigValue:name forKey:@"app_display_name"];
+        // 包内 Info.plist 同步写 (失败不影响, 显示层已由钩子接管)
         NSString *plistPath = [[NSBundle mainBundle] pathForResource:@"Info" ofType:@"plist"];
-        NSMutableDictionary *plist = [NSMutableDictionary dictionaryWithContentsOfFile:plistPath];
-        if (!plist) { [self alert:@"写入失败" msg:@"Info.plist 不可读"]; return; }
-        plist[@"CFBundleDisplayName"] = name;
-        plist[@"CFBundleName"]        = name;
-        if ([plist writeToFile:plistPath atomically:YES]) {
-            [self alert:@"已保存" msg:@"名称已写入，注销后生效。"];
-        } else {
-            [self alert:@"写入失败" msg:@"App 包目录不可写。"];
+        NSMutableDictionary *plist = plistPath ?
+            [NSMutableDictionary dictionaryWithContentsOfFile:plistPath] : nil;
+        if (plist) {
+            plist[@"CFBundleDisplayName"] = name;
+            plist[@"CFBundleName"]        = name;
+            [plist writeToFile:plistPath atomically:YES];
         }
         [self.tableView reloadData];
+        [self alert:@"已保存" msg:@"桌面名称已更新，若未刷新请注销一次。"];
     }]];
     [self presentViewController:ac animated:YES completion:nil];
 }
 
-// 换图标: 居中裁方 -> 1024 PNG 覆写 bundle 里的 CustomIcon.png -> 系统换图标 API
+// 换图标: v1.8.5 改 A/B 双位轮换 —— setAlternateIconName 对「同名」请求是 no-op
+// (第一次能换, 第二次起系统不重读文件, 用户实测)。每次写到「当前没在用的那个」
+// 图标位再切换, 名字变了系统必然重读。
 - (void)changeIcon {
     __weak typeof(self) wself = self;
     SVBAppPickImage(self, ^(UIImage *image) {
@@ -1211,14 +1226,18 @@ static void SVBAppPickImage(UIViewController *host, void (^done)(UIImage *image)
         if (!cg) { [wself alert:@"处理失败" msg:@"图片无法读取"]; return; }
         UIImage *square = [UIImage imageWithCGImage:cg];
         CGImageRelease(cg);
-        // 缩到 1024 并转 PNG 写入 bundle
+        // 缩到 1024 并转 PNG
         UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc]
             initWithSize:CGRectMake(0, 0, 1024, 1024).size];
         UIImage *out = [r imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
             [square drawInRect:CGRectMake(0, 0, 1024, 1024)];
         }];
         NSData *png = UIImagePNGRepresentation(out);
-        NSString *iconPath = [[NSBundle mainBundle] pathForResource:@"CustomIcon" ofType:@"png"];
+
+        // 目标 = 当前没在用的图标位 (nil/CustomIcon -> 写 B; CustomIconB -> 写 A)
+        NSString *current = [[UIApplication sharedApplication] alternateIconName];
+        NSString *target  = [current isEqualToString:@"CustomIconB"] ? @"CustomIcon" : @"CustomIconB";
+        NSString *iconPath = [[NSBundle mainBundle] pathForResource:target ofType:@"png"];
         if (!png || !iconPath || ![png writeToFile:iconPath atomically:YES]) {
             [wself alert:@"写入失败" msg:@"App 包目录不可写，无法更新图标文件。"];
             return;
@@ -1226,7 +1245,7 @@ static void SVBAppPickImage(UIViewController *host, void (^done)(UIImage *image)
         // 系统 API 换图标 (会弹系统确认框, 立即生效)
         if (@available(iOS 10.3, *)) {
             [[UIApplication sharedApplication]
-                setAlternateIconName:@"CustomIcon"
+                setAlternateIconName:target
                    completionHandler:^(NSError *err) {
                 dispatch_async(dispatch_get_main_queue(), ^{
                     if (err) [wself alert:@"换图标失败" msg:err.localizedDescription];

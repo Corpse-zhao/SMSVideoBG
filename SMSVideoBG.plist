@@ -8,6 +8,7 @@
 		<array>
 			<string>com.apple.MobileSMS</string>
 			<string>com.apple.mobilenotes</string>
+			<string>com.apple.springboard</string>
 		</array>
 	</dict>
 </dict>

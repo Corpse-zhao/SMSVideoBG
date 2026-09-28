@@ -32,6 +32,15 @@
 				<key>UIPrerenderedIcon</key>
 				<false/>
 			</dict>
+			<key>CustomIconB</key>
+			<dict>
+				<key>CFBundleIconFiles</key>
+				<array>
+					<string>CustomIconB</string>
+				</array>
+				<key>UIPrerenderedIcon</key>
+				<false/>
+			</dict>
 		</dict>
 	</dict>
 	<key>CFBundleName</key>
@@ -39,7 +48,7 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.8.4</string>
+	<string>1.8.5</string>
 	<key>CFBundleVersion</key>
 	<string>1</string>
 	<key>CFBundleURLTypes</key>

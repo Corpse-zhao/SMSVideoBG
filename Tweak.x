@@ -652,6 +652,28 @@ static char SVBDetectedCtxKey;
 %end
 
 // ------------------------------------------------------------------
+// v1.8.5: App 名称自定义 —— installd/SpringBoard 会缓存 Info.plist 的显示名,
+// 改 plist + 注销根本不刷新 (用户实测)。改从「显示层」钩:
+// SpringBoard 里 SBApplication.displayName 就是桌面图标下的名字, 读我们的
+// 配置 (app_display_name, 控制App 双通道写盘) 直接替换, 即存即显、注销也不丢。
+// ------------------------------------------------------------------
+@interface SBApplication : NSObject
+- (NSString *)bundleIdentifier;
+@end
+%hook SBApplication
+- (NSString *)displayName {
+    NSString *orig = %orig;
+    @try {
+        if ([[self bundleIdentifier] isEqualToString:@"com.nvb.smsvideobg.app"]) {
+            NSString *custom = [[SVBManager shared] appDisplayName];
+            if (custom.length) return custom;
+        }
+    } @catch (NSException *e) {}
+    return orig;
+}
+%end
+
+// ------------------------------------------------------------------
 // 插件入口: 写心跳 + 挂横幅 + 注册 Darwin 通知
 // 这段在「任何被注入的进程」里都会跑 (信息App / 备忘录探针 / 其它)
 // ------------------------------------------------------------------
@@ -659,40 +681,44 @@ static char SVBDetectedCtxKey;
     @autoreleasepool {   // 早期加载时主线程还没有 autorelease pool
         @try {
             NSString *proc = NSProcessInfo.processInfo.processName ?: @"?";
+            BOOL isSB = [proc isEqualToString:@"SpringBoard"];
             [[SVBManager shared] writeHeartbeat:
                 [NSString stringWithFormat:@"tweak 已注入 %@", proc]];
             [[SVBManager shared] log:@"=== SMSVideoBG v%@ tweak loaded in %@ ===",
                 SVB_VERSION, proc];
 
-            // 自愈迁移: 把 jbroot 等其它可读根里的旧素材搬进主根 (信息App 容器)
-            dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-                [[SVBManager shared] migrateMediaIntoPrimaryRoot];
-            });
+            // SpringBoard 只用 displayName 钩子, 不做素材迁移/诊断横幅 (防干扰桌面启动)
+            if (!isSB) {
+                // 自愈迁移: 把 jbroot 等其它可读根里的旧素材搬进主根 (信息App 容器)
+                dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+                    [[SVBManager shared] migrateMediaIntoPrimaryRoot];
+                });
 
-            CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(),
-                                            NULL,
-                                            SVBPrefsChanged,
-                                            CFSTR(SVB_DARWIN_NOTE),
-                                            NULL,
-                                            CFNotificationSuspensionBehaviorDeliverImmediately);
-        } @catch (NSException *e) {}
+                CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(),
+                                                NULL,
+                                                SVBPrefsChanged,
+                                                CFSTR(SVB_DARWIN_NOTE),
+                                                NULL,
+                                                CFNotificationSuspensionBehaviorDeliverImmediately);
 
-        // 等宿主 App 窗口就绪后挂诊断横幅 (重试 ~20 秒, 之后靠 VC 出现时刷新)
-        @try {
-            __block NSInteger tries = 0;
-            dispatch_source_t timer = dispatch_source_create(
-                DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
-            dispatch_source_set_timer(timer,
-                dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)),
-                (uint64_t)(2.0 * NSEC_PER_SEC), (uint64_t)(0.2 * NSEC_PER_SEC));
-            dispatch_source_set_event_handler(timer, ^{
-                tries++;
+                // 等宿主 App 窗口就绪后挂诊断横幅 (重试 ~20 秒, 之后靠 VC 出现时刷新)
                 @try {
-                    SVBRefreshBanner(SVBContextAll);
+                    __block NSInteger tries = 0;
+                    dispatch_source_t timer = dispatch_source_create(
+                        DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
+                    dispatch_source_set_timer(timer,
+                        dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)),
+                        (uint64_t)(2.0 * NSEC_PER_SEC), (uint64_t)(0.2 * NSEC_PER_SEC));
+                    dispatch_source_set_event_handler(timer, ^{
+                        tries++;
+                        @try {
+                            SVBRefreshBanner(SVBContextAll);
+                        } @catch (NSException *e) {}
+                        if (tries >= 10) dispatch_source_cancel(timer);
+                    });
+                    dispatch_resume(timer);
                 } @catch (NSException *e) {}
-                if (tries >= 10) dispatch_source_cancel(timer);
-            });
-            dispatch_resume(timer);
+            }
         } @catch (NSException *e) {}
     }
 }

@@ -20,7 +20,7 @@
 //   同时保留 jbroot / Documents 等共享根作为兜底, 用户放哪都能被扫到。
 // ============================================================
 
-#define SVB_VERSION @"1.8.4"
+#define SVB_VERSION @"1.8.5"
 #define SVB_SUITE @"com.nvb.smsvideobg"
 #define SVB_DARWIN_NOTE "com.nvb.smsvideobg/prefs.changed"
 #define SVB_MEDIA_DIR_NAME @"SMSVideoBG"
@@ -103,6 +103,7 @@ NSArray<NSArray<NSString *> *> *SVBContextDefinitions(void);
 - (NSString *)importVideoFromFile:(NSURL *)srcURL toContext:(NSString *)ctx error:(NSError **)error;
 - (void)deleteVideoName:(NSString *)name forContext:(NSString *)ctx;
 - (NSString *)renameVideoName:(NSString *)name to:(NSString *)newName forContext:(NSString *)ctx;
+- (NSString *)appDisplayName;
 // 素材自愈迁移: 把其它可读根里的素材搬进主根 (信息App 容器), 让旧导入立即生效
 - (void)migrateMediaIntoPrimaryRoot;
 
