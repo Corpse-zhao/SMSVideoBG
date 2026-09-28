@@ -206,6 +206,7 @@ BOOL SVBDirWritablePath(NSString *dir) {
 - (BOOL)viewHasTextDescendant:(UIView *)view depth:(NSInteger)depth;
 - (BOOL)viewHasImageDescendant:(UIView *)view depth:(NSInteger)depth;
 - (void)clearDrawnBackgroundsOf:(UIView *)view depth:(NSInteger)depth on:(BOOL)on;
+- (void)applyTextShadow:(UIView *)view;
 - (void)refreshInView:(UIView *)view;
 - (void)playerDidEnd:(NSNotification *)n;
 @end
@@ -1152,6 +1153,20 @@ static void SVBCollectToolbars(UIView *view, NSMutableArray<UIToolbar *> *out_, 
                 // 普通容器: 底色清掉 (文字/头像/按钮不动)
                 sub.backgroundColor = nil;
             }
+            // v1.7.6: 文字可读性 —— 气泡底被拆掉后, 白字压亮视频会看不清, 加深色投影
+            if ([self bubbleAlphaForContext:ctx] < 0.999) [self applyTextShadow:sub];
+        }
+        // v1.7.6: 浅雾兜底 —— 残留的半透明白容器可能不在 cell 内 (transcript 与 cell 之间的
+        // 中间层), 气泡透明开启时聊天页内所有普通容器一律清底色 (控件/文字/图片/效果视图除外)
+        if ([self bubbleAlphaForContext:ctx] < 0.999 &&
+            ![sub isKindOfClass:[UILabel class]] &&
+            ![sub isKindOfClass:[UIButton class]] &&
+            ![sub isKindOfClass:[UIImageView class]] &&
+            ![sub isKindOfClass:[UIVisualEffectView class]] &&
+            ![sub isKindOfClass:[UIControl class]] &&
+            ![sub isKindOfClass:[UITextField class]]) {
+            sub.backgroundColor = nil;
+            if (sub.layer.backgroundColor) sub.layer.backgroundColor = NULL;
         }
         [self bubblePass:sub depth:depth + 1 inCell:cell ctx:ctx];
     }
@@ -1229,6 +1244,17 @@ static void SVBCollectToolbars(UIView *view, NSMutableArray<UIToolbar *> *out_, 
         if ([self viewHasImageDescendant:sub depth:depth + 1]) return YES;
     }
     return NO;
+}
+
+// v1.7.6: 给文字加深色投影 (拆掉气泡底后白字压亮视频看不清)。已有投影的不覆盖。
+- (void)applyTextShadow:(UIView *)view {
+    if ([view isKindOfClass:[UILabel class]]) {
+        UILabel *lb = (UILabel *)view;
+        if (!lb.shadowColor) {
+            lb.shadowColor = [UIColor colorWithWhite:0.0 alpha:0.55];
+            lb.shadowOffset = CGSizeMake(0, 1);
+        }
+    }
 }
 
 // v1.7.5: 清除/恢复气泡里「画背景」的子视图 (类名含 background/mask/shape/fill 的绘制视图)。
