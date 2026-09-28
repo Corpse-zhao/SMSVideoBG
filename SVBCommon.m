@@ -170,6 +170,7 @@ static char SVBBGKey;
 static char SVBBubbleOrigColorKey;   // 气泡原始底色 (v1.7.4: 半透明化时保留文字清晰)
 static char SVBBubbleOrigContentsKey; // v1.7.5: 气泡原始 layer.contents (气泡底图)
 static BOOL SVBBalloonDrawSwizzled = NO; // v1.7.7: 气泡 drawRect 拦截只做一次
+static BOOL SVBHierarchyDumped = NO;     // v1.7.8: 聊天页层级转储只做一次
 static NSString *SVBLastHeartbeatTag = nil;
 
 // 从视图向上找宿主 VC (chrome 节流补扫需要)
@@ -209,6 +210,9 @@ BOOL SVBDirWritablePath(NSString *dir) {
 - (void)clearDrawnBackgroundsOf:(UIView *)view depth:(NSInteger)depth on:(BOOL)on;
 - (void)applyTextShadow:(UIView *)view;
 - (void)swizzleBalloonDrawingIfNeeded;
+- (void)patchDrawMethodOf:(Class)cls selector:(SEL)sel patched:(NSMutableSet<NSValue *> *)patched kind:(NSInteger)kind;
+- (void)dumpHierarchyForDiagnosis:(UIView *)view;
+- (void)dumpHierarchyRec:(UIView *)v depth:(NSInteger)depth into:(NSMutableString *)out;
 - (void)refreshInView:(UIView *)view;
 - (void)playerDidEnd:(NSNotification *)n;
 @end
@@ -992,6 +996,10 @@ static void SVBCollectToolbars(UIView *view, NSMutableArray<UIToolbar *> *out_, 
             [self deepChromePass:vc.view depth:0 ctx:ctx];
             if ([ctx isEqualToString:SVBContextChat]) {
                 [self swizzleBalloonDrawingIfNeeded]; // v1.7.7: 拦掉 drawRect 画的气泡底
+                if (!SVBHierarchyDumped) {            // v1.7.8: 层级转储 (每进程一次)
+                    SVBHierarchyDumped = YES;
+                    [self dumpHierarchyForDiagnosis:vc.view];
+                }
                 [self bubblePass:vc.view depth:0 inCell:NO ctx:ctx];
             }
             for (UIWindow *w in UIApplication.sharedApplication.windows) {
@@ -1261,38 +1269,113 @@ static void SVBCollectToolbars(UIView *view, NSMutableArray<UIToolbar *> *out_, 
     }
 }
 
-// v1.7.7: 终极修法 —— 诊断日志实锤: 气泡 (CKTextBalloonView/CKHyperlinkBalloonView) 的
-// 白底是自己 drawRect 画出来的 (层级里没有背景子视图/contents/底色), 清底色/拆底图/
-// 拆模糊层全都碰不到 drawRect 的像素。直接换掉 drawRect 实现: 气泡透明开启时不画底,
-// 拉回「原样」时恢复原绘制。文字在独立的 CKBalloonTextView 里, 完全不受影响。
+// v1.7.7/8: 终极修法 —— 气泡/装饰背景是自己画的 (drawRect 或 drawLayer:inContext:),
+// 清底色/拆contents/拆模糊层全碰不到。动态扫描 CK 系 Balloon/Decoration/Platter/Background
+// 类, 拦截两条绘制路径: 气泡透明开启时不画底, 拉回「原样」时恢复。
+// 只挂类**自己实现**的方法 (class_copyMethodList), 避免基类/子类共享 Method 被双重包装。
+- (void)patchDrawMethodOf:(Class)cls selector:(SEL)sel patched:(NSMutableSet<NSValue *> *)patched kind:(NSInteger)kind {
+    unsigned cnt = 0;
+    Method *list = class_copyMethodList(cls, &cnt);
+    if (!list) return;
+    for (unsigned i = 0; i < cnt; i++) {
+        if (list[i] && method_getName(list[i]) == sel) {
+            NSValue *key = [NSValue valueWithPointer:list[i]];
+            if (![patched containsObject:key]) {
+                [patched addObject:key];
+                if (kind == 0) { // drawRect:(CGRect)
+                    void (*orig)(id, SEL, CGRect) = (void (*)(id, SEL, CGRect))method_getImplementation(list[i]);
+                    __block void (*origBlock)(id, SEL, CGRect) = orig;
+                    __weak SVBManager *wself = self;
+                    IMP newImp = imp_implementationWithBlock(^(id v, CGRect r) {
+                        if ([wself bubbleAlphaForContext:SVBContextChat] < 0.999) return;
+                        origBlock(v, @selector(drawRect:), r);
+                    });
+                    method_setImplementation(list[i], newImp);
+                } else { // drawLayer:inContext:(CALayer*, CGContext*)
+                    void (*orig)(id, SEL, id, void *) = (void (*)(id, SEL, id, void *))method_getImplementation(list[i]);
+                    __block void (*origBlock)(id, SEL, id, void *) = orig;
+                    __weak SVBManager *wself = self;
+                    IMP newImp = imp_implementationWithBlock(^(id v, id layer, void *ctxp) {
+                        if ([wself bubbleAlphaForContext:SVBContextChat] < 0.999) return;
+                        origBlock(v, @selector(drawLayer:inContext:), layer, ctxp);
+                    });
+                    method_setImplementation(list[i], newImp);
+                }
+                [self log:@"绘制拦截: %@ %@ (%@)", cls,
+                          NSStringFromSelector(sel),
+                          kind == 0 ? @"drawRect" : @"drawLayer"];
+            }
+            break;
+        }
+    }
+    free(list);
+}
+
 - (void)swizzleBalloonDrawingIfNeeded {
     if (SVBBalloonDrawSwizzled) return;
     SVBBalloonDrawSwizzled = YES;
     @try {
-        NSMutableSet<NSValue *> *patched = [NSMutableSet set]; // 子类可能继承同一 Method, 去重防自包
+        NSMutableSet<NSValue *> *patched = [NSMutableSet set];
+        // 固定名单优先 (诊断日志实锤的气泡类)
         for (NSString *clsName in @[@"CKBalloonView", @"CKTextBalloonView",
                                     @"CKHyperlinkBalloonView", @"CKBalloonViewIOS17"]) {
             Class cls = objc_getClass(clsName.UTF8String);
             if (!cls) continue;
-            Method m = class_getInstanceMethod(cls, @selector(drawRect:));
-            if (!m) continue;
-            NSValue *mkey = [NSValue valueWithPointer:m];
-            if ([patched containsObject:mkey]) continue;
-            [patched addObject:mkey];
-            void (*orig)(id, SEL, CGRect) = (void (*)(id, SEL, CGRect))method_getImplementation(m);
-            __block void (*origBlock)(id, SEL, CGRect) = orig;
-            __weak SVBManager *wself = self;
-            IMP newImp = imp_implementationWithBlock(^(id balloonView, CGRect r) {
-                CGFloat ba = [wself bubbleAlphaForContext:SVBContextChat];
-                if (ba < 0.999) return; // 气泡透明开启: 不画底
-                origBlock(balloonView, @selector(drawRect:), r);
-            });
-            method_setImplementation(m, newImp);
-            [self log:@"气泡 drawRect 拦截: %@", clsName];
+            [self patchDrawMethodOf:cls selector:@selector(drawRect:) patched:patched kind:0];
+            [self patchDrawMethodOf:cls selector:@selector(drawLayer:inContext:) patched:patched kind:1];
         }
+        // v1.7.8: 动态扫描 —— CK 系里 Balloon/Decoration/Platter/Background 一律拦
+        // (雾可能横跨整组消息 = 分组装饰背景 decoration view, 不一定是气泡)
+        int num = objc_getClassList(NULL, 0);
+        if (num > 0) {
+            Class *classes = (__bridge Class *)malloc(sizeof(Class) * num);
+            if (classes) {
+                num = objc_getClassList(classes, num);
+                for (int i = 0; i < num; i++) {
+                    NSString *nm = NSStringFromClass(classes[i]);
+                    if (![nm hasPrefix:@"CK"] && ![nm hasPrefix:@"_CK"]) continue;
+                    BOOL hit = [nm containsString:@"Balloon"] || [nm containsString:@"Decoration"] ||
+                               [nm containsString:@"Platter"] || [nm containsString:@"Background"];
+                    if (!hit) continue;
+                    // 文字类不能拦 (拦了字就没了): UITextView/UILabel 子视图系排除
+                    if ([classes[i] isSubclassOfClass:[UITextView class]] ||
+                        [classes[i] isSubclassOfClass:[UILabel class]] ||
+                        [classes[i] isSubclassOfClass:[UIControl class]]) continue;
+                    [self patchDrawMethodOf:classes[i] selector:@selector(drawRect:) patched:patched kind:0];
+                    [self patchDrawMethodOf:classes[i] selector:@selector(drawLayer:inContext:) patched:patched kind:1];
+                }
+                free(classes);
+            }
+        }
+        [self log:@"气泡绘制拦截完成, 共拦截 %lu 个方法", (unsigned long)patched.count];
     } @catch (NSException *e) {
         [self log:@"气泡 drawRect 拦截失败: %@", e];
     }
+}
+
+// v1.7.8: 一次性把聊天页完整层级 (类名/frame/底色透明度/contents/效果/透明度) 写进诊断日志,
+// 若雾仍在, 下一版不用猜 —— 日志直接指出雾的宿主。
+- (void)dumpHierarchyForDiagnosis:(UIView *)view {
+    NSMutableString *out = [NSMutableString stringWithCapacity:1024];
+    [out appendFormat:@"=== chat 层级转储 (ba=%.2f) ===\n", [self bubbleAlphaForContext:SVBContextChat]];
+    [self dumpHierarchyRec:view depth:0 into:out];
+    [self log:@"%@", out];
+}
+
+- (void)dumpHierarchyRec:(UIView *)v depth:(NSInteger)depth into:(NSMutableString *)out {
+    if (depth > 12 || out.length > 12000) return;
+    if ([v isKindOfClass:[SVBVideoBackgroundView class]]) {
+        [out appendFormat:@"%*s<SVBVideoBackgroundView>\n", depth * 2, ""];
+        return;
+    }
+    CGFloat r_ = 0, g_ = 0, b_ = 0, a_ = 0;
+    BOOL hasBg = NO;
+    if (v.backgroundColor) { hasBg = [v.backgroundColor getRed:&r_ green:&g_ blue:&b_ alpha:&a_] || CGColorGetAlpha(v.backgroundColor.CGColor) > 0; a_ = CGColorGetAlpha(v.backgroundColor.CGColor); }
+    BOOL isEffect = [v isKindOfClass:[UIVisualEffectView class]];
+    [out appendFormat:@"%*s%@ f=%@ bg=%s%.2f ctn=%d fx=%d al=%.2f hd=%d\n",
+     depth * 2, "", NSStringFromClass(v.class), NSStringFromCGRect(v.frame),
+     hasBg ? "y" : "n", a_, v.layer.contents != nil, isEffect, v.alpha, v.hidden];
+    for (UIView *s in v.subviews) [self dumpHierarchyRec:s depth:depth + 1 into:out];
 }
 
 // v1.7.5: 清除/恢复气泡里「画背景」的子视图 (类名含 background/mask/shape/fill 的绘制视图)。

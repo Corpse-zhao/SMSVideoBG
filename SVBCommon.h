@@ -20,7 +20,7 @@
 //   同时保留 jbroot / Documents 等共享根作为兜底, 用户放哪都能被扫到。
 // ============================================================
 
-#define SVB_VERSION @"1.7.7"
+#define SVB_VERSION @"1.7.8"
 #define SVB_SUITE @"com.nvb.smsvideobg"
 #define SVB_DARWIN_NOTE "com.nvb.smsvideobg/prefs.changed"
 #define SVB_MEDIA_DIR_NAME @"SMSVideoBG"
