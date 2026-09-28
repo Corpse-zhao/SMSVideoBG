@@ -400,6 +400,41 @@ static char SVBDetectedCtxKey;
 }
 %end
 
+// v1.7.18: 主页面容器清扫 —— 选择页的单元格是 CK 私有类, 不是 UICollectionViewListCell
+// (全局清底 hook 对它无效), 白色圆角底来自 cell 或其内部容器的 backgroundColor。
+// 递归清掉所有普通容器的底色 (文字/图标/控件/输入框/材质视图不动), 延迟补扫两次
+// 防系统重设。与其它列表页的透明效果对齐 (用户要求)。
+static void SVBClearContainerBGs(UIView *v, NSInteger depth) {
+    if (!v || depth > 14) return;
+    if ([v isKindOfClass:[SVBVideoBackgroundView class]]) return;
+    BOOL isProtected = [v isKindOfClass:[UILabel class]] ||
+                       [v isKindOfClass:[UIImageView class]] ||
+                       [v isKindOfClass:[UIControl class]] ||
+                       [v isKindOfClass:[UITextField class]] ||
+                       [v isKindOfClass:[UIVisualEffectView class]];
+    if (!isProtected && v.backgroundColor && ![v.backgroundColor isEqual:[UIColor clearColor]])
+        v.backgroundColor = [UIColor clearColor];
+    for (UIView *s in v.subviews) SVBClearContainerBGs(s, depth + 1);
+}
+
+// 主页面挂背景 + 清扫 + 延迟补扫 (cell 滚动复用/系统重设底色后再清)
+static void SVBApplyMainPage(UIViewController *vc) {
+    [[SVBManager shared] applyToViewController:vc context:SVBContextMain];
+    SVBClearContainerBGs(vc.view, 0);
+    SVBRefreshBanner(SVBContextMain);
+    __weak UIViewController *wvc = vc;
+    for (NSTimeInterval t in (@[@0.45, @1.2])) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(t * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            @try {
+                UIViewController *s = wvc;
+                if (!s || !s.isViewLoaded || !s.view.window) return;
+                SVBClearContainerBGs(s.view, 0);
+            } @catch (NSException *e) {}
+        });
+    }
+}
+
 // v1.7.17: 延迟复检过滤器选择页 (label 布局可能晚于 viewWillAppear), 命中则挂主页面背景
 static void SVBScheduleMainPageCheck(UIViewController *vc) {
     __weak UIViewController *wvc = vc;
@@ -409,8 +444,7 @@ static void SVBScheduleMainPageCheck(UIViewController *vc) {
             UIViewController *s = wvc;
             if (!s || !s.isViewLoaded || !s.view.window) return;
             if (SVBIsFilterPickerScreen(s)) {
-                [[SVBManager shared] applyToViewController:s context:SVBContextMain];
-                SVBRefreshBanner(SVBContextMain);
+                SVBApplyMainPage(s);
             }
         } @catch (NSException *e) {}
     });
@@ -432,8 +466,7 @@ static void SVBScheduleMainPageCheck(UIViewController *vc) {
         // 没命中再延迟复检一次 (label 可能还没布局)。
         if ([name containsString:@"Filter"]) {
             if (SVBIsFilterPickerScreen(self)) {
-                [[SVBManager shared] applyToViewController:self context:SVBContextMain];
-                SVBRefreshBanner(SVBContextMain);
+                SVBApplyMainPage(self);
             } else {
                 SVBScheduleMainPageCheck(self);
             }
