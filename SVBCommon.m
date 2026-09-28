@@ -1161,7 +1161,8 @@ static void SVBCollectToolbars(UIView *view, NSMutableArray<UIToolbar *> *out_, 
         if (cell && depth <= 5) [self logClassOnce:cls context:ctx];
         CGFloat ba = [self bubbleAlphaForContext:ctx];
         if (cell) {
-            // v1.7.9: 最低档把气泡/装饰/背景类容器连内容彻底隐藏 (雾的宿主不一定是 balloon 命名)
+            // v1.7.9: 隐藏档把气泡/装饰/背景类容器连内容彻底隐藏 (雾的宿主不一定是 balloon 命名)
+            // v1.7.10: 时间戳等 UILabel 也一起藏 (用户要求时间也别显示); 隐藏阈值放宽到 0.06
             BOOL hideCandidate = [low containsString:@"balloon"] ||
                                  [low containsString:@"bubble"] ||
                                  [low containsString:@"background"] ||
@@ -1169,14 +1170,16 @@ static void SVBCollectToolbars(UIView *view, NSMutableArray<UIToolbar *> *out_, 
                                  [low containsString:@"platter"] ||
                                  [low containsString:@"mask"] ||
                                  [low containsString:@"shape"] ||
-                                 [low containsString:@"fill"];
-            if (hideCandidate && ![sub isKindOfClass:[UIImageView class]] &&
-                ![sub isKindOfClass:[UILabel class]]) {
-                if (ba <= 0.001 && ![self subtreeContainsVideoBg:sub depth:0]) {
-                    [self hideViewTemporarily:sub];
-                } else {
-                    [self restoreViewAlpha:sub]; // 拉高滑条: 恢复曾被隐藏的容器
-                }
+                                 [low containsString:@"fill"] ||
+                                 [low containsString:@"timestamp"] ||
+                                 [low containsString:@"typewriter"];
+            BOOL isLabel = [sub isKindOfClass:[UILabel class]];
+            if (ba <= 0.06 && (hideCandidate || isLabel) &&
+                ![sub isKindOfClass:[UIImageView class]] &&
+                ![self subtreeContainsVideoBg:sub depth:0]) {
+                [self hideViewTemporarily:sub];
+            } else if (hideCandidate || isLabel) {
+                [self restoreViewAlpha:sub]; // 拉高滑条: 恢复曾被隐藏的容器/标签
             }
             if ([low containsString:@"balloon"] || [low containsString:@"bubble"]) {
                 [self applyBubbleAlpha:sub ctx:ctx];
@@ -1190,15 +1193,16 @@ static void SVBCollectToolbars(UIView *view, NSMutableArray<UIToolbar *> *out_, 
             // v1.7.6: 文字可读性 —— 气泡底被拆掉后, 白字压亮视频会看不清, 加深色投影
             if ([self bubbleAlphaForContext:ctx] < 0.999) [self applyTextShadow:sub];
         }
-        // v1.7.9: 最低档把消息区里非 cell 层的装饰/背景类容器也隐藏 (雾可能横跨整组消息,
-        // 宿主不在任何 cell 里); 拉高滑条时恢复。控件/文字/图片/输入框不误伤。
-        if (ba <= 0.001 &&
+        // v1.7.9: 隐藏档把消息区里非 cell 层的装饰/背景类容器也隐藏 (雾可能横跨整组消息,
+        // 宿主不在任何 cell 里); v1.7.10: 日期分隔头等 UILabel 也一起藏; 拉高滑条时恢复。
+        if (ba <= 0.06 &&
             ([low containsString:@"background"] || [low containsString:@"decoration"] ||
              [low containsString:@"platter"] || [low containsString:@"balloon"] ||
              [low containsString:@"bubble"] || [low containsString:@"mask"] ||
-             [low containsString:@"shape"] || [low containsString:@"fill"]) &&
+             [low containsString:@"shape"] || [low containsString:@"fill"] ||
+             [low containsString:@"timestamp"] || [low containsString:@"typewriter"] ||
+             [sub isKindOfClass:[UILabel class]]) &&
             ![sub isKindOfClass:[UIImageView class]] &&
-            ![sub isKindOfClass:[UILabel class]] &&
             ![sub isKindOfClass:[UIControl class]] &&
             ![sub isKindOfClass:[UITextField class]] &&
             ![sub isKindOfClass:[UIVisualEffectView class]] &&
@@ -1243,10 +1247,11 @@ static void SVBCollectToolbars(UIView *view, NSMutableArray<UIToolbar *> *out_, 
 - (void)applyBubbleAlpha:(UIView *)balloon ctx:(NSString *)ctx {
     CGFloat ba = [self bubbleAlphaForContext:ctx];
     @try {
-        // v1.7.9: 滑条最低档 (ba<=0.001) = 气泡连文字**彻底隐藏** (用户方案)。
+        // v1.7.9: 滑条最低档 = 气泡连文字**彻底隐藏** (用户方案)。
         // 整个视图 alpha=0 —— 文字、底色、底图、甚至拦不住的 drawRect 自绘内容全部一起
         // 消失 (alpha 作用于整棵子树的合成结果), 视频完整透出来; 想看消息拉高滑条即可。
-        if (ba <= 0.001 && ![self subtreeContainsVideoBg:balloon depth:0]) {
+        // v1.7.10: 阈值放宽到 0.06 (旧「仅文字」区并入隐藏档)。
+        if (ba <= 0.06 && ![self subtreeContainsVideoBg:balloon depth:0]) {
             [self hideViewTemporarily:balloon];
             return;
         }
