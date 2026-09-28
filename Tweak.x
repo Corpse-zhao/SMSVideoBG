@@ -85,14 +85,14 @@ static NSString *SVBDetectListContext(UIViewController *vc, NSString *fallback) 
             [[SVBManager shared] logClassOnce:
                 [NSString stringWithFormat:@"title「%@」on %@", title, cls] context:@"(标题探测)"];
 
-            // v1.7.15: 主页面 = 信息App 根页 (过滤器列表: 所有信息/已知发件人/...那屏)。
-            // 判别: 它是导航栈的根 + 标题恰好是「信息/Messages」(点进去的「所有信息」
-            // 列表标题可能相同, 但不是导航根, 以此区分)。
+            // v1.7.15/16: 主页面 = 信息App 根页 (过滤器列表: 所有信息/已知发件人/...那屏)。
+            // 标题恰好是「信息/Messages」时再细分: 导航栈根 或 内容命中过滤器行 (v1.7.16,
+            // 选择页与「所有信息」列表同类同名, 只能靠内容区分)。
             BOOL isNavRoot = (vc.navigationController.viewControllers.firstObject == vc);
-            if (isNavRoot &&
-                ([title isEqualToString:@"信息"] ||
-                 [title localizedCaseInsensitiveCompare:@"Messages"] == NSOrderedSame))
-                return SVBContextMain;
+            if ([title isEqualToString:@"信息"] ||
+                [title localizedCaseInsensitiveCompare:@"Messages"] == NSOrderedSame) {
+                if (isNavRoot || SVBIsFilterPickerScreen(vc)) return SVBContextMain;
+            }
 
             if ([title containsString:@"已知发件人"] ||
                 [title localizedCaseInsensitiveContainsString:@"Known Senders"])
@@ -230,7 +230,34 @@ static void SVBRefreshBanner(NSString *ctx) {
 }
 %end
 
-// v1.7.15: 列表语境兜底 —— 标题探测失败时, 导航栈根 = 主页面, 其余 = 所有信息
+// v1.7.16: 主页面 (过滤器选择页) 内容判别 —— 扫描可见 UILabel 文本, 命中 >=2 个
+// 过滤器行标题 (所有信息/已知发件人/...) 即认定是主页面。此前两版判据都失败:
+// 导航根判别失效 (信息App 内部用 split 容器, 主页面不是 nav 根), 标题判别失效
+// (主页面与「所有信息」列表同类同名, 日志实锤均为 CKConversationListCollectionViewController
+// + title「信息」)。过滤器行文字是选择页独有的, 列表页绝不会有。
+static BOOL SVBIsFilterPickerScreen(UIViewController *vc) {
+    if (!vc.view) return NO;
+    static NSArray<NSString *> *rowTitles = nil;
+    if (!rowTitles) rowTitles = @[@"所有信息", @"已知发件人", @"未知发件人",
+                                  @"未读信息", @"垃圾信息", @"最近删除",
+                                  @"Known Senders", @"Unknown Senders",
+                                  @"Unread Messages", @"Junk", @"Recently Deleted"];
+    __block NSUInteger hits = 0;
+    void (^scan)(UIView *, NSInteger) = ^(UIView *v, NSInteger d) {
+        if (!v || d > 8) return;
+        if ([v isKindOfClass:[UILabel class]]) {
+            NSString *t = ((UILabel *)v).text ?: @"";
+            for (NSString *row in rowTitles) {
+                if ([t isEqualToString:row]) { hits++; break; }
+            }
+        }
+        for (UIView *s in v.subviews) scan(s, d + 1);
+    };
+    scan(vc.view, 0);
+    return hits >= 2;
+}
+
+// 列表语境兜底 —— 标题探测失败时, 导航栈根 = 主页面, 其余 = 所有信息
 static NSString *SVBListFallback(UIViewController *vc) {
     if (vc.navigationController.viewControllers.firstObject == vc)
         return SVBContextMain;
@@ -260,6 +287,23 @@ static char SVBDetectedCtxKey;
         objc_getAssociatedObject(self, &SVBDetectedCtxKey) ?: SVBListFallback(self));
     objc_setAssociatedObject(self, &SVBDetectedCtxKey, ctx, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     SVB_SAFE_APPLY(ctx)
+    // v1.7.16: 选择页/列表页同类同名, 内容判别依赖 label 布局 —— 延迟复检一次,
+    // 若归类变化 (如 all -> main) 就改挂背景
+    __weak typeof(self) wself = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.45 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        @try {
+            __strong typeof(wself) sself = wself;
+            if (!sself || !sself.isViewLoaded || !sself.view.window) return;
+            NSString *ctx2 = SVBDetectListContext(sself,
+                objc_getAssociatedObject(sself, &SVBDetectedCtxKey) ?: SVBListFallback(sself));
+            if (![ctx2 isEqualToString:ctx]) {
+                objc_setAssociatedObject(sself, &SVBDetectedCtxKey, ctx2, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                [[SVBManager shared] applyToViewController:sself context:ctx2];
+                SVBRefreshBanner(ctx2);
+            }
+        } @catch (NSException *e) {}
+    });
 }
 - (void)viewDidDisappear:(BOOL)animated {
     %orig;
@@ -309,6 +353,22 @@ static char SVBDetectedCtxKey;
         objc_getAssociatedObject(self, &SVBDetectedCtxKey) ?: SVBListFallback(self));
     objc_setAssociatedObject(self, &SVBDetectedCtxKey, ctx, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     SVB_SAFE_APPLY(ctx)
+    // v1.7.16: 延迟复检, 归类变化时改挂背景 (同上)
+    __weak typeof(self) wself = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.45 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        @try {
+            __strong typeof(wself) sself = wself;
+            if (!sself || !sself.isViewLoaded || !sself.view.window) return;
+            NSString *ctx2 = SVBDetectListContext(sself,
+                objc_getAssociatedObject(sself, &SVBDetectedCtxKey) ?: SVBListFallback(sself));
+            if (![ctx2 isEqualToString:ctx]) {
+                objc_setAssociatedObject(sself, &SVBDetectedCtxKey, ctx2, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                [[SVBManager shared] applyToViewController:sself context:ctx2];
+                SVBRefreshBanner(ctx2);
+            }
+        } @catch (NSException *e) {}
+    });
 }
 - (void)viewDidDisappear:(BOOL)animated {
     %orig;
