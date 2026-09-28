@@ -20,7 +20,7 @@
 //   同时保留 jbroot / Documents 等共享根作为兜底, 用户放哪都能被扫到。
 // ============================================================
 
-#define SVB_VERSION @"1.7.18"
+#define SVB_VERSION @"1.7.19"
 #define SVB_SUITE @"com.nvb.smsvideobg"
 #define SVB_DARWIN_NOTE "com.nvb.smsvideobg/prefs.changed"
 #define SVB_MEDIA_DIR_NAME @"SMSVideoBG"
@@ -108,6 +108,8 @@ NSArray<NSArray<NSString *> *> *SVBContextDefinitions(void);
 #pragma mark 背景应用
 - (AVPlayer *)playerForContext:(NSString *)ctx forceRebuild:(BOOL)force;
 - (void)applyToViewController:(UIViewController *)vc context:(NSString *)ctx;
+// v1.7.19: 该 VC 实际挂载过的语境 (apply 时记录; 没挂过返回 nil) —— 离开页面时按它精确暂停
+- (NSString *)appliedContextForViewController:(UIViewController *)vc;
 - (void)detachFromViewController:(UIViewController *)vc;   // 页面离开时摘除背景
 - (void)refreshVisibleBackgrounds;
 - (void)postChangeNotification;

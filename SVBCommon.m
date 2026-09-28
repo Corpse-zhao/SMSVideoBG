@@ -169,6 +169,7 @@ static BOOL SVBDirWritable(NSString *dir) {
 }
 
 static char SVBBGKey;
+static char SVBAppliedCtxKey;   // v1.7.19: 每个 VC 实际挂载的语境 (离开时精确暂停对应播放器)
 static char SVBBubbleOrigColorKey;   // 气泡原始底色 (v1.7.4: 半透明化时保留文字清晰)
 static char SVBBubbleOrigContentsKey; // v1.7.5: 气泡原始 layer.contents (气泡底图)
 static char SVBBubbleOrigAlphaKey;    // v1.7.9: 气泡原始 alpha (最低档彻底隐藏时缓存)
@@ -943,9 +944,19 @@ static void SVBCollectToolbars(UIView *view, NSMutableArray<UIToolbar *> *out_, 
     }
 }
 
+// v1.7.19: 读回某 VC 实际挂载过的语境 (apply 时写入); 没挂过返回 nil
+- (NSString *)appliedContextForViewController:(UIViewController *)vc {
+    @try {
+        return objc_getAssociatedObject(vc, &SVBAppliedCtxKey);
+    } @catch (NSException *e) { return nil; }
+}
+
 - (void)applyToViewController:(UIViewController *)vc context:(NSString *)ctx {
     @try {
         if (!vc.isViewLoaded || !vc.view) return;
+
+        // v1.7.19: 记录该 VC 实际请求挂载的语境 (无论开关与否), 离开时按它精确暂停
+        objc_setAssociatedObject(vc, &SVBAppliedCtxKey, ctx, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
         BOOL on = [self masterEnabled] && [self isEnabledForContext:ctx] &&
                   [self activeVideoPathForContext:ctx].length > 0;
