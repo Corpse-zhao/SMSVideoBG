@@ -1,0 +1,58 @@
+name: Build SMSVideoBG
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    # 必须用 macOS 运行器: Apple 原生 clang + ld64 产出正确的 arm64e 新 ABI 与
+    # LC_DYLD_CHAINED_FIXUPS。Linux 工具链的 arm64e 注入系统进程时 objc readClass
+    # 直接 SIGBUS (NotesVideoBG v2.2-v3.1 崩溃根因)。
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Theos
+        uses: actions/checkout@v4
+        with:
+          repository: theos/theos
+          ref: master
+          submodules: recursive
+          path: theos
+
+      - name: Install iOS SDK
+        uses: actions/checkout@v4
+        with:
+          repository: theos/sdks
+          sparse-checkout: iPhoneOS14.5.sdk
+          path: theos/sdks
+
+      - name: Install dependencies
+        run: |
+          brew install make xz ldid
+          gmake --version | head -1
+          ldid -V || true
+
+      - name: Build package
+        env:
+          THEOS: ${{ github.workspace }}/theos
+        run: gmake package THEOS_PACKAGE_SCHEME=rootless FINALPACKAGE=1
+
+      - name: Verify package contents (filter / control / arch)
+        run: python3 tools/inspect_deb.py packages/*.deb || true
+
+      - name: Diagnose Mach-O slices (log load commands per arch)
+        run: |
+          if [ -f .theos/obj/SMSVideoBG.dylib ]; then python3 tools/macho_dump.py .theos/obj/SMSVideoBG.dylib; fi
+          if [ -f .theos/obj/SMSVideoBGApp ]; then python3 tools/macho_dump.py .theos/obj/SMSVideoBGApp; fi
+          ls .theos/obj/ 2>/dev/null | head
+
+      - name: Upload .deb artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SMSVideoBG-deb
+          path: packages/*.deb
+          if-no-files-found: error
