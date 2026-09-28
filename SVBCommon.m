@@ -169,6 +169,7 @@ static BOOL SVBDirWritable(NSString *dir) {
 static char SVBBGKey;
 static char SVBBubbleOrigColorKey;   // 气泡原始底色 (v1.7.4: 半透明化时保留文字清晰)
 static char SVBBubbleOrigContentsKey; // v1.7.5: 气泡原始 layer.contents (气泡底图)
+static BOOL SVBBalloonDrawSwizzled = NO; // v1.7.7: 气泡 drawRect 拦截只做一次
 static NSString *SVBLastHeartbeatTag = nil;
 
 // 从视图向上找宿主 VC (chrome 节流补扫需要)
@@ -207,6 +208,7 @@ BOOL SVBDirWritablePath(NSString *dir) {
 - (BOOL)viewHasImageDescendant:(UIView *)view depth:(NSInteger)depth;
 - (void)clearDrawnBackgroundsOf:(UIView *)view depth:(NSInteger)depth on:(BOOL)on;
 - (void)applyTextShadow:(UIView *)view;
+- (void)swizzleBalloonDrawingIfNeeded;
 - (void)refreshInView:(UIView *)view;
 - (void)playerDidEnd:(NSNotification *)n;
 @end
@@ -988,8 +990,10 @@ static void SVBCollectToolbars(UIView *view, NSMutableArray<UIToolbar *> *out_, 
         // 输入条可能挂在窗口级容器 (docked inputAccessory), 所以 window 也扫一遍。
         @try {
             [self deepChromePass:vc.view depth:0 ctx:ctx];
-            if ([ctx isEqualToString:SVBContextChat])
+            if ([ctx isEqualToString:SVBContextChat]) {
+                [self swizzleBalloonDrawingIfNeeded]; // v1.7.7: 拦掉 drawRect 画的气泡底
                 [self bubblePass:vc.view depth:0 inCell:NO ctx:ctx];
+            }
             for (UIWindow *w in UIApplication.sharedApplication.windows) {
                 if (w == vc.view.window) continue;
                 [self deepChromePass:w depth:0 ctx:ctx];
@@ -1254,6 +1258,40 @@ static void SVBCollectToolbars(UIView *view, NSMutableArray<UIToolbar *> *out_, 
             lb.shadowColor = [UIColor colorWithWhite:0.0 alpha:0.55];
             lb.shadowOffset = CGSizeMake(0, 1);
         }
+    }
+}
+
+// v1.7.7: 终极修法 —— 诊断日志实锤: 气泡 (CKTextBalloonView/CKHyperlinkBalloonView) 的
+// 白底是自己 drawRect 画出来的 (层级里没有背景子视图/contents/底色), 清底色/拆底图/
+// 拆模糊层全都碰不到 drawRect 的像素。直接换掉 drawRect 实现: 气泡透明开启时不画底,
+// 拉回「原样」时恢复原绘制。文字在独立的 CKBalloonTextView 里, 完全不受影响。
+- (void)swizzleBalloonDrawingIfNeeded {
+    if (SVBBalloonDrawSwizzled) return;
+    SVBBalloonDrawSwizzled = YES;
+    @try {
+        NSMutableSet<NSValue *> *patched = [NSMutableSet set]; // 子类可能继承同一 Method, 去重防自包
+        for (NSString *clsName in @[@"CKBalloonView", @"CKTextBalloonView",
+                                    @"CKHyperlinkBalloonView", @"CKBalloonViewIOS17"]) {
+            Class cls = objc_getClass(clsName.UTF8String);
+            if (!cls) continue;
+            Method m = class_getInstanceMethod(cls, @selector(drawRect:));
+            if (!m) continue;
+            NSValue *mkey = [NSValue valueWithPointer:m];
+            if ([patched containsObject:mkey]) continue;
+            [patched addObject:mkey];
+            void (*orig)(id, SEL, CGRect) = (void (*)(id, SEL, CGRect))method_getImplementation(m);
+            __block void (*origBlock)(id, SEL, CGRect) = orig;
+            __weak SVBManager *wself = self;
+            IMP newImp = imp_implementationWithBlock(^(id balloonView, CGRect r) {
+                CGFloat ba = [wself bubbleAlphaForContext:SVBContextChat];
+                if (ba < 0.999) return; // 气泡透明开启: 不画底
+                origBlock(balloonView, @selector(drawRect:), r);
+            });
+            method_setImplementation(m, newImp);
+            [self log:@"气泡 drawRect 拦截: %@", clsName];
+        }
+    } @catch (NSException *e) {
+        [self log:@"气泡 drawRect 拦截失败: %@", e];
     }
 }
 
