@@ -893,8 +893,8 @@ static BOOL SVBCopyInto(NSString *srcPath, NSString *dir, NSString *name, NSErro
     // 消毒: 去首尾空白, 剔除路径分隔符与控制字符, 不允许为空
     newName = [newName stringByTrimmingCharactersInSet:
                [NSCharacterSet whitespaceAndNewlineCharacterSet]];
-    NSCharacterSet *bad = [[NSCharacterSet characterSetWithCharactersInString:@"/\\:?%*|\"<>"]
-                           unionWithSet:[NSCharacterSet controlCharacterSet]];
+    NSMutableCharacterSet *bad = [[NSCharacterSet characterSetWithCharactersInString:@"/\\:?%*|\"<>"] mutableCopy];
+    [bad formUnionWithCharacterSet:[NSCharacterSet controlCharacterSet]];
     newName = [[newName componentsSeparatedByCharactersInSet:bad]
                componentsJoinedByString:@"_"];
     if (!newName.length) return nil;
