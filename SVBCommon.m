@@ -1365,7 +1365,7 @@ static void SVBCollectToolbars(UIView *view, NSMutableArray<UIToolbar *> *out_, 
 - (void)dumpHierarchyRec:(UIView *)v depth:(NSInteger)depth into:(NSMutableString *)out {
     if (depth > 12 || out.length > 12000) return;
     if ([v isKindOfClass:[SVBVideoBackgroundView class]]) {
-        [out appendFormat:@"%*s<SVBVideoBackgroundView>\n", depth * 2, ""];
+        [out appendFormat:@"%*s<SVBVideoBackgroundView>\n", (int)(depth * 2), ""];
         return;
     }
     CGFloat r_ = 0, g_ = 0, b_ = 0, a_ = 0;
