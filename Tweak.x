@@ -400,6 +400,22 @@ static char SVBDetectedCtxKey;
 }
 %end
 
+// v1.7.17: 延迟复检过滤器选择页 (label 布局可能晚于 viewWillAppear), 命中则挂主页面背景
+static void SVBScheduleMainPageCheck(UIViewController *vc) {
+    __weak UIViewController *wvc = vc;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.45 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        @try {
+            UIViewController *s = wvc;
+            if (!s || !s.isViewLoaded || !s.view.window) return;
+            if (SVBIsFilterPickerScreen(s)) {
+                [[SVBManager shared] applyToViewController:s context:SVBContextMain];
+                SVBRefreshBanner(SVBContextMain);
+            }
+        } @catch (NSException *e) {}
+    });
+}
+
 // 兜底: 类名关键词分发 (垃圾信息 / 最近删除 / 未读 / 过滤器页等)
 %hook UIViewController
 - (void)viewWillAppear:(BOOL)animated {
@@ -410,18 +426,29 @@ static char SVBDetectedCtxKey;
         NSString *ctx = SVBContextForClassName(name);
         [[SVBManager shared] logClassOnce:name context:ctx];
         if (!ctx) return;
-        // 过滤器选择页 (弹出的「过滤条件」列表) 不铺背景;
-        // iOS16 各过滤器列表页与主列表同类, 由显式 hook 的标题判别处理, 不走这里
-        if ([name containsString:@"Filter"]) return;
+        // v1.7.17: 过滤器选择页(=主页面) —— 此前含 Filter 的类被无差别跳过 (v1.5 为防
+        // 「过滤条件」弹出页误铺), 结果主页面从没走到任何 apply 路径, 连 all 的背景都
+        // 没有 (用户截图+报告实锤)。现在: 内容命中过滤器行 -> 挂主页面背景; 立即试一次,
+        // 没命中再延迟复检一次 (label 可能还没布局)。
+        if ([name containsString:@"Filter"]) {
+            if (SVBIsFilterPickerScreen(self)) {
+                [[SVBManager shared] applyToViewController:self context:SVBContextMain];
+                SVBRefreshBanner(SVBContextMain);
+            } else {
+                SVBScheduleMainPageCheck(self);
+            }
+            return;
+        }
         // 兜底判成 all 时, 先用导航标题细分 (防止过滤器页被误判成「所有信息」)
         if ([ctx isEqualToString:SVBContextAll]) {
             NSString *tctx = SVBDetectListContext(self, nil);
             if (tctx.length) ctx = tctx;
         }
         if ([name containsString:@"Keyboard"] || [name containsString:@"Picker"]) return;
-        // v1.5: 只对「视图本体就是列表」的 VC 生效。
-        // 非滚动容器上插背景会被上层白底内容盖住, 只在顶部安全区漏出一条 (实测截图问题)。
-        if (![self.view isKindOfClass:[UITableView class]] &&
+        // v1.5: 只对「视图本体就是列表」的 VC 生效 (非滚动容器上插背景会被上层白底
+        // 内容盖住)。v1.7.17: 主页面例外 —— 选择页结构未知, 不做视图类型限制。
+        if (![ctx isEqualToString:SVBContextMain] &&
+            ![self.view isKindOfClass:[UITableView class]] &&
             ![self.view isKindOfClass:[UICollectionView class]]) return;
         [[SVBManager shared] applyToViewController:self context:ctx];
         SVBRefreshBanner(ctx);
