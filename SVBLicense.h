@@ -57,3 +57,12 @@ NSString *SVBLicenseNormalize(NSString *raw);
 // ---- 编码工具 (与签发脚本 tools/license_gen.py 严格对齐) ----
 NSString *SVBLicenseB32Encode(NSData *data);
 NSData   *SVBLicenseB32Decode(NSString *str);
+
+// ---- 授权凭证 (v9.9.12) ----
+// 客户把这行文本发给作者, 作者粘进「激活码签发」App 即可登记台账。
+// 本机确实处于已激活状态时返回一行文本, 否则返回 nil:
+//   SMSVideoBG-ACT1|<设备码8位>|<激活码24字符>|<激活时间Unix秒>|<签名16位HEX>
+//   签名原文 = "SVBACTIVATE/v1|<设备码>|<激活码>|<激活时间>"
+//   签名算法 = HMAC-SHA256(secret, 原文) 取前 8 字节的大写十六进制
+// 签名只证明「这行凭证确实由装了本插件的设备生成」, 不泄漏密钥。
+NSString *SVBActivationReceipt(void);

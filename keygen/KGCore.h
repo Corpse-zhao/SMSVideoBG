@@ -70,3 +70,24 @@ NSString *KGRevokeSignatureHex(NSString *payload, NSString *secret);
 NSArray<NSString *> *KGRevokeParseJSON(NSData *json, NSString *secret);
 // 生成名单文件内容
 NSData *KGRevokeBuildJSON(NSString *secret, NSInteger ts, NSArray<NSString *> *hashes);
+
+// ============================================================
+// 授权凭证 (v1.2.0, 与插件端 SVBActivationReceipt() 严格对齐)
+//   客户在控制 App 授权页复制的一行文本, 发你后粘进本 App 登记台账:
+//     SMSVideoBG-ACT1|<设备码8>|<激活码24>|<激活时间Unix秒>|<签名16HEX>
+//   签名原文 = "SVBACTIVATE/v1|<设备码>|<激活码>|<激活时间>"
+//   签名算法 = HMAC-SHA256(secret, 原文) 前 8 字节的大写十六进制
+//   凭证签名只证明「这行是装了插件的设备生成的」, 不含密钥, 无法反推。
+// ============================================================
+NSString *KGReceiptPayloadString(NSString *dev8, NSString *code24, NSTimeInterval ts);
+
+// 把 8 位设备码格式化成 ABCD-EFGH
+NSString *KGGroupDevice8(NSString *dev8);
+
+// 只解码激活码本身 (不验签): 返回 device/universal/forever/exp/daysLeft/dayIndex
+NSDictionary *KGDecodeCode(NSString *code);
+
+// 解析客户发来的凭证: 抽段落 -> 验凭证签名 -> 验激活码 -> 校验设备绑定
+// 成功返回 @{device, code, activatedAt, exp, forever, universal, daysLeft, ...}
+// 失败返回 nil, error 回传人话原因
+NSDictionary *KGParseReceipt(NSString *secret, NSString *text, NSString **error);

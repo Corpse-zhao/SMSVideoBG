@@ -1415,18 +1415,21 @@ static void SVBAppPickImage(UIViewController *host, void (^done)(UIImage *image)
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
     if (section == 0) return 3;                                  // 设备码 / 激活码 / 作废名单
-    return (_state == SVBLicenseStateUnlicensed) ? 0 : 1;        // 移除激活
+    if (_state == SVBLicenseStateUnlicensed) return 0;
+    // v9.9.12: 已激活多一行「授权凭证」(发给作者登记台账)
+    return (_state == SVBLicenseStateValid) ? 2 : 1;
 }
 
 - (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
-    return section == 0 ? @"激活" : nil;
+    return section == 0 ? @"激活" : @"管理";
 }
 
 - (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
     if (section != 0) return nil;
     return @"把「设备码」发给作者换取激活码，粘贴进来保存即可。激活码与本机绑定，"
             "换机需要重新获取；到期后重新激活。\n未激活/已过期时，信息 App 里的视频背景不会生效。\n"
-            "作者可远程作废激活码：作废后本机最多 30 分钟内自动掉授权（需联网）。";
+            "作者可远程作废激活码：作废后本机最多 30 分钟内自动掉授权（需联网）。\n"
+            "激活后把「授权凭证」发给作者，作者即可登记并随时为你续期。";
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
@@ -1481,13 +1484,28 @@ static void SVBAppPickImage(UIViewController *host, void (^done)(UIImage *image)
         return c;
     }
 
+    // section 1: 已激活时先给一行「授权凭证」(v9.9.12)
+    if (_state == SVBLicenseStateValid && indexPath.row == 0) {
+        c.textLabel.text = @"授权凭证";
+        c.detailTextLabel.text = @"发给作者登记台账";
+        c.detailTextLabel.font = [UIFont systemFontOfSize:14];
+        c.detailTextLabel.textColor = SVBAccent();
+        c.imageView.image = SVBBadgeIcon(@"doc.text.fill",
+            [UIColor colorWithRed:0.35 green:0.45 blue:0.95 alpha:1],
+            [UIColor colorWithRed:0.58 green:0.68 blue:1.00 alpha:1]);
+        c.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+        SVBApplyCardStyle(c, 0, 2);
+        return c;
+    }
+
+    BOOL twoRows = (_state == SVBLicenseStateValid);
     c.textLabel.text = @"移除激活";
     c.textLabel.textColor = [UIColor systemRedColor];
     c.detailTextLabel.text = nil;
     c.imageView.image = SVBBadgeIcon(@"trash.fill",
         [UIColor colorWithRed:0.85 green:0.25 blue:0.28 alpha:1],
         [UIColor colorWithRed:1.00 green:0.45 blue:0.42 alpha:1]);
-    SVBApplyCardStyle(c, 0, 1);
+    SVBApplyCardStyle(c, twoRows ? 1 : 0, twoRows ? 2 : 1);
     return c;
 }
 
@@ -1521,7 +1539,23 @@ static void SVBAppPickImage(UIViewController *host, void (^done)(UIImage *image)
         return;
     }
     if (indexPath.section == 0) { [self inputLicense]; return; }
+    if (indexPath.row == 0 && _state == SVBLicenseStateValid) { [self copyReceipt]; return; }
     [self removeLicense];
+}
+
+// v9.9.12: 生成并复制授权凭证 (发给作者登记台账用)
+- (void)copyReceipt {
+    NSString *r = SVBActivationReceipt();
+    if (!r.length) {
+        [self alert:@"暂时无法生成"
+                 msg:@"只有「已激活」状态才能生成授权凭证。\n如果刚激活，退回本页再试一次即可。"];
+        return;
+    }
+    [UIPasteboard generalPasteboard].string = r;
+    [self alert:@"授权凭证已复制"
+             msg:[NSString stringWithFormat:
+        @"%@\n\n把这段文字发给作者，作者就能把你登记进台账（含激活时间和到期日）。\n\n"
+        @"凭证由本机签名，不含任何密钥，可以放心发送。", r]];
 }
 
 - (void)inputLicense {
@@ -1556,6 +1590,12 @@ static void SVBAppPickImage(UIViewController *host, void (^done)(UIImage *image)
     // 只有签名正确(有效/已过期)才落库; 输错的码不覆盖已有状态
     if (st == SVBLicenseStateValid || st == SVBLicenseStateExpired) {
         SVBManager *mgr = [SVBManager shared];
+        // v9.9.12: 换了一枚新码就把「首次激活时间」重置 (授权凭证里显示这个时间)
+        id old = [mgr configValueForKey:@"license_code"];
+        NSString *oldNorm = [old isKindOfClass:[NSString class]] ? SVBLicenseNormalize(old) : @"";
+        if (![oldNorm isEqualToString:norm]) {
+            [mgr setConfigValue:@([[NSDate date] timeIntervalSince1970]) forKey:@"license_first_seen"];
+        }
         [mgr setConfigValue:norm forKey:@"license_code"];
         [mgr setConfigValue:@([[NSDate date] timeIntervalSince1970]) forKey:@"license_last_seen"];
         [mgr postChangeNotification];

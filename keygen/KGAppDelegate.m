@@ -18,6 +18,15 @@ static UIColor *KGCardColor(void) { return [UIColor secondarySystemGroupedBackgr
 
 static NSString * const KGPrefSecret  = @"kg_secret";
 static NSString * const KGPrefHistory = @"kg_history";
+static NSString * const KGPrefLedger  = @"kg_ledger";   // v1.2.0 授权台账
+
+// Unix 秒 -> "2026-09-29"
+static NSString *KGShortDate(NSTimeInterval ts) {
+    if (ts <= 0) return @"-";
+    NSDateFormatter *df = [[NSDateFormatter alloc] init];
+    df.dateFormat = @"yyyy-MM-dd";
+    return [df stringFromDate:[NSDate dateWithTimeIntervalSince1970:ts]];
+}
 
 #pragma mark - 渐变视图
 
@@ -158,6 +167,11 @@ static UITextField *KGField(NSString *placeholder, CGFloat fontSize, BOOL digits
 @property (nonatomic, strong) NSMutableArray<NSString *> *revokedList;
 @property (nonatomic, assign) BOOL revokeDirty;
 @property (nonatomic, copy) NSString *revokeMessage;
+// v1.2.0 授权台账 (客户激活回执)
+@property (nonatomic, strong) UITextField *receiptField;
+@property (nonatomic, strong) UILabel *ledgerStatusLabel;
+@property (nonatomic, strong) UIStackView *ledgerStack;
+@property (nonatomic, strong) NSMutableArray<NSDictionary *> *ledger;
 @end
 
 @implementation KGViewController
@@ -205,12 +219,14 @@ static UITextField *KGField(NSString *placeholder, CGFloat fontSize, BOOL digits
     [root addArrangedSubview:[self termCard]];
     [root addArrangedSubview:[self resultCard]];
     [root addArrangedSubview:[self buildHistoryCard]];
+    [root addArrangedSubview:[self ledgerCard]];
     [root addArrangedSubview:[self revokeCard]];
     [root addArrangedSubview:[self secretCard]];
     [root addArrangedSubview:[self footerLabel]];
     [self refreshSecretUI];
     [self loadRevokeState];
     [self refreshHistory];
+    [self refreshLedger];
     [self refreshRevokeUI];
     if (!_revokeDirty) [self autoPullRevoke];   // 悄悄拉一次远端名单 (失败不影响使用)
 }
@@ -460,6 +476,314 @@ static UITextField *KGField(NSString *placeholder, CGFloat fontSize, BOOL digits
         [line addArrangedSubview:tg];
         [_historyStack addArrangedSubview:line];
     }
+}
+
+#pragma mark 授权台账 (v1.2.0)
+
+- (UIView *)ledgerCard {
+    UIStackView *stack;
+    UIView *card = KGCard(@"授权台账（客户发来的授权凭证粘进来登记）", &stack);
+
+    _receiptField = KGField(@"SMSVideoBG-ACT1|…（留空则读剪贴板）", 12, NO);
+    _receiptField.autocapitalizationType = UITextAutocapitalizationTypeNone;
+    _receiptField.delegate = self;
+    [_receiptField.heightAnchor constraintEqualToConstant:44].active = YES;
+    [stack addArrangedSubview:_receiptField];
+
+    UIButton *reg = KGButton(@"登记 / 更新", KGAccent(), UIColor.whiteColor, 42);
+    reg.titleLabel.font = [UIFont systemFontOfSize:15.5 weight:UIFontWeightSemibold];
+    [reg addTarget:self action:@selector(registerReceiptTapped) forControlEvents:UIControlEventTouchUpInside];
+    [stack addArrangedSubview:reg];
+
+    _ledgerStatusLabel = KGLabel(@"", 12.5, UIFontWeightMedium, [UIColor secondaryLabelColor]);
+    [stack addArrangedSubview:_ledgerStatusLabel];
+
+    _ledgerStack = [[UIStackView alloc] initWithFrame:CGRectZero];
+    _ledgerStack.axis = UILayoutConstraintAxisVertical;
+    _ledgerStack.spacing = 8;
+    [stack addArrangedSubview:_ledgerStack];
+
+    [stack addArrangedSubview:KGLabel(
+        @"客户操作：控制 App → 授权 → 授权凭证 → 复制后发给你。"
+        @"粘进来点登记，台账会记下设备码、激活时间、到期日。点某一行可以改备注 / 续签 / 删除。",
+        12.5, UIFontWeightRegular, [UIColor tertiaryLabelColor])];
+    return card;
+}
+
+- (NSMutableArray<NSDictionary *> *)ledger {
+    if (!_ledger) {
+        NSArray *a = [[NSUserDefaults standardUserDefaults] arrayForKey:KGPrefLedger];
+        _ledger = [NSMutableArray array];
+        for (id d in a) if ([d isKindOfClass:[NSDictionary class]]) [_ledger addObject:d];
+    }
+    return _ledger;
+}
+
+- (void)saveLedger {
+    [[NSUserDefaults standardUserDefaults] setObject:self.ledger forKey:KGPrefLedger];
+}
+
+- (void)refreshLedger {
+    if (!_ledgerStack) return;
+    while (_ledgerStack.arrangedSubviews.count) {
+        UIView *v = _ledgerStack.arrangedSubviews.lastObject;
+        [_ledgerStack removeArrangedSubview:v];
+        [v removeFromSuperview];
+    }
+    if (!self.ledger.count) {
+        [_ledgerStack addArrangedSubview:KGLabel(@"还没有登记任何客户", 13, UIFontWeightRegular,
+                                                 [UIColor tertiaryLabelColor])];
+        return;
+    }
+    for (NSInteger i = 0; i < self.ledger.count; i++)
+        [_ledgerStack addArrangedSubview:[self ledgerRowAtIndex:i]];
+}
+
+- (UIView *)ledgerRowAtIndex:(NSInteger)i {
+    NSDictionary *d = self.ledger[i];
+
+    UIView *row = [[UIView alloc] initWithFrame:CGRectZero];
+    row.translatesAutoresizingMaskIntoConstraints = NO;
+    row.backgroundColor = [UIColor tertiarySystemGroupedBackgroundColor];
+    row.layer.cornerRadius = 12;
+
+    UIStackView *v = [[UIStackView alloc] initWithFrame:CGRectZero];
+    v.axis = UILayoutConstraintAxisVertical;
+    v.spacing = 2;
+    v.translatesAutoresizingMaskIntoConstraints = NO;
+    [row addSubview:v];
+    [NSLayoutConstraint activateConstraints:@[
+        [v.topAnchor constraintEqualToAnchor:row.topAnchor constant:9],
+        [v.leadingAnchor constraintEqualToAnchor:row.leadingAnchor constant:12],
+        [v.trailingAnchor constraintEqualToAnchor:row.trailingAnchor constant:-12],
+        [v.bottomAnchor constraintEqualToAnchor:row.bottomAnchor constant:-9],
+    ]];
+
+    // 第一行: 备注(没有就显示设备码) + 剩余天数
+    NSString *note = [d objectForKey:@"note"];
+    UILabel *title = KGLabel(note.length ? note : ([d objectForKey:@"device"] ?: @"-"),
+                             14.5, UIFontWeightSemibold, [UIColor labelColor]);
+
+    BOOL forever = [[d objectForKey:@"forever"] boolValue];
+    NSNumber *lv = [d objectForKey:@"daysLeft"];
+    NSInteger dl = lv ? [lv integerValue] : -1;
+    NSString *leftText = forever ? @"永久"
+        : (dl < 0 ? [NSString stringWithFormat:@"已过期 %ld 天", (long)(-dl)]
+                  : [NSString stringWithFormat:@"剩 %ld 天", (long)dl]);
+    UIColor *leftColor = forever ? [UIColor systemGreenColor]
+        : (dl < 0 ? [UIColor systemRedColor]
+                  : (dl <= 30 ? [UIColor systemOrangeColor] : [UIColor systemGreenColor]));
+    UILabel *badge = KGLabel(leftText, 12.5, UIFontWeightSemibold, leftColor);
+    [badge setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+
+    UIStackView *head = [[UIStackView alloc] initWithFrame:CGRectZero];
+    head.axis = UILayoutConstraintAxisHorizontal;
+    head.spacing = 8;
+    head.alignment = UIStackViewAlignmentCenter;
+    [head addArrangedSubview:title];
+    [head addArrangedSubview:[[UIView alloc] initWithFrame:CGRectZero]];
+    [head addArrangedSubview:badge];
+    [v addArrangedSubview:head];
+
+    // 第二行: 设备码 · 到期 · 激活时间
+    NSNumber *act = [d objectForKey:@"activatedAt"];
+    [v addArrangedSubview:KGLabel(
+        [NSString stringWithFormat:@"%@ · 至 %@ · 激活 %@",
+         [d objectForKey:@"device"] ?: @"-", [d objectForKey:@"exp"] ?: @"-",
+         KGShortDate(act ? [act doubleValue] : 0)],
+        12, UIFontWeightRegular, [UIColor secondaryLabelColor])];
+
+    // 第三行: 激活码 (等宽小字)
+    UILabel *code = KGLabel([d objectForKey:@"code"] ?: @"", 11.5, UIFontWeightMedium,
+                            [UIColor tertiaryLabelColor]);
+    code.font = [UIFont monospacedSystemFontOfSize:11 weight:UIFontWeightMedium];
+    code.lineBreakMode = NSLineBreakByCharWrapping;
+    [v addArrangedSubview:code];
+
+    UITapGestureRecognizer *t = [[UITapGestureRecognizer alloc] initWithTarget:self
+                                                                       action:@selector(ledgerRowTapped:)];
+    [row addGestureRecognizer:t];
+    objc_setAssociatedObject(row, "kg_idx", @(i), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    return row;
+}
+
+- (void)ledgerRowTapped:(UITapGestureRecognizer *)g {
+    NSNumber *idx = objc_getAssociatedObject(g.view, "kg_idx");
+    if (!idx) return;
+    [self ledgerMenuForIndex:[idx integerValue]];
+}
+
+- (void)ledgerMenuForIndex:(NSInteger)i {
+    if (i < 0 || i >= self.ledger.count) return;
+    NSDictionary *d = self.ledger[i];
+    NSString *dev = [d objectForKey:@"device"] ?: @"-";
+    NSString *note = [d objectForKey:@"note"];
+
+    UIAlertController *ac = [UIAlertController
+        alertControllerWithTitle:note.length ? [NSString stringWithFormat:@"%@（%@）", note, dev] : dev
+                         message:[NSString stringWithFormat:@"到期 %@ · 激活 %@",
+                                  [d objectForKey:@"exp"] ?: @"-",
+                                  KGShortDate([[d objectForKey:@"activatedAt"] doubleValue])]
+                  preferredStyle:UIAlertControllerStyleActionSheet];
+    __weak typeof(self) w = self;
+    [ac addAction:[UIAlertAction actionWithTitle:@"改备注" style:UIAlertActionStyleDefault
+                                          handler:^(UIAlertAction *a) { [w editLedgerNote:i]; }]];
+    [ac addAction:[UIAlertAction actionWithTitle:@"续签（签新码并复制）" style:UIAlertActionStyleDefault
+                                          handler:^(UIAlertAction *a) { [w renewLedger:i]; }]];
+    [ac addAction:[UIAlertAction actionWithTitle:@"复制设备码" style:UIAlertActionStyleDefault
+                                          handler:^(UIAlertAction *a) {
+        [w ledgerCopy:[d objectForKey:@"device"] label:@"设备码"]; }]];
+    [ac addAction:[UIAlertAction actionWithTitle:@"复制激活码" style:UIAlertActionStyleDefault
+                                          handler:^(UIAlertAction *a) {
+        [w ledgerCopy:[d objectForKey:@"code"] label:@"激活码"]; }]];
+    [ac addAction:[UIAlertAction actionWithTitle:@"删除这条登记" style:UIAlertActionStyleDestructive
+                                          handler:^(UIAlertAction *a) {
+        [w.ledger removeObjectAtIndex:i];
+        [w saveLedger];
+        [w refreshLedger];
+        w.ledgerStatusLabel.text = @"已删除该条登记（不影响客户已激活的授权）";
+        w.ledgerStatusLabel.textColor = [UIColor secondaryLabelColor];
+    }]];
+    [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    ac.popoverPresentationController.sourceView = self.view;
+    ac.popoverPresentationController.sourceRect =
+        CGRectMake(self.view.bounds.size.width / 2, self.view.bounds.size.height / 2, 1, 1);
+    [self presentViewController:ac animated:YES completion:nil];
+}
+
+- (void)ledgerCopy:(NSString *)s label:(NSString *)what {
+    if (!s.length) return;
+    [UIPasteboard generalPasteboard].string = s;
+    _ledgerStatusLabel.text = [NSString stringWithFormat:@"✓ 已复制%@：%@", what, s];
+    _ledgerStatusLabel.textColor = [UIColor systemGreenColor];
+}
+
+- (void)editLedgerNote:(NSInteger)i {
+    if (i < 0 || i >= self.ledger.count) return;
+    NSDictionary *d = self.ledger[i];
+    UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"客户备注"
+                                                               message:@"写个名字或微信，以后好找"
+                                                        preferredStyle:UIAlertControllerStyleAlert];
+    [ac addTextFieldWithConfigurationHandler:^(UITextField *tf) {
+        tf.text = [d objectForKey:@"note"];
+        tf.placeholder = @"例如 张三 / 微信 zs001";
+    }];
+    __weak typeof(self) w = self;
+    [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    [ac addAction:[UIAlertAction actionWithTitle:@"保存" style:UIAlertActionStyleDefault
+                                          handler:^(UIAlertAction *a) {
+        NSMutableDictionary *m = [w.ledger[i] mutableCopy];
+        NSString *t = [ac.textFields.firstObject.text
+                       stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (t.length) m[@"note"] = t; else [m removeObjectForKey:@"note"];
+        [w.ledger replaceObjectAtIndex:i withObject:m];
+        [w saveLedger];
+        [w refreshLedger];
+    }]];
+    [self presentViewController:ac animated:YES completion:nil];
+}
+
+- (void)renewLedger:(NSInteger)i {
+    if (i < 0 || i >= self.ledger.count) return;
+    NSDictionary *d = self.ledger[i];
+    NSString *devRaw = [d objectForKey:@"deviceRaw"];
+    if (!devRaw.length) devRaw = [[d objectForKey:@"device"] stringByReplacingOccurrencesOfString:@"-" withString:@""];
+    if (devRaw.length != 8) {
+        _ledgerStatusLabel.text = @"⚠️ 这条登记没有可用的设备码，无法续签";
+        _ledgerStatusLabel.textColor = [UIColor systemOrangeColor];
+        return;
+    }
+
+    UIAlertController *ac = [UIAlertController
+        alertControllerWithTitle:@"续签"
+                         message:[NSString stringWithFormat:@"给 %@ 签一枚新码（留空天数 = 永久）",
+                                  [d objectForKey:@"device"] ?: devRaw]
+                  preferredStyle:UIAlertControllerStyleAlert];
+    [ac addTextFieldWithConfigurationHandler:^(UITextField *tf) {
+        tf.placeholder = @"天数（留空 = 永久）";
+        tf.keyboardType = UIKeyboardTypeNumberPad;
+        tf.text = @"365";
+    }];
+    __weak typeof(self) w = self;
+    [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    [ac addAction:[UIAlertAction actionWithTitle:@"签发并复制" style:UIAlertActionStyleDefault
+                                          handler:^(UIAlertAction *a) {
+        NSString *t = [ac.textFields.firstObject.text
+                       stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        BOOL forever = (t.length == 0);
+        NSInteger days = forever ? 0 : [t integerValue];
+        if (!forever && days <= 0) days = 365;
+
+        NSString *secret = w.secretField.text.length ? w.secretField.text : [w currentSecret];
+        NSString *exp = nil, *err = nil;
+        NSString *code = KGBuildCode(secret, devRaw, NO, forever, days, &exp, &err);
+        if (!code) {
+            w.ledgerStatusLabel.text = [NSString stringWithFormat:@"⚠️ %@", err ?: @"签发失败"];
+            w.ledgerStatusLabel.textColor = [UIColor systemOrangeColor];
+            return;
+        }
+        [w ledgerCopy:code label:@"新激活码"];
+        [w saveHistoryCode:code device:KGGroupDevice8(devRaw) universal:NO exp:exp];
+
+        NSMutableDictionary *m = [w.ledger[i] mutableCopy];
+        NSDictionary *dec = KGDecodeCode(code) ?: @{};
+        m[@"code"]     = code;
+        m[@"exp"]      = [dec objectForKey:@"exp"] ?: exp ?: @"-";
+        m[@"forever"]  = [dec objectForKey:@"forever"] ?: @(forever);
+        m[@"daysLeft"] = [dec objectForKey:@"daysLeft"] ?: @(-1);
+        m[@"renewedAt"] = @([[NSDate date] timeIntervalSince1970]);
+        [w.ledger replaceObjectAtIndex:i withObject:m];
+        [w saveLedger];
+        [w refreshLedger];
+        w.ledgerStatusLabel.text = [NSString stringWithFormat:@"✓ 已续签并复制新码 · 至 %@", m[@"exp"]];
+        w.ledgerStatusLabel.textColor = [UIColor systemGreenColor];
+    }]];
+    [self presentViewController:ac animated:YES completion:nil];
+}
+
+- (void)registerReceiptTapped {
+    [self.view endEditing:YES];
+    NSString *text = [_receiptField.text stringByTrimmingCharactersInSet:
+                      [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (!text.length) text = [UIPasteboard generalPasteboard].string ?: @"";
+    [self registerReceiptText:text];
+}
+
+- (void)registerReceiptText:(NSString *)text {
+    NSString *secret = _secretField.text.length ? _secretField.text : [self currentSecret];
+    NSString *err = nil;
+    NSDictionary *info = KGParseReceipt(secret, text, &err);
+    if (!info) {
+        _ledgerStatusLabel.text = [NSString stringWithFormat:@"⚠️ %@", err ?: @"登记失败"];
+        _ledgerStatusLabel.textColor = [UIColor systemOrangeColor];
+        return;
+    }
+
+    // 同一台设备再次登记 = 更新 (保留已写的备注)
+    NSString *devRaw = [info objectForKey:@"deviceRaw"] ?: @"";
+    NSInteger hit = -1;
+    for (NSInteger i = 0; i < self.ledger.count; i++) {
+        if ([devRaw isEqualToString:([self.ledger[i] objectForKey:@"deviceRaw"] ?: @"")]) { hit = i; break; }
+    }
+    NSMutableDictionary *rec = [info mutableCopy];
+    if (hit >= 0) {
+        NSString *note = [self.ledger[hit] objectForKey:@"note"];
+        if (note.length) rec[@"note"] = note;
+        rec[@"registeredAt"] = @([[NSDate date] timeIntervalSince1970]);
+        [self.ledger replaceObjectAtIndex:hit withObject:rec];
+    } else {
+        [self.ledger insertObject:rec atIndex:0];
+    }
+    [self saveLedger];
+    [self refreshLedger];
+
+    _receiptField.text = @"";
+    BOOL valid = [[rec objectForKey:@"daysLeft"] integerValue] >= 0 ||
+                 [[rec objectForKey:@"forever"] boolValue];
+    _ledgerStatusLabel.text = [NSString stringWithFormat:@"✓ %@ %@ · 至 %@",
+                               (hit >= 0 ? @"已更新" : @"已登记"), [rec objectForKey:@"device"] ?: @"",
+                               [rec objectForKey:@"exp"] ?: @"-"];
+    _ledgerStatusLabel.textColor = valid ? [UIColor systemGreenColor] : [UIColor systemOrangeColor];
 }
 
 #pragma mark 远程作废名单

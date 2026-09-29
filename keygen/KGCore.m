@@ -3,6 +3,7 @@
 #import <CommonCrypto/CommonDigest.h>
 #import <string.h>
 #import <time.h>
+#import <math.h>
 
 // 签名密钥: 优先取编译期注入的宏 (CI 从 GitHub Secret 传 -DSVB_LICENSE_SECRET=...);
 // 没有注入时用内置兜底值 —— 兜底值随公开源码可见, 仅供本地自测。
@@ -369,4 +370,123 @@ NSString *KGVerifyCode(NSString *secret, NSString *code, NSString *device) {
     if ([[NSDate date] timeIntervalSince1970] > expTs + 86400.0)
         return [NSString stringWithFormat:@"✗ 已过期 (%@)", txt];
     return [NSString stringWithFormat:@"✓ 有效 · 至 %@ · %@", txt, who];
+}
+
+#pragma mark - 授权凭证 (v1.2.0)
+
+NSString *KGReceiptPayloadString(NSString *dev8, NSString *code24, NSTimeInterval ts) {
+    return [NSString stringWithFormat:@"SVBACTIVATE/v1|%@|%@|%.0f", dev8, code24, ts];
+}
+
+NSString *KGGroupDevice8(NSString *dev8) {
+    NSString *c = KGClean(dev8);
+    if (c.length != 8) return dev8 ?: @"";
+    return [NSString stringWithFormat:@"%@-%@", [c substringToIndex:4], [c substringFromIndex:4]];
+}
+
+// 只留十六进制字符并大写 (凭证签名段可能混入标点/换行)
+static NSString *KGHexOnly(NSString *raw, NSUInteger limit) {
+    NSString *up = [raw uppercaseString];
+    NSMutableString *s = [NSMutableString string];
+    for (NSUInteger i = 0; i < up.length && s.length < limit; i++) {
+        unichar c = [up characterAtIndex:i];
+        if ((c >= '0' && c <= '9') || (c >= 'A' && c <= 'F')) [s appendFormat:@"%c", (char)c];
+    }
+    return s;
+}
+
+NSDictionary *KGDecodeCode(NSString *code) {
+    NSData *raw = KGB32Decode(code);
+    if (!raw || raw.length != KG_TOTAL_LEN) return nil;
+    const uint8_t *p = raw.bytes;
+    if (p[9] != KG_FORMAT_VER) return nil;
+
+    BOOL universal = YES;
+    for (int i = 0; i < 5; i++) if (p[i] != 0) { universal = NO; break; }
+
+    uint32_t dayIdx = ((uint32_t)p[5] << 24) | ((uint32_t)p[6] << 16) |
+                      ((uint32_t)p[7] << 8) | (uint32_t)p[8];
+    BOOL forever = (dayIdx == KG_NO_EXPIRE);
+    NSTimeInterval expTs = 0;
+    NSInteger daysLeft = -1;
+    if (!forever) {
+        expTs = KG_EPOCH + (NSTimeInterval)dayIdx * 86400.0 + 86399.0;
+        daysLeft = (NSInteger)floor((expTs - [[NSDate date] timeIntervalSince1970]) / 86400.0);
+    }
+    NSString *dev = universal ? @"" :
+        KGGroupDevice8(KGB32Encode([NSData dataWithBytes:p length:5]));
+
+    return @{
+        @"device":    dev,
+        @"universal": @(universal),
+        @"forever":   @(forever),
+        @"dayIndex":  @(dayIdx),
+        @"exp":       KGDateTextForDayIndex(dayIdx) ?: @"-",
+        @"expTs":     @(expTs),
+        @"daysLeft":  @(daysLeft),
+    };
+}
+
+NSDictionary *KGParseReceipt(NSString *secret, NSString *text, NSString **error) {
+    if (error) *error = nil;
+    if (secret.length == 0) { if (error) *error = @"签名密钥为空"; return nil; }
+    if (text.length == 0)   { if (error) *error = @"请先粘贴客户发来的授权凭证"; return nil; }
+
+    // 客户可能连说明文字一起复制 → 从文本里定位凭证段, 取到下一个空白为止
+    NSString *flat = [text stringByReplacingOccurrencesOfString:@"\r" withString:@" "];
+    flat = [flat stringByReplacingOccurrencesOfString:@"\n" withString:@" "];
+    NSRange r = [flat rangeOfString:@"SMSVideoBG-ACT1|"];
+    if (r.location == NSNotFound) {
+        if (error) *error = @"不是授权凭证（应以 SMSVideoBG-ACT1| 开头）";
+        return nil;
+    }
+    NSString *tail = [flat substringFromIndex:r.location];
+    NSMutableString *seg = [NSMutableString string];
+    for (NSUInteger i = 0; i < tail.length; i++) {
+        unichar c = [tail characterAtIndex:i];
+        if (c == ' ' || c == '\t') break;
+        [seg appendFormat:@"%c", (char)c];
+    }
+    NSArray *f = [seg componentsSeparatedByString:@"|"];
+    if (f.count < 5) { if (error) *error = @"凭证格式不完整（应有 5 段）"; return nil; }
+
+    NSString *dev  = KGDeviceNormalize(f[1]);          // 8 位设备码
+    NSString *code = KGClean(f[2]);                    // 24 字符激活码
+    if (dev.length != 8)   { if (error) *error = @"凭证里的设备码不合法"; return nil; }
+    if (code.length != 24) { if (error) *error = @"凭证里的激活码不合法"; return nil; }
+
+    NSString *tsDigits = [f[3] stringByTrimmingCharactersInSet:
+                          [[NSCharacterSet decimalDigitCharacterSet] invertedSet]];
+    NSTimeInterval ts = tsDigits.length ? [tsDigits doubleValue] : 0;
+    if (ts < 1600000000.0 || ts > 4102444800.0) {      // 2020-09 ~ 2100-01 之外判为异常
+        if (error) *error = @"凭证里的激活时间不合理";
+        return nil;
+    }
+
+    NSString *gotSig = KGHexOnly(f[4], 16);
+    if (gotSig.length != 16) { if (error) *error = @"凭证签名不完整"; return nil; }
+
+    // 1) 凭证签名: 证明这是装了本插件的设备生成, 而不是手打的
+    NSString *payload = KGReceiptPayloadString(dev, code, ts);
+    NSString *expect = [[KGRevokeSignatureHex(payload, secret) uppercaseString] substringToIndex:16];
+    if (![expect isEqualToString:gotSig]) {
+        if (error) *error = @"凭证签名校验失败（不是本插件生成，或签名密钥不一致）";
+        return nil;
+    }
+
+    // 2) 激活码本身必须有效, 且必须绑到凭证里这个设备
+    NSString *verdict = KGVerifyCode(secret, code, KGGroupDevice8(dev));
+    if (![verdict hasPrefix:@"✓"]) {
+        if (error) *error = [NSString stringWithFormat:@"激活码校验不通过：%@", verdict];
+        return nil;
+    }
+
+    NSMutableDictionary *out = [(KGDecodeCode(code) ?: @{}) mutableCopy];
+    out[@"device"]      = KGGroupDevice8(dev);
+    out[@"deviceRaw"]   = dev;
+    out[@"code"]        = KGGrouped(code);
+    out[@"codeRaw"]     = code;
+    out[@"activatedAt"] = @(ts);
+    out[@"registeredAt"] = @([[NSDate date] timeIntervalSince1970]);
+    return out;
 }

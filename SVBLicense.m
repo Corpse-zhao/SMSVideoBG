@@ -362,3 +362,49 @@ NSString *SVBLicenseStateText(SVBLicenseState st, NSString *detail) {
             return @"未激活";
     }
 }
+
+#pragma mark - 授权凭证 (v9.9.12)
+
+static NSString *SVBHexUpper(const uint8_t *b, NSUInteger n) {
+    NSMutableString *s = [NSMutableString stringWithCapacity:n * 2];
+    for (NSUInteger i = 0; i < n; i++) [s appendFormat:@"%02X", b[i]];
+    return s;
+}
+
+// 凭证签名原文 (与签发端 KGReceiptPayloadString 严格一致)
+static NSString *SVBReceiptPayload(NSString *dev8, NSString *code24, NSTimeInterval ts) {
+    return [NSString stringWithFormat:@"SVBACTIVATE/v1|%@|%@|%.0f", dev8, code24, ts];
+}
+
+NSString *SVBActivationReceipt(void) {
+    // 只有当前真的处于「已激活」才出凭证 (已作废 / 已过期 / 设备不符都不出)
+    if (!SVBIsLicensed()) return nil;
+
+    NSString *code = nil;
+    NSTimeInterval firstSeen = 0;
+    @try {
+        SVBManager *mgr = [SVBManager shared];
+        id v = [mgr configValueForKey:@"license_code"];
+        if ([v isKindOfClass:[NSString class]]) code = SVBLicenseNormalize(v);
+        id f = [mgr configValueForKey:@"license_first_seen"];
+        if (f && [f respondsToSelector:@selector(doubleValue)]) firstSeen = [f doubleValue];
+    } @catch (NSException *e) {}
+    if (code.length != 24) return nil;
+
+    NSString *devNorm = SVBLicenseNormalize(SVBDeviceCodeEnsure());
+    if (devNorm.length != 8) return nil;
+
+    // 首次激活时间: 控制 App 保存激活码时会写; 老用户升级上来则此时补记一次
+    if (firstSeen <= 0) {
+        firstSeen = [[NSDate date] timeIntervalSince1970];
+        @try { [[SVBManager shared] setConfigValue:@(firstSeen) forKey:@"license_first_seen"]; } @catch (NSException *e) {}
+    }
+
+    NSString *payload = SVBReceiptPayload(devNorm, code, firstSeen);
+    const char *utf8 = payload.UTF8String;
+    unsigned char mac[CC_SHA256_DIGEST_LENGTH] = {0};
+    CCHmac(kCCHmacAlgSHA256, kSVBSecret, strlen(kSVBSecret), utf8, strlen(utf8), mac);
+
+    return [NSString stringWithFormat:@"SMSVideoBG-ACT1|%@|%@|%.0f|%@",
+            devNorm, code, firstSeen, SVBHexUpper(mac, 8)];
+}
