@@ -45,4 +45,8 @@
         removeKeys:(NSArray<NSString *> *)remove
             secret:(NSString *)secret
         completion:(void (^)(BOOL ok, NSString *error))done;
+
+// v1.5.0 云端凭证表: 读私有仓库 SMSVideoBG-Receipts 的 receipts.json (客户插件自动上报)
+//   status=200 时 body 为文件内容; 404 = 还没有任何上报
++ (void)fetchReceiptsFile:(void (^)(NSInteger status, NSData *body, NSString *error))done;
 @end

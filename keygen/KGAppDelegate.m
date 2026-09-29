@@ -509,6 +509,27 @@ static UITextField *KGField(NSString *placeholder, CGFloat fontSize, BOOL digits
     [reg addTarget:self action:@selector(registerReceiptTapped) forControlEvents:UIControlEventTouchUpInside];
     [stack addArrangedSubview:reg];
 
+    // v1.5.0: 签发即登记 + 云端自动上报, 两条免粘贴通道
+    UIStackView *autoLine = [[UIStackView alloc] initWithFrame:CGRectZero];
+    autoLine.axis = UILayoutConstraintAxisHorizontal;
+    autoLine.spacing = 8;
+    autoLine.distribution = UIStackViewDistributionFillEqually;
+    autoLine.translatesAutoresizingMaskIntoConstraints = NO;
+
+    UIButton *imp = KGButton(@"从签发历史导入", [UIColor systemGrayColor], UIColor.whiteColor, 40);
+    imp.titleLabel.font = [UIFont systemFontOfSize:13.5 weight:UIFontWeightSemibold];
+    imp.layer.cornerRadius = 12;
+    [imp addTarget:self action:@selector(importHistoryToLedger) forControlEvents:UIControlEventTouchUpInside];
+
+    UIButton *cloud = KGButton(@"☁️ 拉取云端凭证", [UIColor systemIndigoColor], UIColor.whiteColor, 40);
+    cloud.titleLabel.font = [UIFont systemFontOfSize:13.5 weight:UIFontWeightSemibold];
+    cloud.layer.cornerRadius = 12;
+    [cloud addTarget:self action:@selector(pullCloudReceipts) forControlEvents:UIControlEventTouchUpInside];
+
+    [autoLine addArrangedSubview:imp];
+    [autoLine addArrangedSubview:cloud];
+    [stack addArrangedSubview:autoLine];
+
     // v1.4.0: 全员强制升级 —— 台账所有客户旧码作废, 新码走续签通道自动送达
     UIButton *fu = KGButton(@"⚠️ 全员强制升级（老版本客户全部丢授权）",
                             [UIColor systemOrangeColor], UIColor.whiteColor, 40);
@@ -526,10 +547,10 @@ static UITextField *KGField(NSString *placeholder, CGFloat fontSize, BOOL digits
     [stack addArrangedSubview:_ledgerStack];
 
     [stack addArrangedSubview:KGLabel(
-        @"客户操作：控制 App → 授权 → 授权凭证 → 复制后发给你。"
-        @"粘进来点登记，台账会记下设备码、激活时间、到期日。点某一行可以改备注 / 改签 / 强制升级 / 删除。"
-        @"v1.4.0 远程改签：不改激活码，直接改对方授权时间（续签 / 改短 / 复活过期码），客户零输入，30 分钟内自动生效。"
-        @"强制升级：旧码进作废名单（老版本 ≤9.9.14 直接失效）+ 改签表兜底（升级到 9.9.15+ 自动恢复），逼客户升级。",
+        @"v1.5.0 台账不用再等客户发凭证：① 签发激活码时自动登记（设备/到期从码里解出来）；"
+        @"② 「从签发历史导入」补登历史里的老码；③ 「☁️ 拉取云端凭证」读取客户插件自动上报的授权凭证"
+        @"（插件 9.9.16+ 且仓库配好 SVB_UPLOAD_TOKEN 后自动上报，含真实激活时间）。"
+        @"手动粘贴凭证照旧可用。点某一行可以改备注 / 改签 / 强制升级 / 删除。",
         12.5, UIFontWeightRegular, [UIColor tertiaryLabelColor])];
     return card;
 }
@@ -909,7 +930,20 @@ static UITextField *KGField(NSString *placeholder, CGFloat fontSize, BOOL digits
         return;
     }
 
-    // 同一台设备再次登记 = 更新 (保留已写的备注)
+    NSInteger r = [self mergeParsedReceipt:info];
+    NSMutableDictionary *rec = [info mutableCopy];
+    _receiptField.text = @"";
+    BOOL valid = [[rec objectForKey:@"daysLeft"] integerValue] >= 0 ||
+                 [[rec objectForKey:@"forever"] boolValue];
+    _ledgerStatusLabel.text = [NSString stringWithFormat:@"✓ %@ %@ · 至 %@",
+                               (r == 2 ? @"已更新" : @"已登记"), [rec objectForKey:@"device"] ?: @"",
+                               [rec objectForKey:@"exp"] ?: @"-"];
+    _ledgerStatusLabel.textColor = valid ? [UIColor systemGreenColor] : [UIColor systemOrangeColor];
+}
+
+// v1.5.0: 合并一条已解析的凭证进台账 (按设备码去重)
+// 返回 1=新增 2=更新 0=原样
+- (NSInteger)mergeParsedReceipt:(NSDictionary *)info {
     NSString *devRaw = [info objectForKey:@"deviceRaw"] ?: @"";
     NSInteger hit = -1;
     for (NSInteger i = 0; i < self.ledger.count; i++) {
@@ -917,23 +951,122 @@ static UITextField *KGField(NSString *placeholder, CGFloat fontSize, BOOL digits
     }
     NSMutableDictionary *rec = [info mutableCopy];
     if (hit >= 0) {
-        NSString *note = [self.ledger[hit] objectForKey:@"note"];
-        if (note.length) rec[@"note"] = note;
+        NSDictionary *old = self.ledger[hit];
+        // 同设备同码且激活时间也没变 -> 原样
+        NSString *oldCode = [old objectForKey:@"codeRaw"] ?: @"";
+        NSString *oldAct = old[@"activatedAt"] ? [NSString stringWithFormat:@"%@", old[@"activatedAt"]] : @"";
+        NSString *newAct = info[@"activatedAt"] ? [NSString stringWithFormat:@"%@", info[@"activatedAt"]] : @"";
+        if ([oldCode isEqualToString:([info objectForKey:@"codeRaw"] ?: @"")] &&
+            [oldAct isEqualToString:newAct]) return 0;
+        // 保留备注; 激活时间: 新凭证有就用新的, 没有保留旧的
+        if ([old objectForKey:@"note"]) rec[@"note"] = [old objectForKey:@"note"];
+        if (!rec[@"activatedAt"] && old[@"activatedAt"]) rec[@"activatedAt"] = old[@"activatedAt"];
         rec[@"registeredAt"] = @([[NSDate date] timeIntervalSince1970]);
         [self.ledger replaceObjectAtIndex:hit withObject:rec];
-    } else {
-        [self.ledger insertObject:rec atIndex:0];
+        [self saveLedger];
+        [self refreshLedger];
+        return 2;
     }
+    [self.ledger insertObject:rec atIndex:0];
     [self saveLedger];
     [self refreshLedger];
+    return 1;
+}
 
-    _receiptField.text = @"";
-    BOOL valid = [[rec objectForKey:@"daysLeft"] integerValue] >= 0 ||
-                 [[rec objectForKey:@"forever"] boolValue];
-    _ledgerStatusLabel.text = [NSString stringWithFormat:@"✓ %@ %@ · 至 %@",
-                               (hit >= 0 ? @"已更新" : @"已登记"), [rec objectForKey:@"device"] ?: @"",
-                               [rec objectForKey:@"exp"] ?: @"-"];
-    _ledgerStatusLabel.textColor = valid ? [UIColor systemGreenColor] : [UIColor systemOrangeColor];
+// v1.5.0: 签发即登记 —— 码是自己签的, 设备/到期都能从码里解出来, 不用等客户发凭证
+// 返回 1=新增 2=更新 0=跳过
+- (NSInteger)autoLedgerAddCode:(NSString *)codeRaw devRaw:(NSString *)devRaw {
+    if (codeRaw.length != 24 || devRaw.length != 8) return 0;
+    NSDictionary *dec = KGDecodeCode(codeRaw);
+    if (!dec || [dec objectForKey:@"universal"]) return 0;
+
+    NSMutableDictionary *rec = [dec mutableCopy];
+    rec[@"device"]    = KGGroupDevice8(devRaw);
+    rec[@"deviceRaw"] = devRaw;
+    rec[@"code"]      = KGGrouped(codeRaw);
+    rec[@"codeRaw"]   = codeRaw;
+    rec[@"issuedAt"]  = @([[NSDate date] timeIntervalSince1970]);
+
+    NSInteger hit = -1;
+    for (NSInteger i = 0; i < self.ledger.count; i++) {
+        if ([devRaw isEqualToString:([self.ledger[i] objectForKey:@"deviceRaw"] ?: @"")]) { hit = i; break; }
+    }
+    if (hit >= 0) {
+        NSDictionary *old = self.ledger[hit];
+        if ([[old objectForKey:@"codeRaw"] isEqualToString:codeRaw]) return 0;   // 台账里已是这枚码
+        rec[@"note"]        = [old objectForKey:@"note"];                        // 保留备注
+        rec[@"activatedAt"] = [old objectForKey:@"activatedAt"];                 // 保留已知激活时间
+        rec[@"registeredAt"]= [old objectForKey:@"registeredAt"];
+        [self.ledger replaceObjectAtIndex:hit withObject:rec];
+        [self saveLedger];
+        [self refreshLedger];
+        return 2;
+    }
+    [self.ledger insertObject:rec atIndex:0];
+    [self saveLedger];
+    [self refreshLedger];
+    return 1;
+}
+
+// v1.5.0: 把签发历史里的设备绑定码全部补进台账 (漏登记的老码一键找回)
+- (void)importHistoryToLedger {
+    NSInteger added = 0, updated = 0, same = 0, skip = 0;
+    for (NSDictionary *d in [self historyItems]) {
+        NSString *codeRaw = KGCodeNormalize([d objectForKey:@"code"] ?: @"");
+        NSString *devRaw  = KGDeviceNormalize([d objectForKey:@"device"] ?: @"");
+        if ([d objectForKey:@"universal"] || codeRaw.length != 24 || devRaw.length != 8) { skip++; continue; }
+
+        NSInteger hit = -1;
+        for (NSInteger i = 0; i < self.ledger.count; i++) {
+            if ([devRaw isEqualToString:([self.ledger[i] objectForKey:@"deviceRaw"] ?: @"")]) { hit = i; break; }
+        }
+        if (hit < 0) { added++; [self autoLedgerAddCode:codeRaw devRaw:devRaw]; }
+        else if ([[self.ledger[hit] objectForKey:@"codeRaw"] isEqualToString:codeRaw]) { same++; }
+        else { updated++; [self autoLedgerAddCode:codeRaw devRaw:devRaw]; }
+    }
+    _ledgerStatusLabel.text = [NSString stringWithFormat:
+        @"✓ 历史导入完成: 新增 %ld · 换码更新 %ld · 原样 %ld · 跳过 %ld (通用码/无效)",
+        (long)added, (long)updated, (long)same, (long)skip];
+    _ledgerStatusLabel.textColor = [UIColor systemGreenColor];
+}
+
+// v1.5.0: 拉取云端凭证 (客户插件 9.9.16+ 自动上报的授权凭证)
+- (void)pullCloudReceipts {
+    NSString *secret = _secretField.text.length ? _secretField.text : [self currentSecret];
+    _ledgerStatusLabel.text = @"⏳ 正在拉取云端凭证…";
+    _ledgerStatusLabel.textColor = [UIColor secondaryLabelColor];
+    __weak typeof(self) w = self;
+    [KGRevokeClient fetchReceiptsFile:^(NSInteger status, NSData *body, NSString *error) {
+        if (!w) return;
+        if (status == 404) {
+            w._ledgerStatusLabel.text = @"云端还没有凭证 —— 客户插件 9.9.16+ 且配好上传令牌后会自动上报";
+            w._ledgerStatusLabel.textColor = [UIColor secondaryLabelColor];
+            return;
+        }
+        if (status != 200) {
+            w._ledgerStatusLabel.text = [NSString stringWithFormat:@"⚠️ 拉取失败：%@", error ?: @"未知错误"];
+            w._ledgerStatusLabel.textColor = [UIColor systemOrangeColor];
+            return;
+        }
+        NSDictionary *rc = KGReceiptsParseJSON(body, secret);
+        if (!rc) {
+            w._ledgerStatusLabel.text = @"⚠️ 云端凭证表验签失败（密钥不一致或文件被篡改）";
+            w._ledgerStatusLabel.textColor = [UIColor systemOrangeColor];
+            return;
+        }
+        NSInteger added = 0, updated = 0, same = 0, bad = 0;
+        NSString *err2 = nil;
+        for (NSString *dev in rc) {
+            NSDictionary *info = KGParseReceipt(secret, [rc objectForKey:dev], &err2);
+            if (!info) { bad++; continue; }
+            NSInteger r = [w mergeParsedReceipt:info];
+            if (r == 1) added++; else if (r == 2) updated++; else same++;
+        }
+        w._ledgerStatusLabel.text = [NSString stringWithFormat:
+            @"✓ 云端拉取完成: 新增 %ld · 更新 %ld · 原样 %ld · 无效 %ld",
+            (long)added, (long)updated, (long)same, (long)bad];
+        w._ledgerStatusLabel.textColor = [UIColor systemGreenColor];
+    }];
 }
 
 #pragma mark 远程改签 (v1.4.0)
@@ -1353,6 +1486,12 @@ static UITextField *KGField(NSString *placeholder, CGFloat fontSize, BOOL digits
                          exp ?: @"-"];
     [self copyText:code];
     [self saveHistoryCode:code device:canonCode universal:uni exp:exp];
+
+    // v1.5.0: 签发即登记 —— 设备绑定码直接进台账, 不用等客户发凭证
+    if (!uni) {
+        NSInteger r = [self autoLedgerAddCode:KGCodeNormalize(code) devRaw:canonCode];
+        if (r == 1) _statusLabel.text = [_statusLabel.text stringByAppendingString:@" · 已自动登记台账"];
+    }
 }
 
 - (void)copyTapped {

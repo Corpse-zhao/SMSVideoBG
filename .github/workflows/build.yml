@@ -43,6 +43,9 @@ jobs:
           # 仓库 Settings -> Secrets and variables -> Actions -> New repository secret
           # 名字 SVB_LICENSE_SECRET; 没配则用兜底值编译 (仅供自测, 无法防盗版)。
           SVB_LICENSE_SECRET: ${{ secrets.SVB_LICENSE_SECRET }}
+          # v9.9.16 凭证自动上报令牌: fine-grained PAT, 只授权私有仓库
+          # SMSVideoBG-Receipts 的 Contents 读写。没配则插件自动上报静默关闭。
+          SVB_UPLOAD_TOKEN: ${{ secrets.SVB_UPLOAD_TOKEN }}
         run: |
           if [ -z "$SVB_LICENSE_SECRET" ]; then
             echo "::warning::SVB_LICENSE_SECRET 未配置 —— 本次用内置兜底密钥编译 (任何人拿到源码都能签发激活码)"

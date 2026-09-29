@@ -636,3 +636,42 @@ NSDictionary *KGParseReceipt(NSString *secret, NSString *text, NSString **error)
     out[@"registeredAt"] = @([[NSDate date] timeIntervalSince1970]);
     return out;
 }
+
+// ============================================================
+// 云端凭证表 (v1.5.0) — 与插件端 SVBRevoke.m 严格对齐
+// ============================================================
+
+static NSString *KGReceiptsPayloadStringInner(NSInteger ts, NSArray<NSString *> *lines) {
+    NSArray *sorted = [lines sortedArrayUsingSelector:@selector(compare:)];
+    return [NSString stringWithFormat:@"SVBGRCP/v1|%ld|%@",
+            (long)ts, [sorted componentsJoinedByString:@","]];
+}
+
+NSDictionary<NSString *, NSString *> *KGReceiptsParseJSON(NSData *json, NSString *secret) {
+    if (!json.length || !secret.length) return nil;
+    id obj = [NSJSONSerialization JSONObjectWithData:json options:0 error:NULL];
+    if (![obj isKindOfClass:[NSDictionary class]]) return nil;
+    NSDictionary *d = (NSDictionary *)obj;
+    NSNumber *ver = d[@"v"], *ts = d[@"ts"];
+    NSDictionary *rc = d[@"receipts"];
+    NSString *sig = d[@"sig"];
+    if (![ver isKindOfClass:[NSNumber class]] || ver.integerValue != 1) return nil;
+    if (![ts isKindOfClass:[NSNumber class]]) return nil;
+    if (![rc isKindOfClass:[NSDictionary class]]) return nil;
+    if (![sig isKindOfClass:[NSString class]] || sig.length != 64) return nil;
+
+    NSMutableArray *lines = [NSMutableArray array];
+    for (NSString *k in rc) {
+        if (![k isKindOfClass:[NSString class]] || k.length != 8) return nil;
+        id v = [rc objectForKey:k];
+        if (![v isKindOfClass:[NSString class]]) return nil;
+        NSString *line = (NSString *)v;
+        if (![line hasPrefix:@"SMSVideoBG-ACT1|"]) return nil;
+        NSArray *f = [line componentsSeparatedByString:@"|"];
+        if (f.count < 5 || ![KGDeviceNormalize(f[1]) isEqualToString:k]) return nil;
+        [lines addObject:line];
+    }
+    NSString *expect = KGRevokeSignatureHex(KGReceiptsPayloadStringInner(ts.integerValue, lines), secret);
+    if (![[sig lowercaseString] isEqualToString:expect]) return nil;
+    return rc;
+}

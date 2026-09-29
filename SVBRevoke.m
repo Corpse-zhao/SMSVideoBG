@@ -356,6 +356,195 @@ static void SVBFetchChain(NSArray<NSString *> *urls, NSUInteger idx,
     SVBFetchChain(urls, idx + 1, accept);
 }
 
+#pragma mark - 凭证自动上报 (v9.9.16)
+
+// 客户侧自动把授权凭证 (SMSVideoBG-ACT1|...) 上报到作者的私有仓库,
+// 作者签发 App 「☁️ 拉取云端凭证」一键收进台账 —— 客户不用再手动发凭证。
+// 上传令牌: fine-grained PAT, 只授权 SMSVideoBG-Receipts 的 Contents 读写,
+// 编译期从 GitHub Secret SVB_UPLOAD_TOKEN 注入 (仓库公开, 令牌泄露最多被
+// 清空凭证表, 碰不到主仓库的作废/改签名单, 不影响授权体系)。
+#ifndef SVB_UPLOAD_TOKEN
+#define SVB_UPLOAD_TOKEN ""
+#endif
+
+#define SVB_RCP_KEY_TS @"receipt_report_ts"     // 节流: 上次尝试时间
+#define SVB_RCP_REPO   @"Corpse-zhao/SMSVideoBG-Receipts"
+
+// 签名原文: "SVBGRCP/v1|<ts>|<凭证行 升序逗号连接>" (与签发 App KGReceiptsParseJSON 严格一致)
+static NSString *SVBRcptPayloadString(NSInteger ts, NSArray<NSString *> *lines) {
+    NSArray *sorted = [lines sortedArrayUsingSelector:@selector(compare:)];
+    return [NSString stringWithFormat:@"SVBGRCP/v1|%ld|%@",
+            (long)ts, [sorted componentsJoinedByString:@","]];
+}
+
+// 解析并验签云端凭证表; 通过返回 {设备码8: 凭证行}, 否则 nil
+static NSDictionary<NSString *, NSString *> *SVBRcptMapFromJSON(NSData *json) {
+    if (!json.length) return nil;
+    id obj = [NSJSONSerialization JSONObjectWithData:json options:0 error:NULL];
+    if (![obj isKindOfClass:[NSDictionary class]]) return nil;
+    NSDictionary *d = (NSDictionary *)obj;
+    NSNumber *ver = d[@"v"], *ts = d[@"ts"];
+    NSDictionary *rc = d[@"receipts"];
+    NSString *sig = d[@"sig"];
+    if (![ver isKindOfClass:[NSNumber class]] || ver.integerValue != 1) return nil;
+    if (![ts isKindOfClass:[NSNumber class]]) return nil;
+    if (![rc isKindOfClass:[NSDictionary class]]) return nil;
+    if (![sig isKindOfClass:[NSString class]] || sig.length != 64) return nil;
+
+    NSMutableArray *lines = [NSMutableArray array];
+    for (NSString *k in rc) {
+        if (![k isKindOfClass:[NSString class]] || k.length != 8) return nil;
+        id v = [rc objectForKey:k];
+        if (![v isKindOfClass:[NSString class]]) return nil;
+        NSString *line = (NSString *)v;
+        if (![line hasPrefix:@"SMSVideoBG-ACT1|"]) return nil;
+        NSArray *f = [line componentsSeparatedByString:@"|"];
+        if (f.count < 5 || ![[f[1] stringByReplacingOccurrencesOfString:@"-"
+                                                         withString:@""].uppercaseString isEqualToString:k])
+            return nil;
+        [lines addObject:line];
+    }
+    NSString *expect = SVBRevokeSignatureHex(SVBRcptPayloadString(ts.integerValue, lines));
+    if (![[sig lowercaseString] isEqualToString:expect]) return nil;
+    return rc;
+}
+
+static NSData *SVBRcptBuildJSON(NSInteger ts, NSDictionary<NSString *, NSString *> *receipts) {
+    NSDictionary *d = @{@"v": @1,
+                        @"ts": @(ts),
+                        @"receipts": receipts,
+                        @"sig": SVBRevokeSignatureHex(SVBRcptPayloadString(ts,
+                            [receipts allValues]))};
+    return [NSJSONSerialization dataWithJSONObject:d
+                                           options:NSJSONWritingPrettyPrinted | NSJSONWritingSortedKeys
+                                             error:NULL];
+}
+
+// 同步上报 (在后台队列调用): GET 现表 -> 验签合并本机凭证 -> PUT 覆盖
+static void SVBRevokeReportReceipt(void) {
+    @try {
+        NSString *token = @SVB_UPLOAD_TOKEN;
+        if (token.length == 0) return;                       // 未配置上传令牌: 静默跳过
+        SVBManager *mgr = [SVBManager shared];
+        if (SVBLicenseCurrentState(NULL) != SVBLicenseStateValid) return;
+        NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
+
+        // 注意: 不用 SVBActivationReceipt() —— 它内部走 SVBDeviceCodeEnsure()
+        // (会写共享配置, 仅供控制App 调用)。插件进程只读设备码 + 自拼凭证行,
+        // 与 SVBLicense.m 的格式严格一致: SMSVideoBG-ACT1|dev|code|ts|sig16
+        NSString *code = nil;
+        NSTimeInterval firstSeen = 0;
+        id v = [mgr configValueForKey:@"license_code"];
+        if ([v isKindOfClass:[NSString class]]) code = SVBLicenseNormalize(v);
+        id fv = [mgr configValueForKey:@"license_first_seen"];
+        if ([fv respondsToSelector:@selector(doubleValue)]) firstSeen = [fv doubleValue];
+        if (firstSeen <= 0) firstSeen = now;                 // 只用不落盘, 避免插件进程写配置
+        NSString *dev = SVBLicenseNormalize(SVBDeviceCode());
+        if (code.length != 24 || dev.length != 8) return;
+
+        NSString *payload = [NSString stringWithFormat:@"SVBACTIVATE/v1|%@|%@|%.0f", dev, code, firstSeen];
+        const char *utf8 = payload.UTF8String;
+        unsigned char mac[CC_SHA256_DIGEST_LENGTH] = {0};
+        CCHmac(kCCHmacAlgSHA256, kRevokeSecret, strlen(kRevokeSecret), utf8, strlen(utf8), mac);
+        NSString *sig = [[SVBRevokeHexLower(mac, 8) uppercaseString] substringToIndex:16];
+        NSString *receipt = [NSString stringWithFormat:@"SMSVideoBG-ACT1|%@|%@|%.0f|%@",
+                             dev, code, firstSeen, sig];
+
+        // 每天最多尝试一次
+        id tsv = nil;
+        @try { tsv = [mgr configValueForKey:SVB_RCP_KEY_TS]; } @catch (NSException *e) {}
+        NSTimeInterval last = [tsv respondsToSelector:@selector(doubleValue)] ? [tsv doubleValue] : 0;
+        if (last > 0 && now - last < 86400.0) return;
+        [mgr setConfigValue:@(now) forKey:SVB_RCP_KEY_TS];
+
+        NSString *apiURL = [NSString stringWithFormat:
+            @"https://api.github.com/repos/%@/contents/receipts.json", SVB_RCP_REPO];
+
+        // GET (JSON accept 拿 sha + base64 内容)
+        NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:apiURL]];
+        req.timeoutInterval = SVB_REVOKE_TIMEOUT;
+        req.cachePolicy = NSURLRequestReloadIgnoringLocalCacheData;
+        [req setValue:[NSString stringWithFormat:@"Bearer %@", token] forHTTPHeaderField:@"Authorization"];
+        [req setValue:@"application/vnd.github+json" forHTTPHeaderField:@"Accept"];
+
+        __block NSData *resp = nil;
+        __block NSInteger status = 0;
+        dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+        NSURLSessionDataTask *task = [[NSURLSession sharedSession]
+            dataTaskWithRequest:req completionHandler:^(NSData *d, NSURLResponse *r, NSError *e) {
+                resp = d;
+                if ([r isKindOfClass:[NSHTTPURLResponse class]])
+                    status = ((NSHTTPURLResponse *)r).statusCode;
+                dispatch_semaphore_signal(sem);
+            }];
+        [task resume];
+        dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW,
+                                                  (int64_t)((SVB_REVOKE_TIMEOUT + 6.0) * NSEC_PER_SEC)));
+        if (status != 200 && status != 404) {
+            [mgr log:@"[rcpt] 上报失败: HTTP %ld", (long)status];
+            return;
+        }
+
+        // 现表: 404 = 空; 验签不过则丢弃 (只用本机凭证重建, 自愈)
+        NSMutableDictionary<NSString *, NSString *> *receipts = [NSMutableDictionary dictionary];
+        NSString *sha = nil;
+        if (status == 200 && resp.length) {
+            id obj = [NSJSONSerialization JSONObjectWithData:resp options:0 error:NULL];
+            if ([obj isKindOfClass:[NSDictionary class]]) {
+                NSDictionary *meta = (NSDictionary *)obj;
+                if ([meta[@"sha"] isKindOfClass:[NSString class]]) sha = meta[@"sha"];
+                if ([meta[@"content"] isKindOfClass:[NSString class]]) {
+                    NSString *b64 = [(NSString *)meta[@"content"]
+                        stringByReplacingOccurrencesOfString:@"\n" withString:@""];
+                    NSData *raw = [[NSData alloc] initWithBase64EncodedString:b64 options:0];
+                    NSDictionary *old = SVBRcptMapFromJSON(raw);
+                    if (old) [receipts addEntriesFromDictionary:old];
+                }
+            }
+        }
+
+        if ([receipts objectForKey:dev] && [[receipts objectForKey:dev] isEqualToString:receipt]) {
+            [mgr log:@"[rcpt] 云端凭证已是最新"];
+            return;
+        }
+        [receipts setObject:receipt forKey:dev];
+
+        NSData *body = SVBRcptBuildJSON((NSInteger)now, receipts);
+        NSString *b64 = [body base64EncodedStringWithOptions:0];
+        NSMutableDictionary *put = [NSMutableDictionary dictionaryWithDictionary:
+            @{@"message": @"report receipt",
+              @"content": b64,
+              @"branch":  @"main"}];
+        if (sha.length) put[@"sha"] = sha;
+
+        NSData *putBody = [NSJSONSerialization dataWithJSONObject:put options:0 error:NULL];
+        NSMutableURLRequest *preq = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:apiURL]];
+        preq.HTTPMethod = @"PUT";
+        preq.timeoutInterval = SVB_REVOKE_TIMEOUT;
+        preq.HTTPBody = putBody;
+        [preq setValue:[NSString stringWithFormat:@"Bearer %@", token] forHTTPHeaderField:@"Authorization"];
+        [preq setValue:@"application/vnd.github+json" forHTTPHeaderField:@"Accept"];
+        [preq setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
+
+        __block NSInteger pstatus = 0;
+        dispatch_semaphore_t sem2 = dispatch_semaphore_create(0);
+        NSURLSessionDataTask *ptask = [[NSURLSession sharedSession]
+            dataTaskWithRequest:preq completionHandler:^(NSData *d, NSURLResponse *r, NSError *e) {
+                if ([r isKindOfClass:[NSHTTPURLResponse class]])
+                    pstatus = ((NSHTTPURLResponse *)r).statusCode;
+                dispatch_semaphore_signal(sem2);
+            }];
+        [ptask resume];
+        dispatch_semaphore_wait(sem2, dispatch_time(DISPATCH_TIME_NOW,
+                                                   (int64_t)((SVB_REVOKE_TIMEOUT + 6.0) * NSEC_PER_SEC)));
+
+        if (pstatus == 200 || pstatus == 201)
+            [mgr log:@"[rcpt] 授权凭证已自动上报 (%lu 台设备在云端)", (unsigned long)receipts.count];
+        else
+            [mgr log:@"[rcpt] 上报失败: HTTP %ld", (long)pstatus];
+    } @catch (NSException *e) {}
+}
+
 static void SVBRevokeRefreshForce(void);
 
 // 并发标记: 同一时刻只允许一条拉取链在跑
@@ -434,6 +623,9 @@ static void SVBRevokeRefreshForce(void) {
 
             // 两条链都落定后应用续签 (旧码 -> 新码)
             SVBRevokeApplyRenewal();
+
+            // v9.9.16: 把本机授权凭证自动上报到作者私有仓库 (每天最多一次)
+            SVBRevokeReportReceipt();
         } @catch (NSException *e) {}
         [SVBRevokeLock() lock];
         gSVBRevokeRunning = NO;

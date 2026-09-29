@@ -449,4 +449,23 @@ static NSString *KGPref(NSString *key, NSString *fallback) {
     });
 }
 
+// v1.5.0 云端凭证表: 私有仓库 Corpse-zhao/SMSVideoBG-Receipts (客户插件用上传令牌写入)
++ (void)fetchReceiptsFile:(void (^)(NSInteger status, NSData *body, NSString *error))done {
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSString *tok = [KGRevokeClient token];
+        if (!tok.length) {
+            dispatch_async(dispatch_get_main_queue(), ^{ done(0, nil, @"还没配 GitHub Token（设置 → GitHub 同步）"); });
+            return;
+        }
+        NSDictionary *r = [KGRevokeClient syncRequest:@"GET"
+            url:@"https://api.github.com/repos/Corpse-zhao/SMSVideoBG-Receipts/contents/receipts.json"
+          token:tok body:nil accept:@"application/vnd.github.raw"];
+        NSInteger status = [r[@"status"] integerValue];
+        NSData *data = r[@"data"];
+        NSString *err = (status != 200 && status != 404)
+            ? [KGRevokeClient errorTextForStatus:status data:data] : nil;
+        dispatch_async(dispatch_get_main_queue(), ^{ done(status, data, err); });
+    });
+}
+
 @end

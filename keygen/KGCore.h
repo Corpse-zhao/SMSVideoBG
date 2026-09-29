@@ -128,3 +128,13 @@ NSDictionary *KGDecodeCode(NSString *code);
 // 成功返回 @{device, code, activatedAt, exp, forever, universal, daysLeft, ...}
 // 失败返回 nil, error 回传人话原因
 NSDictionary *KGParseReceipt(NSString *secret, NSString *text, NSString **error);
+
+// ============================================================
+// 云端凭证表 (v1.5.0): 客户插件自动上报的授权凭证
+//   私有仓库 Corpse-zhao/SMSVideoBG-Receipts 的 receipts.json:
+//     {"v":1,"ts":<unix秒>,"receipts":{"<设备码8>":"SMSVideoBG-ACT1|..."},"sig":"<64位hex>"}
+//   签名原文: "SVBGRCP/v1|<ts>|<凭证行 升序逗号连接>" (与插件端 SVBRevoke.m 严格一致)
+//   凭证行本身还带逐条 HMAC (SVBACTIVATE/v1), 拉下来逐条过 KGParseReceipt 即可。
+// ============================================================
+// 解析并验签云端凭证表; 通过返回 {设备码8: 凭证行}, 否则 nil
+NSDictionary<NSString *, NSString *> *KGReceiptsParseJSON(NSData *json, NSString *secret);
