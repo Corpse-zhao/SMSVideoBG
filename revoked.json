@@ -1,9 +1,10 @@
 {
   "revoked" : [
     "793248125AAB376F",
-    "E42D87B6169FB8B4"
+    "E42D87B6169FB8B4",
+    "F0D57FD08E02B90C"
   ],
-  "sig" : "aaf8f5f79c6cc16e4ecae2a8503b637fdab527d01a024d8dbb0354731e2c9588",
-  "ts" : 1790656433,
+  "sig" : "bfdaa72d30fa38d3159afd25d58a9da7dd9fbd6ffd926269f5b9a62b24c25149",
+  "ts" : 1790656446,
   "v" : 1
 }
