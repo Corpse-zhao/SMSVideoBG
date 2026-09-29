@@ -133,6 +133,9 @@ NSArray<NSArray<NSString *> *> *SVBAllContextDefinitions(void);
 // 当前宿主进程是否为备忘录 (tweak 侧判进程用)
 BOOL SVBIsNotesHostProcess(void);
 
+// v11.0.4: 控制 App 把双容器路径写进配置 (宿主进程沙盒枚举失败时的后备定位)
+void SVBRecordContainerPaths(void);
+
 // 备忘录统一素材路径: /var/mobile/信息视频背景素材/备忘录
 // (软链 -> 备忘录App 数据容器内的真实素材根; 定位不到容器时返回路径本身)
 NSString *SVBNotesFriendlyRoot(void);

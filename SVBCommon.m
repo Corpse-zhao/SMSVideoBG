@@ -202,6 +202,19 @@ NSString *SVBRootLabel(NSString *root) {
 
 static NSArray<NSString *> *sSVBRoots = nil;
 
+// v11.0.4: 宿主进程读对方容器路径 (先运行时枚举, 失败回退控制App 记录的配置)
+static NSString *SVBOtherHostContainer(NSString *otherBid) {
+    NSString *oc = SVBFindAppDataContainer(otherBid);
+    if (oc.length) return oc;
+    @try {
+        NSString *key = [otherBid isEqualToString:SVB_SMS_BUNDLE_ID] ? @"svb_sms_container"
+                                                                     : @"svb_notes_container";
+        NSString *v = [[SVBManager shared] configValueForKey:key];
+        if ([v isKindOfClass:[NSString class]] && v.length) return v;
+    } @catch (NSException *e) {}
+    return nil;
+}
+
 void SVBRefreshMediaRoots(void) {
     sSVBRoots = nil;
 }
@@ -284,19 +297,6 @@ void SVBRecordContainerPaths(void) {
         if (sms.length) [m setConfigValue:sms forKey:@"svb_sms_container"];
         if (notes.length) [m setConfigValue:notes forKey:@"svb_notes_container"];
     } @catch (NSException *e) {}
-}
-
-// 宿主进程读对方容器路径 (先运行时枚举, 失败回退配置记录)
-static NSString *SVBOtherHostContainer(NSString *otherBid) {
-    NSString *oc = SVBFindAppDataContainer(otherBid);
-    if (oc.length) return oc;
-    @try {
-        NSString *key = [otherBid isEqualToString:SVB_SMS_BUNDLE_ID] ? @"svb_sms_container"
-                                                                     : @"svb_notes_container";
-        id v = [[SVBManager shared] configValueForKey:key];
-        if ([v isKindOfClass:[NSString class]] && v.length) return v;
-    } @catch (NSException *e) {}
-    return nil;
 }
 
 // ---- v10.4.0 运维文件治理 (在插件 %ctor 与控制App 启动时各跑一次) ----
