@@ -697,7 +697,7 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
     UIAlertController *ac = [UIAlertController
         alertControllerWithTitle:@"粘贴离线授权串"
                          message:@"把作者发给你的一整段文本（以 SVBOFFLINE1: 开头）粘进来。\n"
-                                 @"不用联网立即生效；有效期最长 30 天，联网校验成功后自动转成完整期限。"
+                                 @"不用联网立即生效；有效期最长 90 天，联网校验成功后自动转成完整期限。"
                   preferredStyle:UIAlertControllerStyleAlert];
     [ac addTextFieldWithConfigurationHandler:^(UITextField *tf) {
         tf.text = [clip rangeOfString:@"SVBOFFLINE1:"].location != NSNotFound ? clip : @"";
@@ -840,7 +840,7 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
         return @"【方式一 · 联网】点上面「本机 UDID」那一行复制，发给作者；作者签发后点「立即联网校验」即可生效。\n"
                 "作者删除你这条 UDID 记录后，本机最多 30 分钟掉授权。\n\n"
                 "【方式二 · 不联网】把作者发来的一整段授权串，点最后一行「粘贴离线授权」导入，"
-                "不用连网立刻生效（有效期最长 30 天，联网校验成功后自动转成完整期限）。\n\n"
+                "不用连网立刻生效（有效期最长 90 天，联网校验成功后自动转成完整期限）。\n\n"
                 "如果联网校验一直不过，长按任意一行可以：查看「授权诊断」、填写「Gitee 名单地址」或「自定义授权服务地址」。";
     if (section == 1)
         return @"点按某一行可为该界面导入/选用素材并单独设置不透明度/模糊度/音量。每个界面对应素材目录下一个独立的文件夹，用 Filza 直接放入视频同样生效。\n\n「对话详情」= 点进某个对话后上下聊天的那个界面（不是列表）。「未导入素材」的界面不会显示视频背景，导入并打开开关后生效。";
@@ -1799,7 +1799,7 @@ static void SVBAppPickImage(UIViewController *host, void (^done)(UIImage *image)
     if (section == 1)
         return @"【联网】点「立即联网校验」从作者名单拉取授权；作者删掉你这条 UDID 后，本机最多 30 分钟掉授权。\n\n"
                 "【不联网】点「粘贴离线授权」导入作者发来的一整段授权串，不用任何网络立即生效"
-                "（有效期最长 30 天，成功联网校验一次后会自动转成完整期限的在线授权）。\n\n"
+                "（有效期最长 90 天，成功联网校验一次后会自动转成完整期限的在线授权）。\n\n"
                 "两条路可以同时用：平时走联网，网络不通时用离线串顶着。";
     return @"「授权诊断」会逐个源实测连通性，直接告诉你是网络拉不通、UDID 不在作者名单里，还是名单被改坏了。\n\n"
             "长按这一行可填写 Gitee 名单地址（国内直连首选）；长按「立即联网校验」可填自定义授权服务地址。";
@@ -1921,7 +1921,7 @@ static void SVBAppPickImage(UIViewController *host, void (^done)(UIImage *image)
     UIAlertController *ac = [UIAlertController
         alertControllerWithTitle:@"粘贴离线授权串"
                          message:@"把作者发给你的一整段文本（以 SVBOFFLINE1: 开头）粘进来。\n"
-                                 @"不用联网立即生效；有效期最长 30 天，联网校验成功后自动转成完整期限。"
+                                 @"不用联网立即生效；有效期最长 90 天，联网校验成功后自动转成完整期限。"
                   preferredStyle:UIAlertControllerStyleAlert];
     [ac addTextFieldWithConfigurationHandler:^(UITextField *tf) {
         tf.text = [clip rangeOfString:@"SVBOFFLINE1:"].location != NSNotFound ? clip : @"";

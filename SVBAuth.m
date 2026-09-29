@@ -25,7 +25,7 @@ static const char *const kAuthSecret = SVB_LICENSE_SECRET;
 
 // --- 离线授权串 (v10.1.0) ---
 #define SVB_AUTH_TICKET_TAG @"SVBOFFLINE1:"
-#define SVB_AUTH_TICKET_MAX_DAYS 30         // 离线授权有效期上限(天): 防断网永久白嫖
+#define SVB_AUTH_TICKET_MAX_DAYS 90         // 离线授权有效期上限(天): 防断网永久白嫖
 
 // 编译期内置的 Gitee 名单地址 (CI 用 GitHub Secret SVB_GITEE_URL 注入;
 // 也可在控制 App 里填, 写入配置键 auth_gitee 后优先级更高)
@@ -224,7 +224,7 @@ static BOOL SVBAuthOfflineTicketExp(uint32_t *outExp) {
     id e = [(NSDictionary *)raw objectForKey:@"e"];
     if (![e respondsToSelector:@selector(unsignedIntValue)]) return NO;
     uint32_t exp = (uint32_t)[e unsignedIntValue];
-    // 硬性上限: 就算记录被手改, 也只认"导入日起最多 30 天"这一档
+    // 硬性上限: 就算记录被手改, 也只认"导入日起最多 90 天"这一档
     if (exp != SVB_AUTH_FOREVER) {
         uint32_t cap = SVBAuthDayIndexNow() + SVB_AUTH_TICKET_MAX_DAYS;
         if (exp > cap) exp = cap;
@@ -424,7 +424,7 @@ BOOL SVBAuthImportTicket(NSString *text, NSString **message) {
             break;
         }
 
-        // ③ 有效期强制截断到 30 天内
+        // ③ 有效期强制截断到 90 天内
         uint32_t today = SVBAuthDayIndexNow();
         uint32_t cap = today + SVB_AUTH_TICKET_MAX_DAYS;
         uint32_t use = (want == SVB_AUTH_FOREVER || want > cap) ? cap : want;

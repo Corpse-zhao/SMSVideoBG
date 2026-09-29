@@ -750,12 +750,12 @@ static UITextField *KGField(NSString *placeholder, CGFloat fontSize, BOOL digits
     }
 
     [UIPasteboard generalPasteboard].string = ticket;
-    uint32_t cap = KGDayIndexFromNow(30);
+    uint32_t cap = KGDayIndexFromNow(90);
     BOOL capped = (exp == KG_AUTH_FOREVER || exp > cap);
 
-    NSString *msg = [NSString stringWithFormat:@"%@\n\n（全文已复制到剪贴板，直接粘给客户即可）\n\n让客户在控制 App 里点「粘贴离线授权」导入：\n- 不需要任何网络就能生效\n- 只对这台设备有效（已绑定它的 UDID）\n- 离线有效期最长 30 天%@\n- 客户一旦联网校验成功，会自动转成完整期限：%@",
+    NSString *msg = [NSString stringWithFormat:@"%@\n\n（全文已复制到剪贴板，直接粘给客户即可）\n\n让客户在控制 App 里点「粘贴离线授权」导入：\n- 不需要任何网络就能生效\n- 只对这台设备有效（已绑定它的 UDID）\n- 离线有效期最长 90 天%@\n- 客户一旦联网校验成功，会自动转成完整期限：%@",
         KGAuthShortTicket(ticket),
-        capped ? @"（本单按 30 天算）" : @"（按你签的期限算）",
+        capped ? @"（本单按 90 天算）" : @"（按你签的期限算）",
         KGDateTextForDayIndex(exp)];
     [self kgAlert:@"离线授权串已复制" msg:msg];
 }
