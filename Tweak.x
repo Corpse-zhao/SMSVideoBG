@@ -686,7 +686,7 @@ static char SVBDetectedCtxKey;
 - (void)setBackgroundColor:(UIColor *)color {
     %orig;
     // 先让系统把色赋上, 再覆盖成透明; color 已是透明时不再赋值, 避免递归
-    UIView *v = self;
+    UIView *v = (UIView *)self;
     if (SVBBubbleSweepActive() && color && ![color isEqual:[UIColor clearColor]])
         v.backgroundColor = [UIColor clearColor];
 }
@@ -694,7 +694,7 @@ static char SVBDetectedCtxKey;
     %orig;
     if (!SVBBubbleSweepActive()) return;
     @try {
-        UIView *v = self;
+        UIView *v = (UIView *)self;
         if (v.backgroundColor && ![v.backgroundColor isEqual:[UIColor clearColor]])
             v.backgroundColor = [UIColor clearColor];
         if (v.layer.backgroundColor &&
