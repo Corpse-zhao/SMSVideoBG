@@ -11,14 +11,10 @@
 //  - 全局: 总开关 / 透明度 / 模糊度 / 音量(默认关闭)
 //  - 所有 Hook 均有异常保护, 不影响宿主 App 正常启动
 //
-//  v1.3 诊断强化:
-//   1. filter 里除 com.apple.MobileSMS 外还挂了 com.apple.mobilenotes
-//      作为「注入探针」: 打开备忘录若也能看到诊断横幅, 说明注入管线本身
-//      是通的, 问题只在信息App 这一侧 (反之说明 dylib 根本没被加载)。
-//   2. 只在信息App 进程里做界面 Hook (SVBIsSMSProcess 守卫), 其它进程
-//      只写心跳 + 显示横幅, 不干扰宿主。
-//   3. 进 App 后窗口顶部会出现一条可点关闭的横幅, 显示注入状态与各素材根
-//      的可见性 —— 这是判断「插件到底进没进信息App」最直接的证据。
+//  v11.0.0 双宿主:
+//   - 信息App (MobileSMS) 七类界面照旧;
+//   - 备忘录App (MobileNotes) 从「注入探针」转正: 正文/笔记列表/文件夹/画廊/
+//     搜索/最近删除/内部页兜底 七类语境, 独立总开关 (notes_master_enabled)。
 // ============================================================
 
 // 当前进程是不是苹果「信息」App (只有它是真正要挂背景的目标)
@@ -29,6 +25,22 @@ static BOOL SVBIsSMSProcess(void) {
         cached = [bid isEqualToString:SVB_SMS_BUNDLE_ID] ? 1 : 0;
     }
     return cached == 1;
+}
+
+// v11.0.0: 当前进程是不是苹果「备忘录」App (第二宿主)
+static BOOL SVBIsNotesProcess(void) {
+    static int cached = -1;
+    if (cached < 0) {
+        NSString *bid = SVBHostBundleIdentifier();
+        cached = [bid isEqualToString:SVB_NOTES_BUNDLE_ID] ? 1 : 0;
+    }
+    return cached == 1;
+}
+
+// 备忘录总闸: 授权 + 备忘录总开关 (v11.0.0)
+static BOOL SVBNotesShouldProcess(void) {
+    if (!SVBIsLicensed()) return NO;
+    return [[SVBManager shared] notesMasterEnabled];
 }
 
 // v1.9.0 授权总闸: 未激活/过期时, 所有「给视频背景让路」的透明化处理 (清底、藏卡、
@@ -62,14 +74,24 @@ static NSString *SVBContextForClassName(NSString *name) {
     if ([name containsString:@"Unread"])          return SVBContextUnread;
 
     // 会话列表 (所有信息; 已知/未知发件人由过滤器检测细分)
-    if ([name containsString:@"ConversationList"] ||
-        [name containsString:@"Conversations"]    ||
-        [name containsString:@"MessagesList"]     ||
-        [name containsString:@"Filter"]           ||
-        [name containsString:@"Message"]          ||
-        [name containsString:@"CK"])              return SVBContextAll;
-
     return nil;
+}
+
+// v11.0.0: 备忘录语境映射 (IC* 私有类前缀; 精确类名由专用 Hook 处理)
+static NSString *SVBNotesContextForClassName(NSString *name) {
+    if (!name || ![name hasPrefix:@"IC"]) return nil;
+    if ([name isEqualToString:@"ICNoteBodyViewController"] ||
+        [name isEqualToString:@"ICNoteEditViewController"] ||
+        [name isEqualToString:@"ICFolderViewController"] ||
+        [name isEqualToString:@"ICSettingsViewController"]) return nil;
+    if ([name containsString:@"Gallery"])  return SVBContextNGallery;
+    if ([name containsString:@"Search"])   return SVBContextNSearch;
+    if ([name containsString:@"RecentlyDeleted"] ||
+        [name containsString:@"Trash"])    return SVBContextNRecent;
+    if ([name containsString:@"NotesView"] ||
+        [name containsString:@"NoteList"] ||
+        [name containsString:@"Note"])     return SVBContextNList;
+    return SVBContextNInternal;
 }
 
 // 只对「确认返回对象类型(@)的方法」做消息发送 —— 返回结构体/原始类型的选择器
@@ -853,12 +875,91 @@ static char SVBDetectedCtxKey;
 }
 %end
 
-// 兜底: 类名关键词分发 (垃圾信息 / 最近删除 / 未读 / 过滤器页等)
+// ============================================================
+// v11.0.0 备忘录 App Hook (com.apple.mobilenotes, IC* 私有类)
+// 类不存在时 Logos 仅打警告, 不影响运行
+// ============================================================
+@interface ICNoteBodyViewController : UIViewController @end
+@interface ICNoteEditViewController : UIViewController @end
+@interface ICFolderViewController : UIViewController @end
+
+#define SVB_NOTES_GUARD() if (!SVBIsNotesProcess()) return;
+#define SVB_NOTES_APPLY(ctx) @try { \
+    [[SVBManager shared] applyToViewController:self context:(ctx)]; \
+    SVBRefreshBanner(ctx); \
+} @catch (NSException *e) {}
+
+// 备忘录正文 / 编辑页
+%hook ICNoteBodyViewController
+- (void)viewWillAppear:(BOOL)animated {
+    %orig;
+    SVB_NOTES_GUARD()
+    SVB_NOTES_APPLY(SVBContextNBody)
+    [[SVBManager shared] setContextActive:YES context:SVBContextNBody];
+}
+- (void)viewDidAppear:(BOOL)animated {
+    %orig;
+    SVB_NOTES_GUARD()
+    SVB_NOTES_APPLY(SVBContextNBody)
+}
+- (void)viewDidDisappear:(BOOL)animated {
+    %orig;
+    SVB_NOTES_GUARD()
+    @try { [[SVBManager shared] setContextActive:NO context:SVBContextNBody]; } @catch (NSException *e) {}
+}
+%end
+
+%hook ICNoteEditViewController
+- (void)viewWillAppear:(BOOL)animated {
+    %orig;
+    SVB_NOTES_GUARD()
+    SVB_NOTES_APPLY(SVBContextNBody)
+}
+- (void)viewDidDisappear:(BOOL)animated {
+    %orig;
+    SVB_NOTES_GUARD()
+    @try { [[SVBManager shared] setContextActive:NO context:SVBContextNBody]; } @catch (NSException *e) {}
+}
+%end
+
+// 文件夹 (备忘录首页)
+%hook ICFolderViewController
+- (void)viewWillAppear:(BOOL)animated {
+    %orig;
+    SVB_NOTES_GUARD()
+    SVB_NOTES_APPLY(SVBContextNFolder)
+}
+- (void)viewDidDisappear:(BOOL)animated {
+    %orig;
+    SVB_NOTES_GUARD()
+    @try { [[SVBManager shared] setContextActive:NO context:SVBContextNFolder]; } @catch (NSException *e) {}
+}
+%end
+
+// 兜底: 类名关键词分发 (垃圾信息 / 最近删除 / 未读 / 过滤器页等; v11.0.0 兼做备忘录兜底)
 %hook UIViewController
 - (void)viewWillAppear:(BOOL)animated {
     %orig;
-    SVB_SMS_GUARD()
+    // v11.0.0: 双宿主 —— 信息App / 备忘录进程才继续, 其它探针进程照旧只看横幅
+    if (!SVBIsSMSProcess() && !SVBIsNotesProcess()) return;
     @try {
+        // ---- 备忘录兜底 (IC* 类名分发, 近似全屏页面才铺) ----
+        if (SVBIsNotesProcess()) {
+            if (!SVBNotesShouldProcess()) return;
+            NSString *name = NSStringFromClass([self class]);
+            NSString *ctx = SVBNotesContextForClassName(name);
+            if (!ctx) return;   // 精确类名由上方专用 Hook 处理
+            if ([name containsString:@"Keyboard"] || [name containsString:@"Picker"]) return;
+            CGSize vs = self.view.bounds.size;
+            CGSize ss = UIScreen.mainScreen.bounds.size;
+            BOOL fit = (fabs(vs.width - ss.width) < 32 && fabs(vs.height - ss.height) < 32) ||
+                       (fabs(vs.width - ss.height) < 32 && fabs(vs.height - ss.width) < 32);
+            if (!fit) return;
+            [[SVBManager shared] applyToViewController:self context:ctx];
+            SVBRefreshBanner(ctx);
+            return;
+        }
+        // ---- 信息App 兜底 (原有逻辑照旧) ----
         NSString *name = NSStringFromClass([self class]);
         NSString *ctx = SVBContextForClassName(name);
         [[SVBManager shared] logClassOnce:name context:ctx];
@@ -896,7 +997,8 @@ static char SVBDetectedCtxKey;
 // 防声音穿透到其它界面。按「实际挂载过的语境」精确暂停。
 - (void)viewDidDisappear:(BOOL)animated {
     %orig;
-    SVB_SMS_GUARD()
+    // v11.0.0: 备忘录页面离开同样精确暂停
+    if (!SVBIsSMSProcess() && !SVBIsNotesProcess()) return;
     @try {
         NSString *applied = [[SVBManager shared] appliedContextForViewController:self];
         if (applied.length)

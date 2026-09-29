@@ -3,7 +3,8 @@ export THEOS_PACKAGE_SCHEME = rootless
 # 信息 App 是 arm64e 进程, 需要 arm64e 切片, 且必须用 macOS CI (Apple 原生工具链):
 # Linux 工具链的 arm64e 注入系统进程时 objc readClass SIGBUS (NotesVideoBG v2.2-v3.1 的崩溃根因)。
 export ARCHS = arm64 arm64e
-INSTALL_TARGET_PROCESSES = MobileSMS
+# v11.0.0 双宿主: 信息 + 备忘录 (备忘录 IC* 类同为 arm64e 系统进程)
+INSTALL_TARGET_PROCESSES = MobileSMS MobileNotes
 
 include $(THEOS)/makefiles/common.mk
 

@@ -1,8 +1,8 @@
 #!/bin/bash
 # ============================================================
-# SMSVideoBG postinst (v10.4.0)
+# SMSVideoBG postinst (v11.0.0)
 #  1) 统一素材路径父目录 (软链在定位到容器后建)
-#  2) 信息App 数据容器内的素材根 (v10.4.0: 不再建界面子目录)
+#  2) 信息App / 备忘录App 数据容器内的素材根 (v11.0.0 双容器)
 #  3) 控制App 图标注册
 #  4) 精简自检 (日志带轮转)
 #
@@ -66,6 +66,41 @@ if [ -n "$SMS_C" ]; then
   chown -h mobile:mobile "$FRIENDLY_LINK" 2>/dev/null
 fi
 
+# 2.2 v11.0.0 双宿主: 备忘录App 容器素材根 + 「备忘录」软链
+#     一次 grep 批量定位 com.apple.mobilenotes 容器 (与信息容器同法)
+NOTES_C=""
+for base in /var/mobile/Containers/Data/Application \
+            /private/var/mobile/Containers/Data/Application \
+            /rootfs/var/mobile/Containers/Data/Application; do
+  [ -d "$base" ] || continue
+  hit=$(grep -la -m1 -e "com.apple.mobilenotes" \
+        "$base"/*/.com.apple.mobile_container_manager.metadata.plist 2>/dev/null \
+        | head -n 1)
+  if [ -n "$hit" ]; then
+    NOTES_C=$(dirname "$hit")
+    break
+  fi
+done
+
+if [ -n "$NOTES_C" ]; then
+  mkdir -p "$NOTES_C/Library/SMSVideoBG" 2>/dev/null
+  chmod 777 "$NOTES_C/Library/SMSVideoBG" 2>/dev/null
+  chown mobile:mobile "$NOTES_C/Library/SMSVideoBG" 2>/dev/null
+
+  NOTES_LINK="$FRIENDLY_PARENT/备忘录"
+  NOTES_TARGET="$NOTES_C/Library/SMSVideoBG"
+  if [ -L "$NOTES_LINK" ]; then
+    CUR=$(readlink "$NOTES_LINK" 2>/dev/null)
+    if [ "$CUR" != "$NOTES_TARGET" ]; then
+      rm -f "$NOTES_LINK" 2>/dev/null
+      ln -s "$NOTES_TARGET" "$NOTES_LINK" 2>/dev/null
+    fi
+  elif [ ! -e "$NOTES_LINK" ]; then
+    ln -s "$NOTES_TARGET" "$NOTES_LINK" 2>/dev/null
+  fi
+  chown -h mobile:mobile "$NOTES_LINK" 2>/dev/null
+fi
+
 # 3. 注册控制 App 图标 (尽力而为, 失败不影响安装)
 # v1.8.4: 先把包目录授权给 mobile —— App 内「自定义名称/图标」要写 Info.plist
 # 与 CustomIcon.png, deb 装出来的 .app 默认 root 属主, mobile 写不进去 (用户实测写入失败)
@@ -77,20 +112,23 @@ for p in "/var/jb/Applications/SMSVideoBGApp.app" "/Applications/SMSVideoBGApp.a
   fi
 done
 
-# 让信息App 下次启动时加载新插件
+# 让信息App / 备忘录 下次启动时加载新插件
 killall -9 MobileSMS >/dev/null 2>&1 || true
+killall -9 MobileNotes >/dev/null 2>&1 || true
 
 # 4. 精简自检 (root 执行, 必然可写; 日志超 64KB 自动轮转)
 if [ -f "$LOG" ] && [ "$(stat -c%s "$LOG" 2>/dev/null || echo 0)" -gt 65536 ]; then
   mv -f "$LOG" "$LOG.1" 2>/dev/null
 fi
 {
-  echo "=== postinst $(date) v10.4.0"
+  echo "=== postinst $(date) v11.0.0"
   echo "jbroot: $(readlink -f /var/jb 2>/dev/null)"
   D=/var/jb/Library/MobileSubstrate/DynamicLibraries
   [ -f "$D/SMSVideoBG.dylib" ] && echo "dylib: OK $(stat -c%s "$D/SMSVideoBG.dylib" 2>/dev/null) bytes" || echo "dylib: MISSING"
   echo "SMS container: ${SMS_C:-NOT-FOUND}"
+  echo "Notes container: ${NOTES_C:-NOT-FOUND}"
   echo "friendly path: $(readlink "$FRIENDLY_LINK" 2>/dev/null || echo '(未建/是真目录)')"
+  echo "notes path: $(readlink "$FRIENDLY_PARENT/备忘录" 2>/dev/null || echo '(未建/是真目录)')"
 } >> "$LOG" 2>&1
 chmod 644 "$LOG" 2>/dev/null
 exit 0

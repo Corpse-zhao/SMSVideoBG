@@ -78,6 +78,28 @@ static UIImage *SVBIconForKey(NSString *key) {
     if ([key isEqualToString:SVBContextChat])    return SVBBadgeIcon(@"message.fill",
                                             [UIColor colorWithRed:1.00 green:0.36 blue:0.47 alpha:1],
                                             [UIColor colorWithRed:1.00 green:0.55 blue:0.45 alpha:1]);
+    // v11.0.0: 备忘录语境 (黄绿系, 与信息界面区分)
+    if ([key isEqualToString:SVBContextNBody])     return SVBBadgeIcon(@"note.text",
+                                            [UIColor colorWithRed:1.00 green:0.76 blue:0.00 alpha:1],
+                                            [UIColor colorWithRed:1.00 green:0.58 blue:0.20 alpha:1]);
+    if ([key isEqualToString:SVBContextNList])     return SVBBadgeIcon(@"list.bullet.rectangle.fill",
+                                            [UIColor colorWithRed:0.95 green:0.62 blue:0.15 alpha:1],
+                                            [UIColor colorWithRed:1.00 green:0.45 blue:0.35 alpha:1]);
+    if ([key isEqualToString:SVBContextNFolder])   return SVBBadgeIcon(@"folder.fill",
+                                            [UIColor colorWithRed:1.00 green:0.68 blue:0.10 alpha:1],
+                                            [UIColor colorWithRed:0.98 green:0.45 blue:0.40 alpha:1]);
+    if ([key isEqualToString:SVBContextNGallery])  return SVBBadgeIcon(@"photo.on.rectangle.angled",
+                                            [UIColor colorWithRed:0.55 green:0.65 blue:1.00 alpha:1],
+                                            [UIColor colorWithRed:0.75 green:0.55 blue:1.00 alpha:1]);
+    if ([key isEqualToString:SVBContextNSearch])   return SVBBadgeIcon(@"magnifyingglass",
+                                            [UIColor colorWithRed:0.30 green:0.69 blue:0.95 alpha:1],
+                                            [UIColor colorWithRed:0.45 green:0.82 blue:0.98 alpha:1]);
+    if ([key isEqualToString:SVBContextNRecent])   return SVBBadgeIcon(@"arrow.uturn.left.circle.fill",
+                                            [UIColor colorWithRed:0.63 green:0.32 blue:0.98 alpha:1],
+                                            [UIColor colorWithRed:0.50 green:0.55 blue:1.00 alpha:1]);
+    if ([key isEqualToString:SVBContextNInternal]) return SVBBadgeIcon(@"square.stack.3d.up.fill",
+                                            [UIColor colorWithRed:0.60 green:0.60 blue:0.65 alpha:1],
+                                            [UIColor colorWithRed:0.75 green:0.75 blue:0.80 alpha:1]);
     if ([key isEqualToString:@"__master"])       return SVBBadgeIcon(@"sparkles", p1, p2);
     if ([key isEqualToString:@"__debug"])        return SVBBadgeIcon(@"ant.fill",
                                             [UIColor colorWithRed:0.45 green:0.50 blue:0.60 alpha:1],
@@ -663,14 +685,33 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
     SVBAuthState _authState;
     NSString *_authDetail;
     BOOL _authSyncing;
+    // v11.0.0: 管理对象 0=信息App 1=备忘录App (配置键 ui_target)
+    NSInteger _targetMode;
 }
 
 - (instancetype)initWithStyle:(UITableViewStyle)style {
     if ((self = [super initWithStyle:style])) {
-        _defs = SVBContextDefinitions();
+        _targetMode = [[SVBManager shared] configValueForKey:@"ui_target"] ? 1 : 0;
+        _defs = (_targetMode == 1) ? SVBNotesContextDefinitions() : SVBContextDefinitions();
         self.title = @"信息视频背景";
     }
     return self;
+}
+
+#pragma mark - v11.0.0 信息 / 备忘录 双管理模式
+
+- (BOOL)svbIsNotesMode { return _targetMode == 1; }
+
+- (void)svbSetTargetMode:(NSInteger)m {
+    _targetMode = (m == 1) ? 1 : 0;
+    [[SVBManager shared] setConfigValue:@(_targetMode) forKey:@"ui_target"];
+    _defs = [self svbIsNotesMode] ? SVBNotesContextDefinitions() : SVBContextDefinitions();
+    self.tableView.tableHeaderView = [self makeHeroHeader];
+    [self.tableView reloadData];
+}
+
+- (void)targetModeChanged:(UISegmentedControl *)seg {
+    [self svbSetTargetMode:seg.selectedSegmentIndex];
 }
 
 #pragma mark - v10.0.1 未授权时首页只显示授权栏
@@ -747,7 +788,9 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
 - (UIView *)makeHeroHeader {
     CGFloat w = [UIScreen mainScreen].bounds.size.width - 24;
     CGFloat h = 112;
-    UIView *wrap = [[UIView alloc] initWithFrame:CGRectMake(0, 0, w + 24, h + 16)];
+    // v11.0.0: 渐变卡下方加「信息 / 备忘录」管理对象切换
+    CGFloat segH = 32;
+    UIView *wrap = [[UIView alloc] initWithFrame:CGRectMake(0, 0, w + 24, h + 16 + segH + 10)];
 
     UIView *card = [[UIView alloc] initWithFrame:CGRectMake(12, 8, w, h)];
     card.layer.cornerRadius = 20;
@@ -792,6 +835,16 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
     [card addGestureRecognizer:lp];
 
     [wrap addSubview:card];
+
+    // v11.0.0: 信息 / 备忘录 切换 (整页设置随模式切换: 总开关/界面列表/素材路径)
+    UISegmentedControl *seg = [[UISegmentedControl alloc]
+        initWithItems:@[@"📱 信息", @"📝 备忘录"]];
+    seg.frame = CGRectMake(12, 8 + h + 8, w, segH);
+    seg.selectedSegmentIndex = [self svbIsNotesMode] ? 1 : 0;
+    seg.appearance.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor];
+    [seg addTarget:self action:@selector(targetModeChanged:)
+              forControlEvents:UIControlEventValueChanged];
+    [wrap addSubview:seg];
     return wrap;
 }
 
@@ -842,8 +895,9 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
     }
     if (ip.section == 3 && ip.row == 0) [self svbAuthMenu];   // 授权状态 -> 诊断 / 清除授权
     if (ip.section == 3 && ip.row == 1) {                     // 素材路径 -> 复制路径
-        UIPasteboard.generalPasteboard.string = SVBMediaFriendlyRoot();
-        [self svbAlert:@"素材路径已复制" msg:SVBMediaFriendlyRoot()];
+        NSString *p = [self svbIsNotesMode] ? SVBNotesFriendlyRoot() : SVBMediaFriendlyRoot();
+        UIPasteboard.generalPasteboard.string = p;
+        [self svbAlert:@"素材路径已复制" msg:p];
     }
 }
 
@@ -948,15 +1002,22 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
     if (section == 2)
         return @"「切后台自动清理」：信息App 划到后台超过设定时间就自动结束它的进程（从后台再进去等于重开），用来解决个别情况下回前台视频卡住的问题；设定时间内回来（复制粘贴、看眼别的 App）不会被清理。点这一行可以改时间。\n\n「显示注入诊断横幅」：打开信息App（或备忘录）时，窗口顶部会显示一条横幅：能看到它 = 插件注入成功。横幅里列出素材目录是否可读、有几个素材，点一下可临时隐藏。";
     if (section == 3) {
+        // v11.0.0: 按管理模式显示对应素材路径 (信息=板栗仁 / 备忘录=备忘录)
+        BOOL notes = [self svbIsNotesMode];
+        NSString *p = notes ? SVBNotesFriendlyRoot() : SVBMediaFriendlyRoot();
         return [NSString stringWithFormat:
-                @"所有界面的素材都放在这一个文件夹里（点「素材路径」可直接跳到 Filza）：\n%@\n\n"
-                "不再分界面子文件夹 —— 把视频直接丢进去，主页面/所有信息/对话详情等每个界面都能选它当背景，"
+                @"当前管理模式：%@。\n\n"
+                "所有界面的素材都放在这一个文件夹里（点「素材路径」可直接跳到 Filza）：\n%@\n\n"
+                "不再分界面子文件夹 —— 把视频直接丢进去，%@" 
+                "每个界面都能选它当背景，"
                 "各界面可单独选不同的视频、单独调效果。\n"
                 "「诊断报告」开关：有问题时打开 —— 打开后开始记录，每分钟记一次快照，"
                 "关闭开关时把从打开到关闭这期间的日志存进素材文件夹旁的「看不懂的报告」文件夹，"
                 "文件名带生成时间（如 诊断报告_生成时间20260929-211953.txt）；没问题就保持关闭。\n"
                 "各界面音量默认关闭。设置即时生效，无需注销。",
-                SVBMediaFriendlyRoot()];
+                notes ? @"备忘录" : @"信息",
+                p,
+                notes ? @"备忘录正文/笔记列表/文件夹等" : @"主页面/所有信息/对话详情等"];
     }
     return nil;
 }
@@ -1032,10 +1093,11 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
             [sw addTarget:self action:@selector(masterToggled:) forControlEvents:UIControlEventValueChanged];
             c.accessoryView = sw;
         }
-        c.textLabel.text = @"启用视频背景";
+        c.textLabel.text = [self svbIsNotesMode] ? @"启用视频背景（备忘录）" : @"启用视频背景";
         c.textLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
         c.imageView.image = SVBIconForKey(@"__master");
-        ((UISwitch *)c.accessoryView).on = [mgr masterEnabled];
+        ((UISwitch *)c.accessoryView).on = [self svbIsNotesMode]
+            ? [mgr notesMasterEnabled] : [mgr masterEnabled];
         SVBApplyCardStyle(c, 0, 1);
         return c;
     }
@@ -1132,8 +1194,10 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
     if (indexPath.row == 1) {
         // v10.4.0: 统一素材路径 —— 点按跳 Filza, 长按复制路径
         //   (去掉行尾的 › 和右侧箭头: 用户要求「板栗仁路径后面的 > 符号删掉」)
+        // v11.0.0: 备忘录模式跳「备忘录」软链 (指向备忘录App 容器)
+        NSString *p = [self svbIsNotesMode] ? SVBNotesFriendlyRoot() : SVBMediaFriendlyRoot();
         c.textLabel.text = @"素材路径";
-        c.detailTextLabel.text = SVBMediaFriendlyRoot().lastPathComponent;
+        c.detailTextLabel.text = p.lastPathComponent;
         c.detailTextLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
         c.imageView.image = SVBIconForKey(@"__folder");
         c.accessoryType = UITableViewCellAccessoryNone;
@@ -1231,7 +1295,9 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
 
 - (void)masterToggled:(UISwitch *)sw {
     SVBManager *mgr = [SVBManager shared];
-    [mgr setConfigValue:@(sw.on) forKey:@"master_enabled"];
+    // v11.0.0: 备忘录模式写备忘录总开关 (默认关, 与信息总开关独立)
+    [mgr setConfigValue:@(sw.on)
+                 forKey:[self svbIsNotesMode] ? @"notes_master_enabled" : @"master_enabled"];
     [mgr postChangeNotification];
 }
 
@@ -1277,7 +1343,9 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
         }
         if (indexPath.row == 1) {
             // v10.3.0: 素材路径 —— 直接跳到 Filza (没装 Filza 就把路径放剪贴板)
-            SVBJumpToMediaPath(self, SVBMediaFriendlyRoot());
+            // v11.0.0: 备忘录模式跳「备忘录」软链
+            SVBJumpToMediaPath(self, [self svbIsNotesMode]
+                ? SVBNotesFriendlyRoot() : SVBMediaFriendlyRoot());
             return;
         }
         // v10.4.0e: 诊断报告行点击不再跳查看页, 只留开关 (报告直接看文件)

@@ -22,7 +22,11 @@
 //   同时保留 jbroot / Documents 等共享根作为兜底, 用户放哪都能被扫到。
 // ============================================================
 
-#define SVB_VERSION @"10.4.0"
+// v11.0.0: 双宿主版 —— 同一个插件同时接管「信息」与「备忘录」:
+//   - 备忘录(com.apple.mobilenotes)的 7 类界面语境见下方 NVB 常量;
+//   - 控制App 首页可切「信息 / 备忘录」两个管理页, 各自独立开关;
+//   - 备忘录素材根 = 备忘录App 数据容器 (控制App 双容器齐写)。
+#define SVB_VERSION @"11.0.0"
 #define SVB_SUITE @"com.nvb.smsvideobg"
 #define SVB_DARWIN_NOTE "com.nvb.smsvideobg/prefs.changed"
 #define SVB_MEDIA_DIR_NAME @"SMSVideoBG"
@@ -42,8 +46,9 @@
 #define SVB_APP_BUNDLE_ID @"com.nvb.smsvideobg.app"
 #define SVB_URL_SCHEME @"smsvideobg"
 
-// 目标进程 = 苹果「信息」
+// 目标进程 = 苹果「信息」/ 苹果「备忘录」(v11.0.0 双宿主)
 #define SVB_SMS_BUNDLE_ID @"com.apple.MobileSMS"
+#define SVB_NOTES_BUNDLE_ID @"com.apple.mobilenotes"
 
 // 插件侧最可靠的根目录 (jbroot: 越狱进程必可访问)
 NSString *SVBJBMediaDirectory(void);
@@ -69,6 +74,11 @@ BOOL SVBOpenPathInFilza(NSString *path, NSString **message);
 //   ② 诊断日志/探针超过 3 天自动删除 (「诊断报告不要一直保留」);
 //   ③ 旧版按界面分的子目录摊平: 视频上移到素材根, 空目录删除。
 void SVBCleanupHousekeeping(void);
+
+// v11.0.0: 双容器素材同步 (仅控制App 有意义 —— 两个容器根都可写):
+// 把每个可写根里的视频补拷到其它可写根, 保证信息App 与备忘录进程
+// 各自的容器里都有全量素材 (Filza 只往一个软链里丢文件也能两边生效)。
+NSInteger SVBSyncMediaAcrossRoots(void);
 
 // 全部候选素材根, 顺序 = 优先级 (v1.3: 容器根在前)
 NSArray<NSString *> *SVBRootCandidates(void);
@@ -103,6 +113,27 @@ extern NSString * const SVBContextChat;     // 对话详情
 // 7 类界面定义: @[key, 标题, 说明]
 NSArray<NSArray<NSString *> *> *SVBContextDefinitions(void);
 
+// ---- v11.0.0 备忘录语境 (com.apple.mobilenotes, IC* 私有类) ----
+extern NSString * const SVBContextNBody;      // 备忘录正文/编辑页
+extern NSString * const SVBContextNList;      // 笔记列表
+extern NSString * const SVBContextNFolder;    // 文件夹
+extern NSString * const SVBContextNGallery;   // 画廊
+extern NSString * const SVBContextNSearch;    // 搜索
+extern NSString * const SVBContextNRecent;    // 最近删除
+extern NSString * const SVBContextNInternal;  // 内部页兜底 (近似全屏的 IC* 页)
+
+// 备忘录 7 类界面定义: @[key, 标题, 说明]
+NSArray<NSArray<NSString *> *> *SVBNotesContextDefinitions(void);
+// 信息 + 备忘录 全部语境定义 (运维/迁移遍历用)
+NSArray<NSArray<NSString *> *> *SVBAllContextDefinitions(void);
+
+// 当前宿主进程是否为备忘录 (tweak 侧判进程用)
+BOOL SVBIsNotesHostProcess(void);
+
+// 备忘录统一素材路径: /var/mobile/信息视频背景素材/备忘录
+// (软链 -> 备忘录App 数据容器内的真实素材根; 定位不到容器时返回路径本身)
+NSString *SVBNotesFriendlyRoot(void);
+
 @interface SVBManager : NSObject
 + (instancetype)shared;
 - (NSUserDefaults *)prefs;
@@ -113,6 +144,8 @@ NSArray<NSArray<NSString *> *> *SVBContextDefinitions(void);
 - (void)setConfigValue:(id)value forKey:(NSString *)key;
 
 - (BOOL)masterEnabled;
+// v11.0.0: 备忘录总开关 (与信息总开关独立, 默认关 —— 需在控制App 备忘录页打开)
+- (BOOL)notesMasterEnabled;
 // 全局效果 (0~1)
 - (CGFloat)globalAlpha;
 - (CGFloat)globalBlur;
