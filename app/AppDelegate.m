@@ -1249,7 +1249,7 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
 }
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
-    if (section == 0) return [self.contextKey isEqualToString:SVBContextChat] ? 4 : 3; // 不透明度/模糊度/音量 (对话详情另加气泡不透明度)
+    if (section == 0) return 3; // 不透明度/模糊度/音量 (v10.4.0d: 气泡不透明度滑杆已删)
     // 素材行 + 「从相册导入视频素材」+ 「在 Filza 中打开素材文件夹」
     return MAX(1, (NSInteger)[[SVBManager shared] videosForContext:self.contextKey].count) + 2;
 }
@@ -1298,21 +1298,9 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
                 [mgr setConfigValue:@(v) forKey:[wself.contextKey stringByAppendingString:@"_volume"]];
                 [mgr postChangeNotification];
             };
-        } else {
-            // v1.7.3: 气泡不透明度 (仅对话详情; v1.7.4 只调气泡底色, 文字始终清晰)
-            // v1.7.9/10: 最低档 = 气泡连文字/时间戳彻底隐藏 (看视频时全透明, 看消息拉高)
-            [c setTitle:@"气泡不透明度" value:[mgr bubbleAlphaForContext:self.contextKey] max:1.0
-                    display:^NSString *(double v) {
-                        if (v >= 0.999) return @"原样";
-                        if (v <= 0.06) return @"隐藏气泡";
-                        return [NSString stringWithFormat:@"%.0f%%", v * 100];
-                    }];
-            c.onValue = ^(double v) {
-                [mgr setConfigValue:@(v) forKey:[wself.contextKey stringByAppendingString:@"_bubble_alpha"]];
-                [mgr postChangeNotification];
-            };
         }
-        SVBApplyCardStyle(c, indexPath.row, [self.contextKey isEqualToString:SVBContextChat] ? 4 : 3);
+        // v10.4.0d: 气泡不透明度滑杆已删 (对话详情也不再有第 4 行)
+        SVBApplyCardStyle(c, indexPath.row, 3);
         return c;
     }
 
@@ -1422,9 +1410,10 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
     NSString *path = nil;
     NSFileManager *fm = [NSFileManager defaultManager];
     // v10.4.0b: 素材在根「根部」(v10.4.0 摊平), 旧版子目录也兼容找一下
-    for (NSString *dir in [[SVBManager shared] directoriesForContext:self.contextKey
-                                                 includeRootFallback:YES]) {
-        NSString *p = [dir stringByAppendingPathComponent:name];
+    for (NSString *root in [[SVBManager shared] mediaRoots]) {
+        NSString *p = [root stringByAppendingPathComponent:name];
+        if ([fm fileExistsAtPath:p]) { path = p; break; }
+        p = [[root stringByAppendingPathComponent:self.contextKey] stringByAppendingPathComponent:name];
         if ([fm fileExistsAtPath:p]) { path = p; break; }
     }
     if (!path.length) {
