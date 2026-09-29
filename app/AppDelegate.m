@@ -715,7 +715,8 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
             UILabel *lbl = objc_getAssociatedObject(c, &SVBBgKillLabelKey);
             BOOL on = [mgr bgKillEnabled];
             lbl.text = on ? [NSString stringWithFormat:@"%.0f 秒", [mgr bgKillDelay]] : @"";
-            ((UISwitch *)c.accessoryView.arrangedSubviews[1]).on = on;
+            UIStackView *box = (UIStackView *)c.accessoryView;
+            [(UISwitch *)box.arrangedSubviews.lastObject setOn:on];
             c.textLabel.text = @"切后台自动清理";
             c.imageView.image = SVBBadgeIcon(@"bolt.slash.fill",
                 [UIColor colorWithRed:1.00 green:0.45 blue:0.35 alpha:1],
