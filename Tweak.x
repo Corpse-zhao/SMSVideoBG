@@ -379,13 +379,6 @@ static void SVBClearChatBubbleBGs(UIView *v, NSInteger depth) {
                 !CGColorEqualToColor(v.layer.backgroundColor, [UIColor clearColor].CGColor))
                 v.layer.backgroundColor = NULL;
             if (v.layer.shadowOpacity != 0) v.layer.shadowOpacity = 0;
-            // 已在屏上的旧气泡 (不再走 setImage:) 就地清掉气泡图 (仅文字类气泡)
-            if (SVBIsTextBalloonClass([v class]) && [v respondsToSelector:@selector(setImage:)]) {
-                @try {
-                    id cur = [(id)v image];
-                    if (cur) [(id)v setImage:nil];
-                } @catch (NSException *e) {}
-            }
         }
     } @catch (NSException *e) {}
     for (UIView *s in v.subviews) SVBClearChatBubbleBGs(s, depth + 1);
@@ -416,7 +409,7 @@ static void SVBSweepChatCollections(UIView *root) {
 // 进对话时清一轮 + 延迟补扫 (滚动复用/系统重设底色后再清)
 static void SVBApplyChatBubbles(UIViewController *vc) {
     if (!vc.view) return;
-    if (!SVBBubbleSweepActive()) { SVBRestoreChatBlur(); return; }
+    if (!SVBBubbleSweepActive()) { SVBRestoreChatBlur(); SVBRestoreMappedBalloons(); return; }
     SVBSweepChatCollections(vc.view);
     __weak UIViewController *wvc = vc;
     NSTimeInterval delays[4] = {0.35, 0.9, 2.0, 3.5};
@@ -427,7 +420,7 @@ static void SVBApplyChatBubbles(UIViewController *vc) {
             @try {
                 UIViewController *s = wvc;
                 if (!s || !s.isViewLoaded || !s.view.window) return;
-                if (!SVBBubbleSweepActive()) { SVBRestoreChatBlur(); return; }
+                if (!SVBBubbleSweepActive()) { SVBRestoreChatBlur(); SVBRestoreMappedBalloons(); return; }
                 SVBSweepChatCollections(s.view);
             } @catch (NSException *e) {}
         });
@@ -463,17 +456,79 @@ static void SVBStripBalloonPaint(UIView *v) {
     } @catch (NSException *e) {}
 }
 
-// 气泡图只对「文字类气泡」清 nil; 照片/视频等媒体气泡 (图片即内容) 不动。
-// 类链: CKTextBalloonView : CKColoredBalloonView : … : CKBalloonView : CKBalloonImageView
-// 只认 Text/Colored 前缀 —— 媒体类 (CKImageBalloonView 等) 走同样的父链但不匹配。
-static BOOL SVBIsTextBalloonClass(Class c) {
-    for (Class k = c; k; k = [k superclass]) {
-        NSString *n = NSStringFromClass(k);
-        if ([n hasPrefix:@"CKTextBalloonView"] || [n hasPrefix:@"CKColoredBalloonView"])
-            return YES;
-        if ([n isEqualToString:@"UIView"]) break;
+// ============ 气泡整体隐藏 + 文字映射 (v10.4.0 气泡方案二) ============
+// 思路 (用户拍板): 整个气泡视图直接藏掉 (图+底色+系统文字全没了),
+// 把消息文字取出来用我们自己的 UILabel 画一份 —— 白字黑影, 任何视频上都清楚,
+// 也不受系统 vibrancy/气泡图影响。照片/视频等非文字气泡不动。
+static char SVBBalloonAlphaKey;
+static char SVBBalloonHiddenKey;
+static char SVBMappedLabelKey;
+static NSMutableArray<UIView *> *SVBHiddenBalloons;
+
+static UITextView *SVBFindTextView(UIView *v, NSInteger depth) {
+    if (!v || depth > 8) return nil;
+    if ([v isKindOfClass:[UITextView class]]) return (UITextView *)v;
+    for (UIView *s in v.subviews) {
+        UITextView *r = SVBFindTextView(s, depth + 1);
+        if (r) return r;
     }
-    return NO;
+    return nil;
+}
+
+static void SVBRestoreMappedBalloons(void) {
+    if (!SVBHiddenBalloons.count) return;
+    for (UIView *b in [SVBHiddenBalloons copy]) {
+        if (b.superview) {
+            NSNumber *a = objc_getAssociatedObject(b, &SVBBalloonAlphaKey);
+            NSNumber *h = objc_getAssociatedObject(b, &SVBBalloonHiddenKey);
+            if (a) b.alpha = a.doubleValue;
+            if (h) b.hidden = h.boolValue;
+        }
+        UILabel *lb = objc_getAssociatedObject(b, &SVBMappedLabelKey);
+        if (lb) [lb removeFromSuperview];
+        objc_setAssociatedObject(b, &SVBMappedLabelKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    [SVBHiddenBalloons removeAllObjects];
+}
+
+static void SVBMapBalloonText(UIView *balloon) {
+    if (!balloon || !balloon.superview) return;
+    UITextView *tv = SVBFindTextView(balloon, 0);
+    if (!tv) return;                       // 非文字气泡 (照片/视频) 不动
+    if (!balloon.hidden) {
+        if (!SVBHiddenBalloons) SVBHiddenBalloons = [NSMutableArray new];
+        NSIndexSet *dead = [SVBHiddenBalloons indexesOfObjectsPassingTest:
+            ^BOOL(UIView *h, NSUInteger i, BOOL *stop) { return h.superview == nil; }];
+        if (dead.count) [SVBHiddenBalloons removeObjectsAtIndexes:dead];
+        objc_setAssociatedObject(balloon, &SVBBalloonAlphaKey, @(balloon.alpha),
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(balloon, &SVBBalloonHiddenKey, @(balloon.hidden),
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        [SVBHiddenBalloons addObject:balloon];
+        balloon.hidden = YES;              // 整个气泡藏掉 (图+底色+系统文字)
+    }
+    UILabel *lb = objc_getAssociatedObject(balloon, &SVBMappedLabelKey);
+    if (!lb) {
+        lb = [UILabel new];
+        lb.tag = 0x53564242;               // 'SVBB'
+        lb.numberOfLines = 0;
+        lb.lineBreakMode = NSLineBreakByWordWrapping;
+        lb.textColor = [UIColor whiteColor];
+        lb.shadowColor = [UIColor colorWithWhite:0 alpha:0.75];
+        lb.shadowOffset = CGSizeMake(0, 1);
+        lb.font = [UIFont systemFontOfSize:17];
+        [balloon.superview addSubview:lb];
+        objc_setAssociatedObject(balloon, &SVBMappedLabelKey, lb,
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    // 同步内容 / 字号 / 位置 (hidden 视图仍参与布局, frame 有效)
+    NSString *text = tv.text ?: @"";
+    if (![lb.text isEqualToString:text]) lb.text = text;
+    if (tv.font && ![lb.font isEqual:tv.font]) lb.font = tv.font;
+    CGRect fr = [balloon convertRect:tv.frame toView:balloon.superview];
+    CGSize need = [lb sizeThatFits:CGSizeMake(fr.size.width, CGFLOAT_MAX)];
+    if (need.height > fr.size.height) fr.size.height = need.height + 2;
+    if (!CGRectEqualToRect(lb.frame, fr)) lb.frame = fr;
 }
 
 #pragma mark - 信息 App Hook
@@ -653,6 +708,7 @@ static char SVBDetectedCtxKey;
     SVB_SMS_GUARD()
     @try { [[SVBManager shared] setContextActive:NO context:SVBContextChat]; } @catch (NSException *e) {}
     SVBRestoreChatBlur();
+    SVBRestoreMappedBalloons();   // 撤掉气泡隐藏与文字映射
 }
 %end
 
@@ -720,6 +776,7 @@ static char SVBDetectedCtxKey;
     SVB_SMS_GUARD()
     @try { [[SVBManager shared] setContextActive:NO context:SVBContextChat]; } @catch (NSException *e) {}
     SVBRestoreChatBlur();
+    SVBRestoreMappedBalloons();   // 撤掉气泡隐藏与文字映射
 }
 %end
 
@@ -740,18 +797,31 @@ static char SVBDetectedCtxKey;
 }
 %end
 
-// 气泡图赋值源头: 文字类气泡一律给空图 (媒体气泡不动)。滚动复用/新消息即时生效。
-%hook CKBalloonImageView
-- (void)setImage:(id)image {
+// 文字类气泡: 整体藏掉 + 文字映射成自己的 UILabel (白字黑影)。
+// 布局/复用都会重新映射, 滚动复用不串内容。
+%hook CKTextBalloonView
+- (void)layoutSubviews {
     %orig;
-    if (!SVBBubbleSweepActive()) return;
-    if (!image || !SVBIsTextBalloonClass([self class])) return;
-    @try {
-        UIView *v = (UIView *)self;
-        if (v.layer.contents) {
-            [self setImage:nil];   // image 非 nil 才会再进来一次, 无递归
-        }
-    } @catch (NSException *e) {}
+    if (SVBBubbleSweepActive()) {
+        SVBMapBalloonText((UIView *)self);
+    } else {
+        SVBRestoreMappedBalloons();
+    }
+}
+- (void)prepareForReuse {
+    %orig;
+    // 复用: 撤掉自己的映射 label, 恢复可见 (新内容会在下一次 layoutSubviews 重新映射)
+    UILabel *lb = objc_getAssociatedObject(self, &SVBMappedLabelKey);
+    if (lb) {
+        [lb removeFromSuperview];
+        objc_setAssociatedObject(self, &SVBMappedLabelKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    UIView *v = (UIView *)self;
+    NSNumber *a = objc_getAssociatedObject(v, &SVBBalloonAlphaKey);
+    if (a) v.alpha = a.doubleValue;
+    else v.alpha = 1;
+    v.hidden = NO;
+    [SVBHiddenBalloons removeObject:v];
 }
 %end
 
