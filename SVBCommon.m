@@ -216,7 +216,7 @@ void SVBCleanupHousekeeping(void) {
                                    [root stringByAppendingPathComponent:SVBProbeFileName]])) {
                 NSDictionary *at = [fm attributesOfItemAtPath:p error:nil];
                 NSDate *mt = at[NSFileModificationDate];
-                if (mt && [-mt timeIntervalSinceDate:now] > SVBLogMaxAgeDays * 86400.0)
+                if (mt && [now timeIntervalSinceDate:mt] > SVBLogMaxAgeDays * 86400.0)
                     [fm removeItemAtPath:p error:nil];
             }
 
@@ -251,7 +251,7 @@ void SVBCleanupHousekeeping(void) {
                                @"/var/mobile/Library/smsvideobg_debug.log"])) {
             NSDictionary *at = [fm attributesOfItemAtPath:p error:nil];
             NSDate *mt = at[NSFileModificationDate];
-            if (mt && [-mt timeIntervalSinceDate:now] > SVBLogMaxAgeDays * 86400.0)
+            if (mt && [now timeIntervalSinceDate:mt] > SVBLogMaxAgeDays * 86400.0)
                 [fm removeItemAtPath:p error:nil];
         }
     } @catch (NSException *e) {}
@@ -701,7 +701,7 @@ BOOL SVBDirWritablePath(NSString *dir) {
         @try {
             NSUserDefaults *ud = [[NSUserDefaults alloc] initWithSuiteName:SVB_SUITE];
             NSDate *stamp = [ud objectForKey:@"svb_debug_log_at"];
-            BOOL stale = stamp && [-stamp timeIntervalSinceNow] > SVBLogMaxAgeDays * 86400.0;
+            BOOL stale = stamp && [[NSDate date] timeIntervalSinceDate:stamp] > SVBLogMaxAgeDays * 86400.0;
             NSString *old = stale ? @"" : ([ud stringForKey:@"svb_debug_log"] ?: @"");
             NSString *nu = [old stringByAppendingString:line];
             if (nu.length > 12000) nu = [nu substringFromIndex:nu.length - 12000];
@@ -721,7 +721,7 @@ BOOL SVBDirWritablePath(NSString *dir) {
                 NSDictionary *at = [fm attributesOfItemAtPath:p error:nil];
                 NSDate *mt = at[NSFileModificationDate];
                 BOOL tooBig = [at[NSFileSize] unsignedLongLongValue] > 400000;
-                BOOL tooOld = mt && [-mt timeIntervalSinceNow] > SVBLogMaxAgeDays * 86400.0;
+                BOOL tooOld = mt && [[NSDate date] timeIntervalSinceDate:mt] > SVBLogMaxAgeDays * 86400.0;
                 if (tooBig || tooOld) [fm removeItemAtPath:p error:nil];
                 FILE *f = fopen(p.UTF8String, "a");
                 if (f) { fputs(line.UTF8String, f); fclose(f); }
@@ -735,7 +735,7 @@ BOOL SVBDirWritablePath(NSString *dir) {
                 NSFileManager *fm = [NSFileManager defaultManager];
                 NSDictionary *at = [fm attributesOfItemAtPath:p error:nil];
                 NSDate *mt = at[NSFileModificationDate];
-                if (mt && [-mt timeIntervalSinceNow] > SVBLogMaxAgeDays * 86400.0)
+                if (mt && [[NSDate date] timeIntervalSinceDate:mt] > SVBLogMaxAgeDays * 86400.0)
                     [fm removeItemAtPath:p error:nil];
                 FILE *f = fopen(p.UTF8String, "a");
                 if (f) { fputs(line.UTF8String, f); fclose(f); }
