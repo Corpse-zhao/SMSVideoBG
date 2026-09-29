@@ -1,6 +1,5 @@
 #import "AppDelegate.h"
-#import "SVBLicense.h"
-#import "SVBRevoke.h"
+#import "SVBAuth.h"
 #import <dlfcn.h>
 #import <objc/runtime.h>
 #import <QuartzCore/QuartzCore.h>
@@ -734,10 +733,10 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
     if (!c) c = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:basicId];
     if (indexPath.row == 0) {
         NSString *det = nil;
-        SVBLicenseState st = SVBLicenseCurrentState(&det);
-        BOOL ok = (st == SVBLicenseStateValid);
+        SVBAuthState st = SVBAuthCurrentState(&det);
+        BOOL ok = (st == SVBAuthStateAuthorized);
         c.textLabel.text = @"授权状态";
-        c.detailTextLabel.text = SVBLicenseStateText(st, det);
+        c.detailTextLabel.text = SVBAuthStateText(st, det);
         c.detailTextLabel.textColor = ok ? SVBAccent() : [UIColor systemOrangeColor];
         c.imageView.image = SVBBadgeIcon(ok ? @"checkmark.seal.fill" : @"lock.fill",
             ok ? [UIColor colorWithRed:0.20 green:0.78 blue:0.45 alpha:1]
@@ -845,7 +844,7 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
     }
     if (indexPath.section == 3) {
         if (indexPath.row == 0) {
-            [self.navigationController pushViewController:[[SVBLicenseController alloc] init] animated:YES];
+            [self.navigationController pushViewController:[[SVBAuthController alloc] init] animated:YES];
             return;
         }
         if (indexPath.row == 2) {
@@ -1383,11 +1382,15 @@ static void SVBAppPickImage(UIViewController *host, void (^done)(UIImage *image)
 
 @end
 
-#pragma mark - 授权页 (v1.9.0)
+#pragma mark - 授权页 (v10.0.0: UDID 白名单)
 
-@implementation SVBLicenseController {
-    SVBLicenseState _state;
-    NSString *_statusDetail;
+// 流程: 本机 UDID 复制给作者 -> 作者在签发 App 里签发 -> 写进远端白名单
+//       -> 本机自动拉取验签 -> 命中且未过期 = 已授权。
+// 作者删除该 UDID 后, 本机最多 30 分钟掉授权 (需联网; 离线超过 30 天也会要求重新校验)。
+@implementation SVBAuthController {
+    SVBAuthState _state;
+    NSString *_detail;
+    BOOL _syncing;
 }
 
 - (void)viewDidLoad {
@@ -1395,250 +1398,129 @@ static void SVBAppPickImage(UIViewController *host, void (^done)(UIImage *image)
     self.title = @"授权";
     self.tableView.backgroundColor = [UIColor systemGroupedBackgroundColor];
     self.tableView.separatorStyle = UITableViewCellSeparatorStyleNone;
-    [self reloadLicenseState];
+    [self reloadAuth];
 }
 
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
-    [self reloadLicenseState];
+    [self reloadAuth];
 }
 
-- (void)reloadLicenseState {
+- (void)reloadAuth {
     NSString *det = nil;
-    // v9.9.10: 打开授权页顺便同步一次作废名单 (内部节流, 不会每次都发请求)
-    SVBRevokeRefreshIfNeeded(NO);
-    _state = SVBLicenseCurrentState(&det);
-    _statusDetail = det;
+    SVBAuthRefreshIfNeeded(NO);              // 内部 30 分钟节流
+    _state = SVBAuthCurrentState(&det);
+    _detail = det;
     [self.tableView reloadData];
+}
+
+- (void)syncNow {
+    SVBAuthRefreshIfNeeded(YES);
+    _syncing = YES;
+    [self reloadAuth];
+    __weak typeof(self) w = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4.0 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        if (!w) return;
+        w->_syncing = NO;
+        [w reloadAuth];
+    });
 }
 
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView { return 2; }
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
-    if (section == 0) return 3;                                  // 设备码 / 激活码 / 作废名单
-    if (_state == SVBLicenseStateUnlicensed) return 0;
-    // v9.9.12: 已激活多一行「授权凭证」(发给作者登记台账)
-    return (_state == SVBLicenseStateValid) ? 2 : 1;
+    return section == 0 ? 2 : 1;
 }
 
 - (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
-    return section == 0 ? @"激活" : @"管理";
+    return section == 0 ? @"设备" : @"同步";
 }
 
 - (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
-    if (section != 0) return nil;
-    return @"把「设备码」发给作者换取激活码，粘贴进来保存即可。激活码与本机绑定，"
-            "换机需要重新获取；到期后重新激活。\n未激活/已过期时，信息 App 里的视频背景不会生效。\n"
-            "作者可远程作废激活码：作废后本机最多 30 分钟内自动掉授权（需联网）。\n"
-            "激活后把「授权凭证」发给作者，作者即可登记并随时为你续期。";
+    if (section != 1) return nil;
+    return @"① 点上面「本机 UDID」复制, 发给作者;\n"
+            "② 作者在签发 App 里输入该 UDID 点「签发授权」;\n"
+            "③ 本机联网后自动生效 (打开本页会立即同步一次)。\n\n"
+            "未授权 / 已过期时, 信息 App 里的视频背景不会生效。\n"
+            "作者删除你这条 UDID 记录后, 本机最多 30 分钟掉授权 (需联网)。";
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
-    static NSString *cellId = @"svb-license";
+    static NSString *cellId = @"svb-auth";
     UITableViewCell *c = [tableView dequeueReusableCellWithIdentifier:cellId];
     if (!c) c = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:cellId];
     c.textLabel.textColor = [UIColor labelColor];
+    c.textLabel.text = nil;
+    c.detailTextLabel.text = nil;
     c.detailTextLabel.font = [UIFont systemFontOfSize:15];
     c.accessoryType = UITableViewCellAccessoryNone;
 
     if (indexPath.section == 0 && indexPath.row == 0) {
-        c.textLabel.text = @"设备码";
-        c.detailTextLabel.text = SVBDeviceCodeEnsure() ?: @"获取失败";
-        c.detailTextLabel.font = [UIFont monospacedSystemFontOfSize:16 weight:UIFontWeightSemibold];
+        c.textLabel.text = @"本机 UDID";
+        c.detailTextLabel.text = SVBAuthUDID() ?: @"读取失败";
+        c.detailTextLabel.font = [UIFont monospacedSystemFontOfSize:12.5 weight:UIFontWeightSemibold];
         c.detailTextLabel.textColor = SVBAccent();
         c.imageView.image = SVBBadgeIcon(@"iphone.gen3",
             [UIColor colorWithRed:0.25 green:0.55 blue:1.00 alpha:1],
             [UIColor colorWithRed:0.40 green:0.80 blue:1.00 alpha:1]);
-        SVBApplyCardStyle(c, 0, 3);
-        return c;
-    }
-    if (indexPath.section == 0 && indexPath.row == 1) {
-        BOOL ok = (_state == SVBLicenseStateValid);
-        c.textLabel.text = ok ? @"激活码" : @"输入激活码";
-        c.detailTextLabel.text = SVBLicenseStateText(_state, _statusDetail);
-        c.detailTextLabel.textColor = ok ? SVBAccent() : [UIColor systemOrangeColor];
-        c.imageView.image = SVBBadgeIcon(ok ? @"key.fill" : @"lock.open.fill",
-            ok ? [UIColor colorWithRed:0.20 green:0.78 blue:0.45 alpha:1]
-               : [UIColor colorWithRed:1.00 green:0.58 blue:0.00 alpha:1],
-            ok ? [UIColor colorWithRed:0.35 green:0.85 blue:0.65 alpha:1]
-               : [UIColor colorWithRed:1.00 green:0.42 blue:0.30 alpha:1]);
-        c.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
-        SVBApplyCardStyle(c, 1, 3);
-        return c;
-    }
-    if (indexPath.section == 0) {
-        NSInteger n = SVBRevokeCachedCount();
-        NSTimeInterval ts = SVBRevokeLastFetchTime();
-        NSDateFormatter *df = [[NSDateFormatter alloc] init];
-        df.dateFormat = @"MM-dd HH:mm";
-        c.textLabel.text = @"作废名单";
-        c.detailTextLabel.text = ts > 0
-            ? [NSString stringWithFormat:@"%ld 条 · %@", (long)n, [df stringFromDate:[NSDate dateWithTimeIntervalSince1970:ts]]]
-            : @"未同步";
-        c.detailTextLabel.font = [UIFont systemFontOfSize:14];
-        c.detailTextLabel.textColor = [UIColor secondaryLabelColor];
-        c.imageView.image = SVBBadgeIcon(@"nosign",
-            [UIColor colorWithRed:0.45 green:0.45 blue:0.55 alpha:1],
-            [UIColor colorWithRed:0.65 green:0.62 blue:0.75 alpha:1]);
-        c.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
-        SVBApplyCardStyle(c, 2, 3);
-        return c;
-    }
-
-    // section 1: 已激活时先给一行「授权凭证」(v9.9.12)
-    if (_state == SVBLicenseStateValid && indexPath.row == 0) {
-        c.textLabel.text = @"授权凭证";
-        c.detailTextLabel.text = @"发给作者登记台账";
-        c.detailTextLabel.font = [UIFont systemFontOfSize:14];
-        c.detailTextLabel.textColor = SVBAccent();
-        c.imageView.image = SVBBadgeIcon(@"doc.text.fill",
-            [UIColor colorWithRed:0.35 green:0.45 blue:0.95 alpha:1],
-            [UIColor colorWithRed:0.58 green:0.68 blue:1.00 alpha:1]);
         c.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
         SVBApplyCardStyle(c, 0, 2);
         return c;
     }
+    if (indexPath.section == 0) {
+        BOOL ok = (_state == SVBAuthStateAuthorized);
+        c.textLabel.text = @"授权状态";
+        c.detailTextLabel.text = SVBAuthStateText(_state, _detail);
+        c.detailTextLabel.textColor = ok ? SVBAccent() : [UIColor systemOrangeColor];
+        c.imageView.image = SVBBadgeIcon(ok ? @"checkmark.seal.fill" : @"lock.fill",
+            ok ? [UIColor colorWithRed:0.20 green:0.78 blue:0.45 alpha:1]
+               : [UIColor colorWithRed:1.00 green:0.58 blue:0.00 alpha:1],
+            ok ? [UIColor colorWithRed:0.35 green:0.85 blue:0.65 alpha:1]
+               : [UIColor colorWithRed:1.00 green:0.42 blue:0.30 alpha:1]);
+        c.detailTextLabel.font = [UIFont systemFontOfSize:14];
+        c.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+        SVBApplyCardStyle(c, 1, 2);
+        return c;
+    }
 
-    BOOL twoRows = (_state == SVBLicenseStateValid);
-    c.textLabel.text = @"移除激活";
-    c.textLabel.textColor = [UIColor systemRedColor];
-    c.detailTextLabel.text = nil;
-    c.imageView.image = SVBBadgeIcon(@"trash.fill",
-        [UIColor colorWithRed:0.85 green:0.25 blue:0.28 alpha:1],
-        [UIColor colorWithRed:1.00 green:0.45 blue:0.42 alpha:1]);
-    SVBApplyCardStyle(c, twoRows ? 1 : 0, twoRows ? 2 : 1);
+    // section 1: 同步
+    NSTimeInterval ts = SVBAuthLastSyncTime();
+    NSDateFormatter *df = [[NSDateFormatter alloc] init];
+    df.dateFormat = @"MM-dd HH:mm";
+    c.textLabel.text = _syncing ? @"正在同步…" : @"立即联网校验";
+    c.detailTextLabel.text = [NSString stringWithFormat:@"名单 %ld 台 · %@",
+        (long)SVBAuthCachedCount(),
+        ts > 0 ? [df stringFromDate:[NSDate dateWithTimeIntervalSince1970:ts]] : @"未同步"];
+    c.detailTextLabel.font = [UIFont systemFontOfSize:13.5];
+    c.detailTextLabel.textColor = [UIColor secondaryLabelColor];
+    c.imageView.image = SVBBadgeIcon(@"arrow.triangle.2.circlepath",
+        [UIColor colorWithRed:0.30 green:0.62 blue:1.00 alpha:1],
+        [UIColor colorWithRed:0.55 green:0.45 blue:1.00 alpha:1]);
+    c.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+    SVBApplyCardStyle(c, 0, 1);
     return c;
 }
 
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
     if (indexPath.section == 0 && indexPath.row == 0) {
-        NSString *dev = SVBDeviceCodeEnsure() ?: @"";
-        if (dev.length) {
-            [UIPasteboard generalPasteboard].string = dev;
-            NSString *raw = SVBHardwareRawIDForDisplay();
-            NSMutableString *msg = [NSMutableString stringWithFormat:
-                @"%@\n识别方式：%@\n把它发给作者换取激活码。",
-                dev, SVBHardwareIDSource()];
-            if (raw.length) [msg appendFormat:@"\n\n硬件标识（也可以直接发这个）：\n%@", raw];
-            NSInteger n = (NSInteger)SVBDeviceCodeCandidates().count;
-            if (n > 1) [msg appendFormat:@"\n\n本机历史设备码 %ld 个，之前发过的老激活码依然有效。", (long)n];
-            [self alert:@"已复制设备码" msg:msg];
+        NSString *udid = SVBAuthUDID();
+        if (!udid.length) {
+            [self alert:@"读不到 UDID"
+                     msg:@"本机读不到硬件 UDID / 序列号，没法走 UDID 授权。\n"
+                          @"请联系作者说明情况。"];
+            return;
         }
+        [UIPasteboard generalPasteboard].string = udid;
+        [self alert:@"UDID 已复制"
+                 msg:[NSString stringWithFormat:
+            @"%@\n\n识别方式：%@\n把它发给作者，让作者为你签发授权。\n\n"
+            @"（作者删除这条记录后，本机最多 30 分钟掉授权）",
+            udid, SVBAuthUDIDSource()]];
         return;
     }
-    if (indexPath.section == 0 && indexPath.row == 2) {
-        SVBRevokeRefreshIfNeeded(YES);
-        NSInteger n = SVBRevokeCachedCount();
-        NSTimeInterval ts = SVBRevokeLastFetchTime();
-        NSDateFormatter *df = [[NSDateFormatter alloc] init];
-        df.dateFormat = @"yyyy-MM-dd HH:mm";
-        NSString *when = ts > 0 ? [df stringFromDate:[NSDate dateWithTimeIntervalSince1970:ts]] : @"从未";
-        [self alert:@"作废名单" msg:[NSString stringWithFormat:
-            @"本地名单 %ld 条\n上次同步：%@\n\n已发起一次同步，几秒后重进本页可看到结果。\n作者作废某枚激活码后，本机最多 30 分钟内会自动掉授权。",
-            (long)n, when]];
-        return;
-    }
-    if (indexPath.section == 0) { [self inputLicense]; return; }
-    if (indexPath.row == 0 && _state == SVBLicenseStateValid) { [self copyReceipt]; return; }
-    [self removeLicense];
-}
-
-// v9.9.12: 生成并复制授权凭证 (发给作者登记台账用)
-- (void)copyReceipt {
-    NSString *r = SVBActivationReceipt();
-    if (!r.length) {
-        [self alert:@"暂时无法生成"
-                 msg:@"只有「已激活」状态才能生成授权凭证。\n如果刚激活，退回本页再试一次即可。"];
-        return;
-    }
-    [UIPasteboard generalPasteboard].string = r;
-    [self alert:@"授权凭证已复制"
-             msg:[NSString stringWithFormat:
-        @"%@\n\n把这段文字发给作者，作者就能把你登记进台账（含激活时间和到期日）。\n\n"
-        @"凭证由本机签名，不含任何密钥，可以放心发送。", r]];
-}
-
-- (void)inputLicense {
-    UIAlertController *ac = [UIAlertController
-        alertControllerWithTitle:@"输入激活码"
-                         message:@"粘贴作者发给你的激活码（会与本机设备码绑定）"
-                  preferredStyle:UIAlertControllerStyleAlert];
-    [ac addTextFieldWithConfigurationHandler:^(UITextField *tf) {
-        tf.placeholder = @"XXXX-XXXX-XXXX-XXXX-XXXX-XXXX";
-        tf.autocapitalizationType = UITextAutocapitalizationTypeAllCharacters;
-        tf.autocorrectionType = UITextAutocorrectionTypeNo;
-        tf.clearButtonMode = UITextFieldViewModeWhileEditing;
-        NSString *cur = [[SVBManager shared] configValueForKey:@"license_code"];
-        if ([cur isKindOfClass:[NSString class]]) tf.text = cur;
-    }];
-    [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
-    __weak typeof(self) wself = self;
-    [ac addAction:[UIAlertAction actionWithTitle:@"保存" style:UIAlertActionStyleDefault
-                                          handler:^(UIAlertAction *a) {
-        [wself saveLicense:ac.textFields.firstObject.text];
-    }]];
-    [self presentViewController:ac animated:YES completion:nil];
-}
-
-- (void)saveLicense:(NSString *)raw {
-    NSString *norm = SVBLicenseNormalize(raw);
-    if (!norm.length) { [self alert:@"保存失败" msg:@"激活码为空。"]; return; }
-
-    NSString *det = nil;
-    SVBLicenseState st = SVBLicenseVerify(norm, &det);
-
-    // 只有签名正确(有效/已过期)才落库; 输错的码不覆盖已有状态
-    if (st == SVBLicenseStateValid || st == SVBLicenseStateExpired) {
-        SVBManager *mgr = [SVBManager shared];
-        // v9.9.12: 换了一枚新码就把「首次激活时间」重置 (授权凭证里显示这个时间)
-        id old = [mgr configValueForKey:@"license_code"];
-        NSString *oldNorm = [old isKindOfClass:[NSString class]] ? SVBLicenseNormalize(old) : @"";
-        if (![oldNorm isEqualToString:norm]) {
-            [mgr setConfigValue:@([[NSDate date] timeIntervalSince1970]) forKey:@"license_first_seen"];
-        }
-        [mgr setConfigValue:norm forKey:@"license_code"];
-        [mgr setConfigValue:@([[NSDate date] timeIntervalSince1970]) forKey:@"license_last_seen"];
-        [mgr postChangeNotification];
-        [self reloadLicenseState];
-    }
-
-    if (st == SVBLicenseStateValid && SVBRevokeIsCodeRevoked(norm)) {
-        // v9.9.10: 码本身合法, 但已被作者作废 —— 不落库, 直接告知
-        [self alert:@"该激活码已被作废"
-                 msg:@"作者已远程取消这枚激活码，请向作者索取新的。"];
-        return;
-    }
-
-    if (st == SVBLicenseStateValid) {
-        [self alert:@"激活成功" msg:SVBLicenseStateText(st, det)];
-    } else if (st == SVBLicenseStateExpired) {
-        [self alert:@"激活码已过期" msg:[NSString stringWithFormat:@"%@\n请联系作者续期。",
-                                        SVBLicenseStateText(st, det)]];
-    } else if (st == SVBLicenseStateWrongDevice) {
-        [self alert:@"设备不匹配"
-                 msg:[NSString stringWithFormat:@"这枚激活码绑的是别的设备。\n本机设备码：%@",
-                      SVBDeviceCodeEnsure() ?: @"(未知)"]];
-    } else {
-        [self alert:@"激活码无效" msg:@"请检查是否完整复制（含分隔符也没关系）。"];
-    }
-}
-
-- (void)removeLicense {
-    UIAlertController *ac = [UIAlertController
-        alertControllerWithTitle:@"移除激活"
-                         message:@"移除后视频背景会立即停止生效，确定？"
-                  preferredStyle:UIAlertControllerStyleAlert];
-    [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
-    __weak typeof(self) wself = self;
-    [ac addAction:[UIAlertAction actionWithTitle:@"移除" style:UIAlertActionStyleDestructive
-                                          handler:^(UIAlertAction *a) {
-        SVBManager *mgr = [SVBManager shared];
-        [mgr setConfigValue:@"" forKey:@"license_code"];
-        [mgr postChangeNotification];
-        [wself reloadLicenseState];
-    }]];
-    [self presentViewController:ac animated:YES completion:nil];
+    [self syncNow];
 }
 
 - (void)alert:(NSString *)title msg:(NSString *)msg {

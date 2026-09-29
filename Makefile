@@ -21,27 +21,20 @@ SVB_LICENSE_SECRET = SVBG-LICENSE-FALLBACK-INSECURE-SET-CI-SECRET
 endif
 LICENSE_CFLAGS = -DSVB_LICENSE_SECRET='"$(SVB_LICENSE_SECRET)"'
 
-# ------------------------------------------------------------
-# 凭证自动上报令牌 (v9.9.16): fine-grained PAT, 只授权私有仓库
-# SMSVideoBG-Receipts 的 Contents 读写。CI Secret 名 SVB_UPLOAD_TOKEN。
-# 未配置时为空串 -> 插件自动上报静默跳过, 其余功能不受影响。
-# ------------------------------------------------------------
-UPLOAD_CFLAGS = -DSVB_UPLOAD_TOKEN='"$(SVB_UPLOAD_TOKEN)"'
-
 # 实例 1: 主插件 (注入信息 App, 视频背景渲染)
 TWEAK_NAME = SMSVideoBG
-SMSVideoBG_FILES = Tweak.x SVBCommon.m SVBLicense.m SVBRevoke.m
+SMSVideoBG_FILES = Tweak.x SVBCommon.m SVBAuth.m
 SMSVideoBG_FRAMEWORKS = UIKit AVFoundation CoreMedia
-SMSVideoBG_CFLAGS = -fobjc-arc -fno-threadsafe-statics -Wno-deprecated-declarations $(LICENSE_CFLAGS) $(UPLOAD_CFLAGS)
+SMSVideoBG_CFLAGS = -fobjc-arc -fno-threadsafe-statics -Wno-deprecated-declarations $(LICENSE_CFLAGS)
 
 include $(THEOS_MAKE_PATH)/tweak.mk
 
 # 实例 2: 独立控制 App (v1.1 起取消设置面板: 面板加载进「设置」进程有闪退风险,
 # 且用户偏好独立 App 控制, 功能完全等价)
 APPLICATION_NAME = SMSVideoBGApp
-SMSVideoBGApp_FILES = app/main.m app/AppDelegate.m SVBCommon.m SVBLicense.m SVBRevoke.m
+SMSVideoBGApp_FILES = app/main.m app/AppDelegate.m SVBCommon.m SVBAuth.m
 SMSVideoBGApp_FRAMEWORKS = UIKit AVFoundation AVKit CoreMedia
-SMSVideoBGApp_CFLAGS = -fobjc-arc -fno-threadsafe-statics -Wno-deprecated-declarations $(LICENSE_CFLAGS) $(UPLOAD_CFLAGS)
+SMSVideoBGApp_CFLAGS = -fobjc-arc -fno-threadsafe-statics -Wno-deprecated-declarations $(LICENSE_CFLAGS)
 SMSVideoBGApp_INSTALL_PATH = /Applications
 
 include $(THEOS_MAKE_PATH)/application.mk

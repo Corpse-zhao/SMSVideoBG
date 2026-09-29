@@ -15,7 +15,7 @@ endif
 KEYGEN_CFLAGS = -DSVB_LICENSE_SECRET='"$(SVB_LICENSE_SECRET)"'
 
 APPLICATION_NAME = SVBKeyGen
-SVBKeyGen_FILES = main.m KGAppDelegate.m KGCore.m KGRevokeClient.m
+SVBKeyGen_FILES = main.m KGAppDelegate.m KGAuth.m KGAuthClient.m
 SVBKeyGen_FRAMEWORKS = UIKit
 SVBKeyGen_CFLAGS = -fobjc-arc -fno-threadsafe-statics -Wno-deprecated-declarations $(KEYGEN_CFLAGS)
 SVBKeyGen_INSTALL_PATH = /Applications

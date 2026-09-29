@@ -1,6 +1,5 @@
 #import "SVBCommon.h"
-#import "SVBLicense.h"
-#import "SVBRevoke.h"
+#import "SVBAuth.h"
 #import <CoreFoundation/CFNotificationCenter.h>
 
 // ============================================================
@@ -703,7 +702,7 @@ static char SVBDetectedCtxKey;
             // v9.9.10: 拉取远程作废名单 (内部节流 30 分钟, 失败沿用缓存)
             // 放后台队列, 不占宿主 App 启动时的主线程
             dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-                SVBRevokeRefreshIfNeeded(NO);
+                SVBAuthRefreshIfNeeded(NO);
             });
 
             // SpringBoard 只用 displayName 钩子, 不做素材迁移/诊断横幅 (防干扰桌面启动)

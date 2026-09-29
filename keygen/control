@@ -1,8 +1,8 @@
 Package: com.nvb.svbkeygen
-Name: 激活码签发
-Version: 1.5.0
+Name: 授权签发
+Version: 2.0.0
 Architecture: iphoneos-arm64
-Description: 信息视频背景 离线激活码签发工具 (设备绑定 + 有效期)
+Description: 信息视频背景 UDID 授权签发工具 (白名单 + 删除即掉授权)
 Maintainer: 板栗仁
 Author: 板栗仁
 Section: Utilities

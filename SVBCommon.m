@@ -1,5 +1,5 @@
 #import "SVBCommon.h"
-#import "SVBLicense.h"
+#import "SVBAuth.h"
 #import <CoreFoundation/CFNotificationCenter.h>
 #import <unistd.h>
 #import <stdlib.h>
@@ -533,23 +533,17 @@ BOOL SVBDirWritablePath(NSString *dir) {
 
 // 注入横幅文案: 一眼看清「插件有没有进信息App」+「素材到底读没读到」
 - (NSString *)bannerTextForContext:(NSString *)ctx {
-    // v1.9.0: 未激活/过期时横幅只报授权状态 —— 用户得知道视频背景为什么不生效
+    // v10.0.0: 未授权/未联网校验时横幅只报授权状态 —— 用户得知道视频背景为什么不生效
     NSString *licDetail = nil;
-    SVBLicenseState lic = SVBLicenseCurrentState(&licDetail);
-    // v9.9.10: 已被作者远程作废 —— 单独提示, 让用户知道该找谁
-    if (lic == SVBLicenseStateRevoked) {
-        return [NSString stringWithFormat:
-            @"⚠️ SMSVideoBG v%@ 已停止生效\n授权状态：%@\n如需继续使用，请联系作者重新获取激活码（点本横幅可隐藏）",
-            SVB_VERSION, SVBLicenseStateText(lic, licDetail)];
-    }
-
-    if (lic != SVBLicenseStateValid) {
-        NSString *dev = SVBDeviceCode() ?: @"(打开控制App 查看)";
+    SVBAuthState lic = SVBAuthCurrentState(&licDetail);
+    if (lic != SVBAuthStateAuthorized) {
+        NSString *udid = SVBAuthUDID() ?: @"(读不到)";
         NSString *appName = [self appDisplayName];
         if (!appName.length) appName = @"信息视频背景";
         return [NSString stringWithFormat:
-            @"⚠️ SMSVideoBG v%@ 未生效\n授权状态：%@\n设备码 %@\n请在「%@」里输入激活码（点本横幅可隐藏）",
-            SVB_VERSION, SVBLicenseStateText(lic, licDetail), dev, appName];
+            @"⚠️ SMSVideoBG v%@ 未生效\n授权状态：%@\n本机 UDID %@\n把 UDID 发给作者授权；"
+            @"作者删除该 UDID 后本机会掉授权（点本横幅可隐藏）",
+            SVB_VERSION, SVBAuthStateText(lic, licDetail), udid];
     }
 
     NSString *bid = SVBHostBundleIdentifier();

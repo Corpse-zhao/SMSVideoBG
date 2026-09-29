@@ -24,7 +24,7 @@ fi
 cp "$DIR/Resources/AppInfo.plist" "$APP_DIR/Info.plist"
 cp "$DIR/Resources/Icon.png" "$APP_DIR/Icon.png"
 
-if ! grep -q "激活码签发" "$APP_DIR/Info.plist"; then
+if ! grep -q "授权签发" "$APP_DIR/Info.plist"; then
   echo "::error::Info.plist 覆盖失败"
   exit 1
 fi

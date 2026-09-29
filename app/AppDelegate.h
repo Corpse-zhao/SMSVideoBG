@@ -28,6 +28,6 @@
 @interface SVBAppIdentityController : UITableViewController
 @end
 
-// v1.9.0 授权页: 设备码 / 输入激活码 / 移除激活
-@interface SVBLicenseController : UITableViewController
+// v10.0.0 授权页: 直接读取本机 UDID, 复制发给作者; 状态由远端白名单决定
+@interface SVBAuthController : UITableViewController
 @end
