@@ -41,7 +41,7 @@ static NSString * const SVBLogFileName     = @"_tweak.log";
 // ---- v9.9.11 前后台自愈 / 切后台自动清理 的共享状态 ----
 static volatile BOOL sSVBInBackground = NO;       // 宿主当前是否在后台
 static int64_t sSVBKillGeneration = 0;            // 代际号: 一递增, 已排队的清理立即作废
-static UIBackgroundTaskIdentifier sSVBKillTask = UIBackgroundTaskInvalid;
+static UIBackgroundTaskIdentifier sSVBKillTask = 0;   // 0 == UIBackgroundTaskInvalid (它不是编译期常量)
 
 // 真正的终止动作 (只会在信息App 进程里被调用; 调用前已校验 bundle id)
 static void SVBPerformBackgroundKill(void) {

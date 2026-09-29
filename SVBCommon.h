@@ -5,6 +5,8 @@
 #import <objc/message.h>
 #import <math.h>
 
+@class SVBVideoBackgroundView;   // 前向声明 (SVBManager 接口里要引用, 完整定义在本文件末尾)
+
 // ============================================================
 // 信息视频背景 (SMSVideoBG) - 共享核心
 // 作者: 板栗仁 | rootless / roothide / ElleKit / iOS 16.x
