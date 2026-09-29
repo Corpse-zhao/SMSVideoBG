@@ -1039,19 +1039,19 @@ static UITextField *KGField(NSString *placeholder, CGFloat fontSize, BOOL digits
     [KGRevokeClient fetchReceiptsFile:^(NSInteger status, NSData *body, NSString *error) {
         if (!w) return;
         if (status == 404) {
-            w._ledgerStatusLabel.text = @"云端还没有凭证 —— 客户插件 9.9.16+ 且配好上传令牌后会自动上报";
-            w._ledgerStatusLabel.textColor = [UIColor secondaryLabelColor];
+            w.ledgerStatusLabel.text = @"云端还没有凭证 —— 客户插件 9.9.16+ 且配好上传令牌后会自动上报";
+            w.ledgerStatusLabel.textColor = [UIColor secondaryLabelColor];
             return;
         }
         if (status != 200) {
-            w._ledgerStatusLabel.text = [NSString stringWithFormat:@"⚠️ 拉取失败：%@", error ?: @"未知错误"];
-            w._ledgerStatusLabel.textColor = [UIColor systemOrangeColor];
+            w.ledgerStatusLabel.text = [NSString stringWithFormat:@"⚠️ 拉取失败：%@", error ?: @"未知错误"];
+            w.ledgerStatusLabel.textColor = [UIColor systemOrangeColor];
             return;
         }
         NSDictionary *rc = KGReceiptsParseJSON(body, secret);
         if (!rc) {
-            w._ledgerStatusLabel.text = @"⚠️ 云端凭证表验签失败（密钥不一致或文件被篡改）";
-            w._ledgerStatusLabel.textColor = [UIColor systemOrangeColor];
+            w.ledgerStatusLabel.text = @"⚠️ 云端凭证表验签失败（密钥不一致或文件被篡改）";
+            w.ledgerStatusLabel.textColor = [UIColor systemOrangeColor];
             return;
         }
         NSInteger added = 0, updated = 0, same = 0, bad = 0;
@@ -1062,10 +1062,10 @@ static UITextField *KGField(NSString *placeholder, CGFloat fontSize, BOOL digits
             NSInteger r = [w mergeParsedReceipt:info];
             if (r == 1) added++; else if (r == 2) updated++; else same++;
         }
-        w._ledgerStatusLabel.text = [NSString stringWithFormat:
+        w.ledgerStatusLabel.text = [NSString stringWithFormat:
             @"✓ 云端拉取完成: 新增 %ld · 更新 %ld · 原样 %ld · 无效 %ld",
             (long)added, (long)updated, (long)same, (long)bad];
-        w._ledgerStatusLabel.textColor = [UIColor systemGreenColor];
+        w.ledgerStatusLabel.textColor = [UIColor systemGreenColor];
     }];
 }
 
