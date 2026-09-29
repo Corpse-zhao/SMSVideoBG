@@ -525,10 +525,10 @@ static void SVBMapBalloonText(UIView *balloon) {
         objc_setAssociatedObject(balloon, &SVBMappedLabelKey, lb,
                                  OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
-    // 影子跟模式走: 深色模式黑影衬白字 / 浅色模式白影衬黑字 (trait 变化后随布局刷新)
+    // 影子跟模式走: 深色模式黑影衬白字 / 浅色模式白影调暗 (太亮会发白糊字)
     BOOL dark = (balloon.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark);
     lb.shadowColor = dark ? [UIColor colorWithWhite:0 alpha:0.75]
-                          : [UIColor colorWithWhite:1 alpha:0.9];
+                          : [UIColor colorWithWhite:1 alpha:0.45];
     // 同步内容 / 字号 / 位置 (hidden 视图仍参与布局, frame 有效)
     NSString *text = tv.text ?: @"";
     if (![lb.text isEqualToString:text]) lb.text = text;
