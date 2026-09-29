@@ -95,7 +95,7 @@ NSArray<NSArray<NSString *> *> *SVBNotesContextDefinitions(void) {
 }
 
 NSArray<NSArray<NSString *> *> *SVBAllContextDefinitions(void) {
-    NSMutableArray *a = [[SVBContextDefinitions() mutableCopy] autorelease];
+    NSMutableArray *a = [[SVBContextDefinitions() mutableCopy] init];
     [a addObjectsFromArray:SVBNotesContextDefinitions()];
     return a;
 }
