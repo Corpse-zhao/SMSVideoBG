@@ -789,7 +789,8 @@ static UITextField *KGField(NSString *placeholder, CGFloat fontSize, BOOL digits
 - (void)forceUpgradeLedger:(NSInteger)i {
     if (i < 0 || i >= self.ledger.count) return;
     NSDictionary *d = self.ledger[i];
-    if ([d objectForKey:@"code"].length != 24) {
+    NSString *fuCode = [d objectForKey:@"code"];
+    if (fuCode.length != 24) {
         _ledgerStatusLabel.text = @"⚠️ 这条登记没有激活码, 无法强制升级 (让对方重发一次授权凭证)";
         _ledgerStatusLabel.textColor = [UIColor systemOrangeColor];
         return;
