@@ -15,6 +15,7 @@ static const char *const kRevokeSecret = SVB_LICENSE_SECRET;
 #define SVB_REVOKE_KEY_TS   @"revoke_ts"          // 缓存: 上次成功拉取时间
 #define SVB_REVOKE_KEY_TRY  @"revoke_try_ts"      // 缓存: 上次尝试时间 (节流用)
 #define SVB_REVOKE_KEY_ECHO @"revoke_echo"        // 控制App: 上次动作结果文案
+#define SVB_RENEW_KEY_MAP   @"renew_map"          // v9.9.14 缓存: 续签表 {旧码hash: 新码}
 
 #define SVB_REVOKE_INTERVAL (30 * 60.0)           // 30 分钟拉一次
 #define SVB_REVOKE_TIMEOUT  12.0                  // 单个 URL 超时
@@ -82,6 +83,97 @@ NSArray<NSString *> *SVBRevokeHashesFromJSON(NSData *json) {
     return clean;
 }
 
+#pragma mark - 远程续签表 (v9.9.14)
+
+// 签名原文: "SVBGRENEW/v1|<ts>|<hash=新码 升序逗号连接>" (与签发 App 严格一致)
+static NSString *SVBRenewPayloadString(NSInteger ts, NSDictionary<NSString *, NSString *> *renew) {
+    NSMutableArray *pairs = [NSMutableArray array];
+    for (NSString *h in renew) {
+        if (![h isKindOfClass:[NSString class]]) continue;
+        id c = [renew objectForKey:h];
+        if (![c isKindOfClass:[NSString class]]) continue;
+        NSString *cn = SVBLicenseNormalize((NSString *)c);
+        NSString *hu = [(NSString *)h uppercaseString];
+        if (hu.length != 16 || cn.length != 24) continue;
+        [pairs addObject:[NSString stringWithFormat:@"%@=%@", hu, cn]];
+    }
+    [pairs sortUsingSelector:@selector(compare:)];
+    return [NSString stringWithFormat:@"SVBGRENEW/v1|%ld|%@",
+            (long)ts, [pairs componentsJoinedByString:@","]];
+}
+
+// 解析并验签续签表; 通过返回 {旧码hash: 新码24字符}, 否则 nil
+static NSDictionary<NSString *, NSString *> *SVBRenewMapFromJSON(NSData *json) {
+    if (!json.length) return nil;
+    id obj = [NSJSONSerialization JSONObjectWithData:json options:0 error:NULL];
+    if (![obj isKindOfClass:[NSDictionary class]]) return nil;
+    NSDictionary *d = (NSDictionary *)obj;
+    NSNumber *ver = d[@"v"], *ts = d[@"ts"];
+    NSDictionary *renew = d[@"renew"];
+    NSString *sig = d[@"sig"];
+    if (![ver isKindOfClass:[NSNumber class]] || ver.integerValue != 1) return nil;
+    if (![ts isKindOfClass:[NSNumber class]]) return nil;
+    if (![renew isKindOfClass:[NSDictionary class]]) return nil;
+    if (![sig isKindOfClass:[NSString class]] || sig.length != 64) return nil;
+
+    NSMutableDictionary *clean = [NSMutableDictionary dictionary];
+    for (NSString *h in renew) {
+        if (![h isKindOfClass:[NSString class]] || h.length != 16) return nil;
+        id c = [renew objectForKey:h];
+        if (![c isKindOfClass:[NSString class]]) return nil;
+        NSString *cn = SVBLicenseNormalize((NSString *)c);
+        if (cn.length != 24) return nil;
+        [clean setObject:cn forKey:[h uppercaseString]];
+    }
+    NSString *expect = SVBRevokeSignatureHex(SVBRenewPayloadString(ts.integerValue, clean));
+    if (![[sig lowercaseString] isEqualToString:expect]) return nil;
+    return clean;
+}
+
+static NSDictionary<NSString *, NSString *> *SVBRenewCachedMap(void) {
+    id v = nil;
+    @try { v = [[SVBManager shared] configValueForKey:SVB_RENEW_KEY_MAP]; } @catch (NSException *e) {}
+    return [v isKindOfClass:[NSDictionary class]] ? v : nil;
+}
+
+NSInteger SVBRevokeCachedRenewCount(void) {
+    return (NSInteger)SVBRenewCachedMap().count;
+}
+
+// 应用续签表: 本机激活码命中旧码 -> 自动换新码 (对方无需重新输入)
+BOOL SVBRevokeApplyRenewal(void) {
+    @try {
+        SVBManager *mgr = [SVBManager shared];
+        id v = [mgr configValueForKey:@"license_code"];
+        NSString *code = [v isKindOfClass:[NSString class]] ? SVBLicenseNormalize(v) : @"";
+        if (code.length != 24) return NO;
+
+        NSString *h = SVBRevokeHashForCode(code);
+        if (h.length != 16) return NO;
+        NSDictionary *map = SVBRenewCachedMap();
+        NSString *newCode = [map objectForKey:h];
+        if (![newCode isKindOfClass:[NSString class]]) return NO;
+        newCode = SVBLicenseNormalize(newCode);
+        if (newCode.length != 24 || [newCode isEqualToString:code]) return NO;
+
+        // 新码必须: 签名合法 + 绑定本机(或通用) + 未被作废
+        if (SVBLicenseVerify(newCode, NULL) != SVBLicenseStateValid) {
+            [mgr log:@"[renew] 远端续签表命中, 但新码校验未通过, 忽略"];
+            return NO;
+        }
+        if (SVBRevokeIsCodeRevoked(newCode)) {
+            [mgr log:@"[renew] 远端续签表命中, 但新码已被作废, 忽略"];
+            return NO;
+        }
+        [mgr setConfigValue:newCode forKey:@"license_code"];
+        [mgr log:@"[renew] 远程续签生效: %@… -> %@…",
+                 [code substringToIndex:12], [newCode substringToIndex:12]];
+        return YES;
+    } @catch (NSException *e) {
+        return NO;
+    }
+}
+
 #pragma mark - 缓存读取
 
 static NSArray<NSString *> *SVBRevokeCachedList(void) {
@@ -110,8 +202,8 @@ BOOL SVBRevokeIsCodeRevoked(NSString *code) {
 
 #pragma mark - 拉取
 
-// 依次尝试的地址 (第一条命中即可)
-static NSArray<NSString *> *SVBRevokeURLs(void) {
+// 依次尝试的地址 (第一条命中即可); kind = 名单文件名
+static NSArray<NSString *> *SVBRevokeURLs(NSString *filename) {
     NSMutableArray *urls = [NSMutableArray array];
     @try {
         id custom = [[SVBManager shared] configValueForKey:@"revoke_url"];
@@ -119,9 +211,13 @@ static NSArray<NSString *> *SVBRevokeURLs(void) {
             [urls addObject:custom];
     } @catch (NSException *e) {}
     // 名单放在 revoke 分支 (独立于代码分支, 代码全量推送不会顶掉它)
-    [urls addObject:@"https://api.github.com/repos/Corpse-zhao/SMSVideoBG/contents/revoked.json?ref=revoke"];
-    [urls addObject:@"https://cdn.jsdelivr.net/gh/Corpse-zhao/SMSVideoBG@revoke/revoked.json"];
-    [urls addObject:@"https://raw.githubusercontent.com/Corpse-zhao/SMSVideoBG/revoke/revoked.json"];
+    NSString *base = @"Corpse-zhao/SMSVideoBG";
+    [urls addObject:[NSString stringWithFormat:
+        @"https://api.github.com/repos/%@/contents/%@?ref=revoke", base, filename]];
+    [urls addObject:[NSString stringWithFormat:
+        @"https://cdn.jsdelivr.net/gh/%@@revoke/%@", base, filename]];
+    [urls addObject:[NSString stringWithFormat:
+        @"https://raw.githubusercontent.com/%@/revoke/%@", base, filename]];
     return urls;
 }
 
@@ -154,12 +250,14 @@ static BOOL SVBRevokeAccept(NSData *body, NSInteger status, NSString *url, SVBMa
     return YES;
 }
 
-// 同步拉取 (在后台队列调用): 逐个 URL 试, 成功即返回
-static void SVBRevokeFetchChain(NSArray<NSString *> *urls, NSUInteger idx) {
+// 通用拉取链 (在后台队列调用): 逐个 URL 试, accept 处理结果, 返回 YES 即停
+// v9.9.14: 改为回调式, 作废名单 / 续签表两条链共用
+static void SVBFetchChain(NSArray<NSString *> *urls, NSUInteger idx,
+                          BOOL (^accept)(NSData *body, NSInteger status, NSString *url)) {
     if (idx >= urls.count) return;
     NSString *urlStr = urls[idx];
     NSURL *url = [NSURL URLWithString:urlStr];
-    if (!url) { SVBRevokeFetchChain(urls, idx + 1); return; }
+    if (!url) { SVBFetchChain(urls, idx + 1, accept); return; }
 
     NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url];
     req.timeoutInterval = SVB_REVOKE_TIMEOUT;
@@ -184,9 +282,8 @@ static void SVBRevokeFetchChain(NSArray<NSString *> *urls, NSUInteger idx) {
     dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW,
                                               (int64_t)((SVB_REVOKE_TIMEOUT + 6.0) * NSEC_PER_SEC)));
 
-    SVBManager *mgr = [SVBManager shared];
-    if (SVBRevokeAccept(body, status, urlStr, mgr, [[NSDate date] timeIntervalSince1970])) return;
-    SVBRevokeFetchChain(urls, idx + 1);
+    if (accept(body, status, urlStr)) return;
+    SVBFetchChain(urls, idx + 1, accept);
 }
 
 static void SVBRevokeRefreshForce(void);
@@ -214,10 +311,39 @@ void SVBRevokeRefreshIfNeeded(BOOL force) {
 }
 
 static void SVBRevokeRefreshForce(void) {
-    NSArray *urls = SVBRevokeURLs();
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
         @try {
-            SVBRevokeFetchChain(urls, 0);
+            SVBManager *mgr = [SVBManager shared];
+            NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
+
+            // 链 1: 作废名单
+            SVBFetchChain(SVBRevokeURLs(@"revoked.json"), 0,
+                ^BOOL(NSData *body, NSInteger status, NSString *url) {
+                    return SVBRevokeAccept(body, status, url, mgr, now);
+                });
+
+            // 链 2 (v9.9.14): 续签表 {旧码hash: 新码}, 拉到即自动换码
+            SVBFetchChain(SVBRevokeURLs(@"renewals.json"), 0,
+                ^BOOL(NSData *body, NSInteger status, NSString *url) {
+                    if (status == 404) {
+                        [mgr setConfigValue:@{} forKey:SVB_RENEW_KEY_MAP];
+                        [mgr log:@"[renew] 续签表不存在(404), 按空表处理 via %@", url];
+                        return YES;
+                    }
+                    if (status != 200 || !body.length) return NO;
+                    NSDictionary *map = SVBRenewMapFromJSON(body);
+                    if (!map) {
+                        [mgr log:@"[renew] 续签表验签失败, 忽略 via %@", url];
+                        return NO;
+                    }
+                    [mgr setConfigValue:map forKey:SVB_RENEW_KEY_MAP];
+                    [mgr log:@"[renew] 续签表已更新: %lu 条 via %@",
+                             (unsigned long)map.count, url];
+                    return YES;
+                });
+
+            // 两条链都落定后应用续签 (旧码 -> 新码)
+            SVBRevokeApplyRenewal();
         } @catch (NSException *e) {}
         [SVBRevokeLock() lock];
         gSVBRevokeRunning = NO;

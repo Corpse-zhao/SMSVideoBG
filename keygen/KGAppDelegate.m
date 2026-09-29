@@ -395,7 +395,7 @@ static UITextField *KGField(NSString *placeholder, CGFloat fontSize, BOOL digits
 
 - (UIView *)buildHistoryCard {
     UIStackView *stack;
-    UIView *card = KGCard(@"签发历史（点击复制 / 右侧作废，最多留 15 条）", &stack);
+    UIView *card = KGCard(@"签发历史（点击菜单：复制 / 标注设备 / 删除；右侧作废·恢复，最多留 15 条）", &stack);
     _historyCard = card;
     _historyStack = stack;
     return card;
@@ -418,7 +418,8 @@ static UITextField *KGField(NSString *placeholder, CGFloat fontSize, BOOL digits
         [_historyStack addArrangedSubview:empty];
         return;
     }
-    for (NSDictionary *d in items) {
+    for (NSUInteger hidx = 0; hidx < items.count; hidx++) {
+        NSDictionary *d = items[hidx];
         UIView *row = [[UIView alloc] initWithFrame:CGRectZero];
         row.translatesAutoresizingMaskIntoConstraints = NO;
         row.backgroundColor = [UIColor tertiarySystemGroupedBackgroundColor];
@@ -440,11 +441,17 @@ static UITextField *KGField(NSString *placeholder, CGFloat fontSize, BOOL digits
         NSString *hash = KGRevokeHashForCode(code);
         BOOL revoked = (hash.length > 0 && [_revokedList containsObject:hash]);
 
-        NSString *who = [d objectForKey:@"universal"] ? @"通用码" :
-            [NSString stringWithFormat:@"设备 %@", [d objectForKey:@"device"] ?: @"-"];
-        UILabel *l1 = KGLabel([NSString stringWithFormat:@"%@ · %@%@", who,
-                               [d objectForKey:@"exp"] ?: @"-", revoked ? @" · 已作废" : @""],
-                              12.5, UIFontWeightMedium,
+        // v1.3.0: 标清楚设备码 (8 位码补 ABCD-EFGH 分组显示), 有备注则放最前
+        NSString *dev8 = [d objectForKey:@"device"] ?: @"";
+        NSString *who = [d objectForKey:@"universal"] boolValue ? @"通用码"
+            : [NSString stringWithFormat:@"设备 %@",
+               (dev8.length == 8 ? KGGroupDevice8(dev8) : dev8) ?: dev8];
+        NSString *note = [d objectForKey:@"note"];
+        NSString *line1 = [NSString stringWithFormat:@"%@%@ · %@%@",
+                           note.length ? [note stringByAppendingString:@" · "] : @"",
+                           who, [d objectForKey:@"exp"] ?: @"-",
+                           revoked ? @" · 已作废" : @""];
+        UILabel *l1 = KGLabel(line1, 12.5, UIFontWeightMedium,
                               revoked ? [UIColor systemRedColor] : [UIColor secondaryLabelColor]);
         UILabel *l2 = KGLabel(code, 13.5, UIFontWeightSemibold,
                               revoked ? [UIColor systemRedColor] : [UIColor labelColor]);
@@ -452,8 +459,10 @@ static UITextField *KGField(NSString *placeholder, CGFloat fontSize, BOOL digits
         [v addArrangedSubview:l1];
         [v addArrangedSubview:l2];
 
+        // v1.3.0: 点击整行弹菜单 (复制 / 标注设备·客户 / 删除已作废记录)
         UITapGestureRecognizer *t = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(historyTapped:)];
         [row addGestureRecognizer:t];
+        objc_setAssociatedObject(row, "kg_idx", @((NSInteger)hidx), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         objc_setAssociatedObject(row, "kg_code", code, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
         // 作废 / 恢复 (改动即同步到远端名单)
@@ -505,7 +514,8 @@ static UITextField *KGField(NSString *placeholder, CGFloat fontSize, BOOL digits
 
     [stack addArrangedSubview:KGLabel(
         @"客户操作：控制 App → 授权 → 授权凭证 → 复制后发给你。"
-        @"粘进来点登记，台账会记下设备码、激活时间、到期日。点某一行可以改备注 / 续签 / 删除。",
+        @"粘进来点登记，台账会记下设备码、激活时间、到期日。点某一行可以改备注 / 续签 / 删除。"
+        @"v1.3.0 续签直达：续签后新码自动送达对方设备（插件联网 30 分钟内自动换新），客户无需重新输入激活码。",
         12.5, UIFontWeightRegular, [UIColor tertiaryLabelColor])];
     return card;
 }
@@ -696,8 +706,7 @@ static UITextField *KGField(NSString *placeholder, CGFloat fontSize, BOOL digits
 
     UIAlertController *ac = [UIAlertController
         alertControllerWithTitle:@"续签"
-                         message:[NSString stringWithFormat:@"给 %@ 签一枚新码（留空天数 = 永久）",
-                                  [d objectForKey:@"device"] ?: devRaw]
+                         message:[NSString stringWithFormat:@"给 %@ 签一枚新码（留空天数 = 永久）。\n新码会通过远程续签通道自动送达对方设备 —— 客户什么都不用输入。", [d objectForKey:@"device"] ?: devRaw]
                   preferredStyle:UIAlertControllerStyleAlert];
     [ac addTextFieldWithConfigurationHandler:^(UITextField *tf) {
         tf.placeholder = @"天数（留空 = 永久）";
@@ -706,7 +715,7 @@ static UITextField *KGField(NSString *placeholder, CGFloat fontSize, BOOL digits
     }];
     __weak typeof(self) w = self;
     [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
-    [ac addAction:[UIAlertAction actionWithTitle:@"签发并复制" style:UIAlertActionStyleDefault
+    [ac addAction:[UIAlertAction actionWithTitle:@"签发并送达" style:UIAlertActionStyleDefault
                                           handler:^(UIAlertAction *a) {
         NSString *t = [ac.textFields.firstObject.text
                        stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
@@ -722,6 +731,8 @@ static UITextField *KGField(NSString *placeholder, CGFloat fontSize, BOOL digits
             w.ledgerStatusLabel.textColor = [UIColor systemOrangeColor];
             return;
         }
+        NSString *expText = exp ?: @"-";
+
         [w ledgerCopy:code label:@"新激活码"];
         [w saveHistoryCode:code device:KGGroupDevice8(devRaw) universal:NO exp:exp];
 
@@ -735,8 +746,31 @@ static UITextField *KGField(NSString *placeholder, CGFloat fontSize, BOOL digits
         [w.ledger replaceObjectAtIndex:i withObject:m];
         [w saveLedger];
         [w refreshLedger];
-        w.ledgerStatusLabel.text = [NSString stringWithFormat:@"✓ 已续签并复制新码 · 至 %@", m[@"exp"]];
+        w.ledgerStatusLabel.text = [NSString stringWithFormat:@"✓ 已续签 · 至 %@ · 正在送达对方…", expText];
         w.ledgerStatusLabel.textColor = [UIColor systemGreenColor];
+
+        // v1.3.0 续签直达: 旧码 -> 新码 的映射推到远端续签表,
+        // 客户插件 30 分钟内(或打开控制 App 时)拉到后自动换码, 无需重新输入
+        NSString *oldCode = [d objectForKey:@"code"];
+        NSString *oldHash = KGRevokeHashForCode(oldCode);
+        if (oldHash.length != 16) {
+            w.ledgerStatusLabel.text = [NSString stringWithFormat:@"⚠️ 新码已复制, 但旧码缺失, 对方需手动输入新码"];
+            w.ledgerStatusLabel.textColor = [UIColor systemOrangeColor];
+            return;
+        }
+        [KGRevokeClient pushRenewals:@{oldHash: code} secret:secret completion:^(BOOL ok, NSString *error) {
+            if (!w) return;
+            if (ok) {
+                w.ledgerStatusLabel.text =
+                    [NSString stringWithFormat:@"✓ 续签已送达 %@ · 至 %@ · 对方 30 分钟内自动换新",
+                     [KGRevokeClient repo], expText];
+                w.ledgerStatusLabel.textColor = [UIColor systemGreenColor];
+            } else {
+                w.ledgerStatusLabel.text =
+                    [NSString stringWithFormat:@"⚠️ 新码已复制, 但自动送达失败（%@）—— 让对方手动输入", error ?: @"未知错误"];
+                w.ledgerStatusLabel.textColor = [UIColor systemOrangeColor];
+            }
+        }];
     }]];
     [self presentViewController:ac animated:YES completion:nil];
 }
@@ -945,8 +979,80 @@ static UITextField *KGField(NSString *placeholder, CGFloat fontSize, BOOL digits
 }
 
 - (void)historyTapped:(UITapGestureRecognizer *)g {
-    NSString *code = objc_getAssociatedObject(g.view, "kg_code");
-    if (code.length) [self copyText:code];
+    NSNumber *idx = objc_getAssociatedObject(g.view, "kg_idx");
+    if (idx) [self historyMenuForIndex:[idx integerValue]];
+}
+
+// v1.3.0: 历史记录操作菜单
+- (void)historyMenuForIndex:(NSInteger)i {
+    NSArray *items = [self historyItems];
+    if (i < 0 || i >= (NSInteger)items.count) return;
+    NSDictionary *d = items[i];
+    NSString *code = [d objectForKey:@"code"] ?: @"";
+    NSString *hash = KGRevokeHashForCode(code);
+    BOOL revoked = (hash.length > 0 && [_revokedList containsObject:hash]);
+    NSString *note = [d objectForKey:@"note"];
+    NSString *dev8 = [d objectForKey:@"device"] ?: @"";
+    NSString *who = [d objectForKey:@"universal"] boolValue ? @"通用码"
+        : [NSString stringWithFormat:@"设备 %@",
+           (dev8.length == 8 ? KGGroupDevice8(dev8) : dev8) ?: dev8];
+
+    UIAlertController *ac = [UIAlertController
+        alertControllerWithTitle:note.length ? note : who
+                         message:[NSString stringWithFormat:@"%@ · 至 %@\n%@", who,
+                                  [d objectForKey:@"exp"] ?: @"-", code]
+                  preferredStyle:UIAlertControllerStyleActionSheet];
+    __weak typeof(self) w = self;
+    [ac addAction:[UIAlertAction actionWithTitle:@"复制激活码" style:UIAlertActionStyleDefault
+                                          handler:^(UIAlertAction *a) {
+        [UIPasteboard generalPasteboard].string = code;
+        w.statusLabel.text = @"✓ 已复制激活码";
+    }]];
+    [ac addAction:[UIAlertAction actionWithTitle:@"标注设备 / 客户" style:UIAlertActionStyleDefault
+                                          handler:^(UIAlertAction *a) { [w editHistoryNote:i]; }]];
+    if (revoked)
+        [ac addAction:[UIAlertAction actionWithTitle:@"删除这条记录" style:UIAlertActionStyleDestructive
+                                              handler:^(UIAlertAction *a) {
+            // 只删本机历史条目, 不影响远端作废状态 (码依然是作废的)
+            NSMutableArray *arr = [[w historyItems] mutableCopy];
+            if (i < 0 || i >= (NSInteger)arr.count) return;
+            [arr removeObjectAtIndex:i];
+            [[NSUserDefaults standardUserDefaults] setObject:arr forKey:KGPrefHistory];
+            [w refreshHistory];
+        }]];
+    [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    ac.popoverPresentationController.sourceView = self.view;
+    ac.popoverPresentationController.sourceRect =
+        CGRectMake(self.view.bounds.size.width / 2, self.view.bounds.size.height / 2, 1, 1);
+    [self presentViewController:ac animated:YES completion:nil];
+}
+
+- (void)editHistoryNote:(NSInteger)i {
+    NSArray *items = [self historyItems];
+    if (i < 0 || i >= (NSInteger)items.count) return;
+    NSDictionary *d = items[i];
+    UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"标注设备 / 客户"
+                                                               message:@"写个名字或微信号, 历史里一眼能对上"
+                                                        preferredStyle:UIAlertControllerStyleAlert];
+    [ac addTextFieldWithConfigurationHandler:^(UITextField *tf) {
+        tf.text = [d objectForKey:@"note"];
+        tf.placeholder = @"例如 张三 / 微信 zs001";
+    }];
+    __weak typeof(self) w = self;
+    [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    [ac addAction:[UIAlertAction actionWithTitle:@"保存" style:UIAlertActionStyleDefault
+                                          handler:^(UIAlertAction *a) {
+        NSMutableArray *arr = [[w historyItems] mutableCopy];
+        if (i < 0 || i >= (NSInteger)arr.count) return;
+        NSMutableDictionary *m = [arr[i] mutableCopy];
+        NSString *t = [ac.textFields.firstObject.text
+                       stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (t.length) m[@"note"] = t; else [m removeObjectForKey:@"note"];
+        [arr replaceObjectAtIndex:i withObject:m];
+        [[NSUserDefaults standardUserDefaults] setObject:arr forKey:KGPrefHistory];
+        [w refreshHistory];
+    }]];
+    [self presentViewController:ac animated:YES completion:nil];
 }
 
 - (void)saveHistoryCode:(NSString *)code device:(NSString *)device universal:(BOOL)uni exp:(NSString *)exp {

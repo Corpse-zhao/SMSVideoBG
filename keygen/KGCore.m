@@ -263,6 +263,62 @@ NSData *KGRevokeBuildJSON(NSString *secret, NSInteger ts, NSArray<NSString *> *h
                                              error:NULL];
 }
 
+#pragma mark - 远程续签表 (v1.3.0)
+
+NSString *KGRenewPayloadString(NSInteger ts, NSDictionary<NSString *, NSString *> *renew) {
+    NSMutableArray *pairs = [NSMutableArray array];
+    for (NSString *h in renew) {
+        if (![h isKindOfClass:[NSString class]]) continue;
+        NSString *c = KGClean([renew objectForKey:h]);
+        NSString *hu = [(NSString *)h uppercaseString];
+        if (hu.length != 16 || c.length != 24) continue;
+        [pairs addObject:[NSString stringWithFormat:@"%@=%@", hu, c]];
+    }
+    [pairs sortUsingSelector:@selector(compare:)];
+    return [NSString stringWithFormat:@"SVBGRENEW/v1|%ld|%@",
+            (long)ts, [pairs componentsJoinedByString:@","]];
+}
+
+NSDictionary<NSString *, NSString *> *KGRenewParseJSON(NSData *json, NSString *secret) {
+    if (!json.length) return nil;
+    id obj = [NSJSONSerialization JSONObjectWithData:json options:0 error:NULL];
+    if (![obj isKindOfClass:[NSDictionary class]]) return nil;
+    NSDictionary *d = (NSDictionary *)obj;
+    NSNumber *ver = d[@"v"], *ts = d[@"ts"];
+    NSDictionary *renew = d[@"renew"];
+    NSString *sig = d[@"sig"];
+    if (![ver isKindOfClass:[NSNumber class]] || ver.integerValue != 1) return nil;
+    if (![ts isKindOfClass:[NSNumber class]]) return nil;
+    if (![renew isKindOfClass:[NSDictionary class]]) return nil;
+    if (![sig isKindOfClass:[NSString class]] || sig.length != 64) return nil;
+
+    NSMutableDictionary *clean = [NSMutableDictionary dictionary];
+    for (NSString *h in renew) {
+        if (![h isKindOfClass:[NSString class]] || h.length != 16) return nil;
+        id c = [renew objectForKey:h];
+        if (![c isKindOfClass:[NSString class]]) return nil;
+        NSString *cn = KGClean(c);
+        if (cn.length != 24) return nil;
+        [clean setObject:cn forKey:[h uppercaseString]];
+    }
+    NSString *expect = KGRevokeSignatureHex(KGRenewPayloadString(ts.integerValue, clean), secret);
+    if (![[sig lowercaseString] isEqualToString:expect]) return nil;
+    return clean;
+}
+
+NSData *KGRenewBuildJSON(NSString *secret, NSInteger ts, NSDictionary<NSString *, NSString *> *renew) {
+    if (!secret.length || renew.count == 0) return nil;
+    NSString *payload = KGRenewPayloadString(ts, renew);
+    if (!payload.length) return nil;
+    NSDictionary *d = @{@"v": @1,
+                        @"ts": @(ts),
+                        @"renew": renew,
+                        @"sig": KGRevokeSignatureHex(payload, secret)};
+    return [NSJSONSerialization dataWithJSONObject:d
+                                           options:NSJSONWritingPrettyPrinted | NSJSONWritingSortedKeys
+                                             error:NULL];
+}
+
 static NSString *KGDateTextForTimestamp(NSTimeInterval ts) {
     NSDateFormatter *df = [[NSDateFormatter alloc] init];
     df.dateFormat = @"yyyy-MM-dd";

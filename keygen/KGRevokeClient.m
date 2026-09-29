@@ -5,6 +5,7 @@ static NSString * const kKGTokenKey = @"kg_gh_token";
 static NSString * const kKGRepoKey  = @"kg_gh_repo";
 static NSString * const kKGFileKey  = @"kg_gh_file";
 static NSString * const kKGBranchKey = @"kg_gh_branch";
+static NSString * const kKGRenewFileKey = @"kg_gh_renew_file";   // v1.3.0 续签表文件名
 
 static NSString *KGPref(NSString *key, NSString *fallback) {
     NSString *v = [[NSUserDefaults standardUserDefaults] stringForKey:key];
@@ -35,6 +36,8 @@ static NSString *KGPref(NSString *key, NSString *fallback) {
     if (b.length) [d setObject:b forKey:kKGBranchKey]; else [d removeObjectForKey:kKGBranchKey];
 }
 + (BOOL)configured { return self.token.length > 0; }
+// v1.3.0 续签表文件名 (与作废名单同分支)
++ (NSString *)renewFilePath { return KGPref(kKGRenewFileKey, @"renewals.json"); }
 
 #pragma mark - 底层同步请求 (在后台队列调用, 阻塞至多 20 秒)
 
@@ -208,6 +211,92 @@ static NSString *KGPref(NSString *key, NSString *fallback) {
             payload[@"content"] = [content base64EncodedStringWithOptions:0];
             payload[@"branch"] = [KGRevokeClient branch];
             if (sha.length) payload[@"sha"] = sha;
+
+            NSData *body = [NSJSONSerialization dataWithJSONObject:payload options:0 error:NULL];
+            NSDictionary *p = [KGRevokeClient syncRequest:@"PUT" url:apiURL token:tok
+                                                     body:body accept:@"application/vnd.github+json"];
+            NSInteger ps = [p[@"status"] integerValue];
+            if (ps == 200 || ps == 201) { ok = YES; err = nil; break; }
+            if (ps == 409 || ps == 422) { err = @"写入冲突（远端被同时修改），已重试"; continue; }
+            err = [KGRevokeClient errorTextForStatus:ps data:p[@"data"]];
+            break;
+        }
+
+        dispatch_async(dispatch_get_main_queue(), ^{ done(ok, err); });
+    });
+}
+
+// v1.3.0 推送续签表: 先拉远端已有表合并, 再整体签名覆盖
++ (void)pushRenewals:(NSDictionary<NSString *, NSString *> *)add
+              secret:(NSString *)secret
+          completion:(void (^)(BOOL, NSString *))done {
+    NSString *tok = [self token];
+    if (!tok.length) { done(NO, @"未配置 GitHub Token，无法推送"); return; }
+    if (!secret.length) { done(NO, @"签名密钥为空"); return; }
+    if (!add.count) { done(NO, @"没有要推送的续签条目"); return; }
+
+    // 清洗入参: 只留 hash16 -> code24
+    NSMutableDictionary *entries = [NSMutableDictionary dictionary];
+    for (NSString *h in add) {
+        NSString *hu = [h uppercaseString];
+        NSString *cn = KGCodeNormalize([add objectForKey:h] ?: @"");   // 自动去空格/横线
+        if (hu.length == 16 && cn.length == 24) [entries setObject:cn forKey:hu];
+    }
+    if (!entries.count) { done(NO, @"续签条目格式不合法"); return; }
+
+    NSString *path = [self renewFilePath];
+    NSString *apiURL = [NSString stringWithFormat:@"https://api.github.com/repos/%@/contents/%@?ref=%@",
+                        [self repo], path, [self branch]];
+
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSString *err = @"推送失败";
+        BOOL ok = NO;
+
+        NSString *branchErr = nil;
+        if (![KGRevokeClient ensureBranchWithToken:tok error:&branchErr]) {
+            dispatch_async(dispatch_get_main_queue(), ^{ done(NO, branchErr ?: @"无法准备名单分支"); });
+            return;
+        }
+
+        // 合并远端已有续签表 (旧表已验签; 推送前会整体重新签名)
+        NSMutableDictionary *merged = [entries mutableCopy];
+        NSDictionary *g = [KGRevokeClient syncRequest:@"GET" url:apiURL token:tok
+                                                 body:nil accept:@"application/vnd.github.raw"];
+        NSInteger gs = [g[@"status"] integerValue];
+        if (gs == 200) {
+            NSDictionary *old = KGRenewParseJSON(g[@"data"], secret);
+            if (old) [merged addEntriesFromDictionary:old];
+        }
+        if (gs != 200 && gs != 404) {
+            dispatch_async(dispatch_get_main_queue(), ^{ done(NO, [KGRevokeClient errorTextForStatus:gs data:g[@"data"]]); });
+            return;
+        }
+
+        for (int attempt = 0; attempt < 2; attempt++) {
+            // 拿文件 sha (覆盖已有文件必须带)
+            NSString *fileSHA = nil;
+            NSDictionary *h = [KGRevokeClient syncRequest:@"GET" url:apiURL token:tok
+                                                     body:nil accept:@"application/vnd.github+json"];
+            NSInteger hs = [h[@"status"] integerValue];
+            if (hs == 200) {
+                id obj = [NSJSONSerialization JSONObjectWithData:h[@"data"] options:0 error:NULL];
+                if ([obj isKindOfClass:[NSDictionary class]] && [obj[@"sha"] isKindOfClass:[NSString class]])
+                    fileSHA = obj[@"sha"];
+            } else if (hs != 404) {
+                err = [KGRevokeClient errorTextForStatus:hs data:h[@"data"]];
+                break;
+            }
+
+            NSData *content = KGRenewBuildJSON(secret,
+                                               (NSInteger)[[NSDate date] timeIntervalSince1970],
+                                               merged);
+            if (!content) { err = @"续签表序列化失败"; break; }
+
+            NSMutableDictionary *payload = [NSMutableDictionary dictionary];
+            payload[@"message"] = [NSString stringWithFormat:@"更新续签表 (%lu 条)", (unsigned long)merged.count];
+            payload[@"content"] = [content base64EncodedStringWithOptions:0];
+            payload[@"branch"] = [KGRevokeClient branch];
+            if (fileSHA.length) payload[@"sha"] = fileSHA;
 
             NSData *body = [NSJSONSerialization dataWithJSONObject:payload options:0 error:NULL];
             NSDictionary *p = [KGRevokeClient syncRequest:@"PUT" url:apiURL token:tok

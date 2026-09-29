@@ -72,6 +72,21 @@ NSArray<NSString *> *KGRevokeParseJSON(NSData *json, NSString *secret);
 NSData *KGRevokeBuildJSON(NSString *secret, NSInteger ts, NSArray<NSString *> *hashes);
 
 // ============================================================
+// 远程续签表 (v1.3.0, 与插件端 SVBRevoke.m 严格对齐)
+//   renewals.json (与作废名单同在 revoke 分支, 签发 App 维护):
+//     {"v":1,"ts":<unix秒>,"renew":{"<旧码hash16>":"<新码24字符>"},"sig":"<64位hex>"}
+//   签名原文: "SVBGRENEW/v1|<ts>|<hash=新码 归一化升序, 逗号连接>"
+//   签名算法: HMAC-SHA256(secret, 原文) 全 32 字节十六进制
+//   插件拉到表后: 本机旧码命中 -> 验新码签名合法且未作废 -> 自动换码,
+//   客户什么都不用输入 —— 续签直达。
+// ============================================================
+NSString *KGRenewPayloadString(NSInteger ts, NSDictionary<NSString *, NSString *> *renew);
+// 解析并验签续签表; 通过返回 {旧码hash: 新码24字符}, 否则 nil
+NSDictionary<NSString *, NSString *> *KGRenewParseJSON(NSData *json, NSString *secret);
+// 生成续签表文件内容
+NSData *KGRenewBuildJSON(NSString *secret, NSInteger ts, NSDictionary<NSString *, NSString *> *renew);
+
+// ============================================================
 // 授权凭证 (v1.2.0, 与插件端 SVBActivationReceipt() 严格对齐)
 //   客户在控制 App 授权页复制的一行文本, 发你后粘进本 App 登记台账:
 //     SMSVideoBG-ACT1|<设备码8>|<激活码24>|<激活时间Unix秒>|<签名16HEX>

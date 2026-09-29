@@ -30,6 +30,16 @@ NSString *SVBRevokeHashForCode(NSString *code);
 // 该激活码是否已在缓存的名单里
 BOOL SVBRevokeIsCodeRevoked(NSString *code);
 
+// ---- 远程续签表 (v9.9.14, 与签发 App 的 renewals.json 严格对齐) ----
+//   {"v":1,"ts":..,"renew":{"<旧码hash16>":"<新码24字符>"},"sig":..}
+//   签名原文 "SVBGRENEW/v1|<ts>|<hash=新码 升序逗号连接>", 与作废名单同密钥。
+//   本机激活码命中表内旧码 -> 验新码合法且未作废 -> 自动写入 license_code,
+//   客户无需重新输入激活码 —— 续签直达。
+// 应用缓存的续签表 (换码成功返回 YES); 无表/未命中/新码不合法 = NO
+BOOL SVBRevokeApplyRenewal(void);
+// 缓存的续签条目数 (控制App 展示用)
+NSInteger SVBRevokeCachedRenewCount(void);
+
 // 缓存状态 (控制App 展示用)
 NSInteger SVBRevokeCachedCount(void);
 NSTimeInterval SVBRevokeLastFetchTime(void);

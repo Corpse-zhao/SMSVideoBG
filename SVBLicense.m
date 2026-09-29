@@ -294,6 +294,10 @@ SVBLicenseState SVBLicenseVerify(NSString *code, NSString **detail) {
 SVBLicenseState SVBLicenseCurrentState(NSString **detail) {
     if (detail) *detail = nil;
 
+    // v9.9.14: 远程续签直达 —— 本机旧码命中续签表就先换新码再判定,
+    // 客户无需重新输入激活码 (表由签发 App 维护, 拉取/验签见 SVBRevoke.m)
+    SVBRevokeApplyRenewal();
+
     NSString *code = nil;
     @try {
         id v = [[SVBManager shared] configValueForKey:@"license_code"];

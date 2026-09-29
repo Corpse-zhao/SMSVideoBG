@@ -28,4 +28,9 @@
 + (void)pushHashes:(NSArray<NSString *> *)hashes
             secret:(NSString *)secret
         completion:(void (^)(BOOL ok, NSString *error))done;
+
+// v1.3.0 续签表: 与远端已有表合并后整体签名覆盖 (renewals.json, 同 revoke 分支)
++ (void)pushRenewals:(NSDictionary<NSString *, NSString *> *)add
+              secret:(NSString *)secret
+          completion:(void (^)(BOOL ok, NSString *error))done;
 @end
