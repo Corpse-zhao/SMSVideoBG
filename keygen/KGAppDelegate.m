@@ -145,7 +145,7 @@ static UITextField *KGField(NSString *placeholder, CGFloat fontSize, BOOL digits
 @property (nonatomic, strong) UILabel *secretWarnLabel;
 @property (nonatomic, strong) UILabel *codeLabel;
 @property (nonatomic, strong) UILabel *statusLabel;
-@property (nonatomic, strong) UIButton *copyBtn;
+@property (nonatomic, strong) UIButton *clipBtn;
 @property (nonatomic, strong) UIButton *shareBtn;
 @property (nonatomic, strong) UIButton *verifyBtn;
 @property (nonatomic, strong) UIStackView *historyStack;
@@ -239,12 +239,12 @@ static UITextField *KGField(NSString *placeholder, CGFloat fontSize, BOOL digits
     _deviceField = KGField(@"ABCD-EFGH", 17, NO);
     _deviceField.delegate = self;
     [_deviceField.heightAnchor constraintEqualToConstant:44].active = YES;
-    [stack addArrangedSubview:[KGRow(@"设备码", _deviceField, @"在客户手机上打开控制 App → 授权 → 复制设备码")]];
+    [stack addArrangedSubview:KGRow(@"设备码", _deviceField, @"在客户手机上打开控制 App → 授权 → 复制设备码")];
 
     _universalSwitch = [[UISwitch alloc] initWithFrame:CGRectZero];
     _universalSwitch.onTintColor = KGAccent();
     [_universalSwitch addTarget:self action:@selector(universalToggled:) forControlEvents:UIControlEventValueChanged];
-    [stack addArrangedSubview:[KGRow(@"通用码 (不绑设备)", _universalSwitch, @"任何设备都能用 —— 泄漏即全线可用, 慎用")]];
+    [stack addArrangedSubview:KGRow(@"通用码 (不绑设备)", _universalSwitch, @"任何设备都能用 —— 泄漏即全线可用, 慎用")];
     return card;
 }
 
@@ -255,7 +255,7 @@ static UITextField *KGField(NSString *placeholder, CGFloat fontSize, BOOL digits
     _foreverSwitch = [[UISwitch alloc] initWithFrame:CGRectZero];
     _foreverSwitch.onTintColor = KGAccent();
     [_foreverSwitch addTarget:self action:@selector(foreverToggled:) forControlEvents:UIControlEventValueChanged];
-    [stack addArrangedSubview:[KGRow(@"永久有效", _foreverSwitch, nil)]];
+    [stack addArrangedSubview:KGRow(@"永久有效", _foreverSwitch, nil)];
 
     _daysField = KGField(@"365", 17, YES);
     _daysField.delegate = self;
@@ -263,7 +263,7 @@ static UITextField *KGField(NSString *placeholder, CGFloat fontSize, BOOL digits
     _daysField.textAlignment = NSTextAlignmentRight;
     [_daysField.widthAnchor constraintEqualToConstant:110].active = YES;
     [_daysField.heightAnchor constraintEqualToConstant:44].active = YES;
-    [stack addArrangedSubview:[KGRow(@"天数", _daysField, nil)]];
+    [stack addArrangedSubview:KGRow(@"天数", _daysField, nil)];
 
     UIStackView *chips = [[UIStackView alloc] initWithFrame:CGRectZero];
     chips.axis = UILayoutConstraintAxisHorizontal;
@@ -308,13 +308,13 @@ static UITextField *KGField(NSString *placeholder, CGFloat fontSize, BOOL digits
     btns.axis = UILayoutConstraintAxisHorizontal;
     btns.distribution = UIStackViewDistributionFillEqually;
     btns.spacing = 8;
-    _copyBtn = KGButton(@"复制", [UIColor tertiarySystemFillColor], [UIColor labelColor], 40);
+    _clipBtn = KGButton(@"复制", [UIColor tertiarySystemFillColor], [UIColor labelColor], 40);
     _shareBtn = KGButton(@"分享", [UIColor tertiarySystemFillColor], [UIColor labelColor], 40);
     _verifyBtn = KGButton(@"验签", [UIColor tertiarySystemFillColor], [UIColor labelColor], 40);
-    [_copyBtn addTarget:self action:@selector(copyTapped) forControlEvents:UIControlEventTouchUpInside];
+    [_clipBtn addTarget:self action:@selector(copyTapped) forControlEvents:UIControlEventTouchUpInside];
     [_shareBtn addTarget:self action:@selector(shareTapped) forControlEvents:UIControlEventTouchUpInside];
     [_verifyBtn addTarget:self action:@selector(verifyTapped) forControlEvents:UIControlEventTouchUpInside];
-    [btns addArrangedSubview:_copyBtn];
+    [btns addArrangedSubview:_clipBtn];
     [btns addArrangedSubview:_shareBtn];
     [btns addArrangedSubview:_verifyBtn];
     [stack addArrangedSubview:btns];
@@ -487,13 +487,13 @@ static UITextField *KGField(NSString *placeholder, CGFloat fontSize, BOOL digits
 
 - (void)copyText:(NSString *)text {
     [UIPasteboard generalPasteboard].string = text;
-    NSString *old = _copyBtn.currentTitle;
-    [_copyBtn setTitle:@"已复制 ✓" forState:UIControlStateNormal];
-    [_copyBtn setTitleColor:KGAccent() forState:UIControlStateNormal];
+    NSString *old = _clipBtn.currentTitle;
+    [_clipBtn setTitle:@"已复制 ✓" forState:UIControlStateNormal];
+    [_clipBtn setTitleColor:KGAccent() forState:UIControlStateNormal];
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        if ([self.copyBtn currentTitle] && [self.copyBtn.currentTitle containsString:@"已复制"]) {
-            [self.copyBtn setTitle:old forState:UIControlStateNormal];
-            [self.copyBtn setTitleColor:[UIColor labelColor] forState:UIControlStateNormal];
+        if ([self.clipBtn currentTitle] && [self.clipBtn.currentTitle containsString:@"已复制"]) {
+            [self.clipBtn setTitle:old forState:UIControlStateNormal];
+            [self.clipBtn setTitleColor:[UIColor labelColor] forState:UIControlStateNormal];
         }
     });
 }
