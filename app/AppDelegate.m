@@ -150,6 +150,48 @@ static void SVBJumpToMediaPath(UIViewController *vc, NSString *path) {
     [vc presentViewController:ac animated:YES completion:nil];
 }
 
+#pragma mark - v10.4.0 诊断报告开关式
+
+// 报告文件夹与「板栗仁」文件夹同级: /var/mobile/信息视频背景素材/看不懂的报告/
+// 里面放 诊断报告.txt (以后有问题要加别的报告也放这个文件夹)
+static NSString *SVBDiagnoseReportDir(void) {
+    return [SVB_MEDIA_FRIENDLY_PARENT stringByAppendingPathComponent:@"看不懂的报告"];
+}
+static NSString *SVBDiagnoseReportPath(void) {
+    return [SVBDiagnoseReportDir() stringByAppendingPathComponent:@"诊断报告.txt"];
+}
+
+// 开关状态存配置 diagnose_report
+static BOOL SVBDiagnoseReportEnabled(void) {
+    id v = [[SVBManager shared] configValueForKey:@"diagnose_report"];
+    return [v respondsToSelector:@selector(boolValue)] ? [v boolValue] : NO;
+}
+
+// 按开关生成 / 删除报告文件夹 (App 启动与切换开关时各调一次)
+static void SVBRefreshDiagnoseReport(void) {
+    @try {
+        NSFileManager *fm = [NSFileManager defaultManager];
+        NSString *dir = SVBDiagnoseReportDir();
+        NSString *p = SVBDiagnoseReportPath();
+        if (SVBDiagnoseReportEnabled()) {
+            SVBEnsureFriendlyMediaPath(NULL);   // 保证父目录存在
+            NSString *txt = SVBGenerateDiagnoseReport();
+            if (txt.length) {
+                [fm createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+                [fm createFileAtPath:p
+                            contents:[txt dataUsingEncoding:NSUTF8StringEncoding]
+                           attributes:nil];
+            }
+        } else if ([fm fileExistsAtPath:dir]) {
+            // 关闭时整个文件夹删掉 (里面只有我们自己写的报告, 不会误删用户文件)
+            [fm removeItemAtPath:dir error:nil];
+        }
+    } @catch (NSException *e) {}
+}
+
+// 完整诊断报告文本 (报告页 / 文件共用; 函数体在文件末尾 SVBDiagnosticsController 段之前)
+static NSString *SVBGenerateDiagnoseReport(void);
+
 #pragma mark - AppDelegate
 
 @implementation SVBAppDelegate
@@ -165,6 +207,8 @@ static void SVBJumpToMediaPath(UIViewController *vc, NSString *path) {
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
             SVBCleanupHousekeeping();
         });
+        // v10.4.0: 诊断报告开关 —— 开着就刷新「看不懂的报告」, 关着就删掉旧文件
+        SVBRefreshDiagnoseReport();
     });
     self.window = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
     UINavigationController *nav = [[UINavigationController alloc]
@@ -835,6 +879,8 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
                 @"所有界面的素材都放在这一个文件夹里（点「素材路径」可直接跳到 Filza）：\n%@\n\n"
                 "不再分界面子文件夹 —— 把视频直接丢进去，主页面/所有信息/对话详情等每个界面都能选它当背景，"
                 "各界面可单独选不同的视频、单独调效果。\n"
+                "「诊断报告」开关：有问题时打开，会把完整报告生成到素材文件夹旁的「看不懂的报告」文件夹里（诊断报告.txt），"
+                "没问题就保持关闭（关闭时自动删除该文件夹）。点「诊断报告」这一行可当场查看。\n"
                 "各界面音量默认关闭。设置即时生效，无需注销。",
                 SVBMediaFriendlyRoot()];
     }
@@ -1018,9 +1064,25 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
         c.imageView.image = SVBIconForKey(@"__folder");
         c.accessoryType = UITableViewCellAccessoryNone;
     } else if (indexPath.row == 2) {
-        c.textLabel.text = @"诊断报告";
-        c.detailTextLabel.text = @"排查问题";
-        c.imageView.image = SVBIconForKey(@"__diag");
+        // v10.4.0: 诊断报告改开关式 —— 开=生成「看不懂的报告」文件, 关=不生成并删除
+        static NSString *diagId = @"svb-cell-diag";
+        UITableViewCell *dc = [tableView dequeueReusableCellWithIdentifier:diagId];
+        if (!dc) {
+            dc = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:diagId];
+            UISwitch *sw = [UISwitch new];
+            sw.onTintColor = SVBAccent();
+            [sw addTarget:self action:@selector(diagnoseToggled:) forControlEvents:UIControlEventValueChanged];
+            dc.accessoryView = sw;
+        }
+        BOOL on = SVBDiagnoseReportEnabled();
+        dc.textLabel.text = @"诊断报告";
+        dc.detailTextLabel.text = on ? @"已生成 · 看不懂的报告" : @"关闭";
+        dc.detailTextLabel.textColor = on ? SVBAccent() : [UIColor secondaryLabelColor];
+        dc.detailTextLabel.lineBreakMode = NSLineBreakByTruncatingTail;
+        dc.imageView.image = SVBIconForKey(@"__diag");
+        ((UISwitch *)dc.accessoryView).on = on;
+        SVBApplyCardStyle(dc, 2, 4);
+        return dc;
     } else {
         c.textLabel.text = @"App 名称与图标";
         c.detailTextLabel.text = @"自定义外观";
@@ -1037,6 +1099,16 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
     SVBManager *mgr = [SVBManager shared];
     [mgr setConfigValue:@(sw.on) forKey:@"debug_banner"];
     [mgr postChangeNotification];
+}
+
+// v10.4.0: 诊断报告开关 —— 开=立即生成「看不懂的报告」文件; 关=删除文件
+- (void)diagnoseToggled:(UISwitch *)sw {
+    [[SVBManager shared] setConfigValue:@(sw.on) forKey:@"diagnose_report"];
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        SVBRefreshDiagnoseReport();
+    });
+    [self.tableView reloadRowsAtIndexPaths:@[[NSIndexPath indexPathForRow:2 inSection:3]]
+                          withRowAnimation:UITableViewRowAnimationNone];
 }
 
 #pragma mark - v9.9.11 切后台自动清理
@@ -1901,34 +1973,9 @@ static void SVBAppPickImage(UIViewController *host, void (^done)(UIImage *image)
 
 @end
 
-#pragma mark - 诊断报告页
-
-@implementation SVBDiagnosticsController
-
-- (void)viewDidLoad {
-    [super viewDidLoad];
-    self.view.backgroundColor = [UIColor systemGroupedBackgroundColor];
-    self.title = @"诊断报告";
-    // v1.8: 报告装进圆角卡片, 等宽字体 + 内边距, 不再是贴边的白板
-    UITextView *tv = [[UITextView alloc] initWithFrame:CGRectInset(self.view.bounds, 10, 10)];
-    tv.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    tv.editable = NO;
-    tv.backgroundColor = SVBCardColor();
-    tv.layer.cornerRadius = 16;
-    tv.textContainerInset = UIEdgeInsetsMake(12, 12, 12, 12);
-    tv.font = [UIFont monospacedSystemFontOfSize:12 weight:UIFontWeightRegular];
-    tv.text = [self buildReport];
-    self.navigationItem.rightBarButtonItem =
-        [[UIBarButtonItem alloc] initWithTitle:@"复制全部" style:UIBarButtonItemStylePlain
-                                         target:self action:@selector(copyAll)];
-    [self.view addSubview:tv];
-}
-
-- (void)copyAll {
-    UIPasteboard.generalPasteboard.string = [self buildReport];
-}
-
-- (NSString *)buildReport {
+// v10.4.0: 报告文本唯一来源 (报告页与「看不懂的报告.txt」文件共用)
+static NSString *SVBGenerateDiagnoseReport(void) {
+    @try {
     SVBManager *mgr = [SVBManager shared];
     NSFileManager *fm = [NSFileManager defaultManager];
     NSMutableString *r = [NSMutableString string];
@@ -2059,6 +2106,40 @@ static void SVBAppPickImage(UIViewController *host, void (^done)(UIImage *image)
         [r appendFormat:@"读取崩溃日志失败: %@ / %@\n", e.name, e.reason];
     }
     return r;
+    } @catch (NSException *e) {
+        return [NSString stringWithFormat:@"报告生成异常: %@ / %@", e.name, e.reason];
+    }
+}
+
+#pragma mark - 诊断报告页
+
+@implementation SVBDiagnosticsController
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.view.backgroundColor = [UIColor systemGroupedBackgroundColor];
+    self.title = @"诊断报告";
+    // v1.8: 报告装进圆角卡片, 等宽字体 + 内边距, 不再是贴边的白板
+    UITextView *tv = [[UITextView alloc] initWithFrame:CGRectInset(self.view.bounds, 10, 10)];
+    tv.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    tv.editable = NO;
+    tv.backgroundColor = SVBCardColor();
+    tv.layer.cornerRadius = 16;
+    tv.textContainerInset = UIEdgeInsetsMake(12, 12, 12, 12);
+    tv.font = [UIFont monospacedSystemFontOfSize:12 weight:UIFontWeightRegular];
+    tv.text = [self buildReport];
+    self.navigationItem.rightBarButtonItem =
+        [[UIBarButtonItem alloc] initWithTitle:@"复制全部" style:UIBarButtonItemStylePlain
+                                         target:self action:@selector(copyAll)];
+    [self.view addSubview:tv];
+}
+
+- (void)copyAll {
+    UIPasteboard.generalPasteboard.string = [self buildReport];
+}
+
+- (NSString *)buildReport {
+    return SVBGenerateDiagnoseReport();
 }
 
 @end

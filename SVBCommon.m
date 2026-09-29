@@ -1064,6 +1064,15 @@ BOOL SVBDirWritablePath(NSString *dir) {
             [self log:@"素材自愈迁移完成: %ld 个文件进入主根 %@", (long)copied, primary];
             [self postChangeNotification];
         }
+
+        // v10.4.0: 顺带清掉「指向已不存在文件」的选中素材配置 ——
+        // 素材删光后 App 不应再显示旧素材名/继续铺背景
+        for (NSArray<NSString *> *def in SVBContextDefinitions()) {
+            NSString *key = [def[0] stringByAppendingString:@"_video"];
+            NSString *sel = [self configValueForKey:key];
+            if (sel.length && ![self videosForContext:def[0]].count)
+                [self setConfigValue:nil forKey:key];
+        }
     } @catch (NSException *e) {
         [self log:@"迁移异常: %@ / %@", e.name, e.reason];
     }
@@ -1210,7 +1219,15 @@ static BOOL SVBCopyInto(NSString *srcPath, NSString *dir, NSString *name, NSErro
 
 - (void)deleteVideoName:(NSString *)name forContext:(NSString *)ctx {
     NSFileManager *fm = [NSFileManager defaultManager];
-    for (NSString *dir in [self directoriesForContext:ctx includeRootFallback:YES]) {
+    // v10.4.0: 旧版遗留根 (jbroot/Documents/家目录) 里的同名副本也要一并删 ——
+    // 否则每次启动的自愈迁移会把旧根副本再复制回主根, 表现为「删了马上又出来」
+    NSMutableArray *dirs = [[self directoriesForContext:ctx includeRootFallback:YES] mutableCopy];
+    for (NSString *root in SVBLegacyRoots()) {
+        [dirs addObject:root];
+        NSString *sub = [root stringByAppendingPathComponent:ctx];
+        if ([fm fileExistsAtPath:sub]) [dirs addObject:sub];
+    }
+    for (NSString *dir in dirs) {
         NSString *p = [dir stringByAppendingPathComponent:name];
         if ([fm fileExistsAtPath:p]) [fm removeItemAtPath:p error:nil];
     }
