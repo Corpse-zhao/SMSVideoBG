@@ -522,8 +522,19 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
 
 #pragma mark - v10.0.1 未授权时首页只显示授权栏
 
-// 已授权 -> 完整设置页; 未授权/过期/待校验 -> 只显示授权栏
+// 已授权 -> 完整设置页; 未授权/过期 -> 只显示授权栏
 - (BOOL)authOK { return SVBIsLicensed(); }
+
+// v10.2.0: 纯离线模式 (默认开启) —— 插件不发任何网络请求, 客户国内网络零依赖
+- (BOOL)authOfflineOnly { return SVBAuthOfflineOnlyMode(); }
+- (NSInteger)authRowCount { return [self authOfflineOnly] ? 3 : 4; }
+// 行语义: 0=授权状态  1=本机 UDID  2=立即联网校验(仅在线模式)  3=粘贴离线授权
+- (NSInteger)authRowKindAt:(NSInteger)row {
+    if (row == 0) return 0;
+    if (row == 1) return 1;
+    if ([self authOfflineOnly]) return (row == 2) ? 3 : -1;
+    return (row == 2) ? 2 : 3;
+}
 
 - (void)svbReloadAuthState {
     NSString *det = nil;
@@ -541,11 +552,13 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
         return;
     }
     [UIPasteboard generalPasteboard].string = udid;
+    NSString *tail = [self authOfflineOnly]
+        ? @"作者会回你一段以 SVBOFFLINE1: 开头的授权串 —— 回到这里点「粘贴离线授权」导入即可，不用连网。"
+        : @"作者签发后点「立即联网校验」即可生效；作者删除这条记录后，本机最多 30 分钟掉授权。";
     [self svbAlert:@"UDID 已复制"
                msg:[NSString stringWithFormat:
-        @"%@\n\n识别方式：%@\n把它发给作者，让作者为你签发授权。\n\n"
-        @"作者签发后本机联网自动生效；作者删除这条记录后，本机最多 30 分钟掉授权。",
-        udid, SVBAuthUDIDSource()]];
+        @"%@\n\n识别方式：%@\n把它发给作者，让作者为你签发授权。\n\n%@",
+        udid, SVBAuthUDIDSource(), tail]];
 }
 
 - (void)svbAuthSync {
@@ -682,13 +695,54 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
     NSIndexPath *ip = [self.tableView indexPathForRowAtPoint:p];
     if (!ip) return;
     if (![self authOK]) {
-        if (ip.row == 0)      [self svbShowDiagnose];   // 授权状态行 -> 授权诊断
-        else if (ip.row == 1) [self editGiteeSource];   // 本机 UDID 行 -> Gitee 名单地址
-        else if (ip.row == 2) [self editAuthSource];    // 立即联网校验行 -> 自定义源
-        else                  [self svbImportTicket];   // 粘贴离线授权行
+        NSInteger kind = [self authRowKindAt:ip.row];
+        if (kind == 0)      [self svbAuthMenu];        // 授权状态行 -> 诊断 / 切换授权模式
+        else if (kind == 1) [self editGiteeSource];    // 本机 UDID 行 -> Gitee 名单地址
+        else if (kind == 2) [self editAuthSource];     // 立即联网校验行 -> 自定义源
+        else                [self svbImportTicket];    // 粘贴离线授权行 -> 直接导入
         return;
     }
     if (ip.section == 3 && ip.row == 0) [self editAuthSource];   // 说明 -> 授权状态
+}
+
+// v10.2.0: 长按「授权状态」-> 授权诊断 / 切换在线·离线模式
+- (void)svbAuthMenu {
+    BOOL offline = [self authOfflineOnly];
+    UIAlertController *ac = [UIAlertController
+        alertControllerWithTitle:@"授权设置"
+                         message:(offline
+            ? @"当前是「纯离线模式」：插件不发起任何网络请求，靠作者发来的授权串授权，"
+              @"不需要代理 / 梯子。作者删除某条 UDID 不会影响本机。"
+            : @"当前是「在线模式」：插件会从托管地址拉取作者名单，"
+              @"作者删掉你这条 UDID 后最多 30 分钟掉授权。")
+                  preferredStyle:UIAlertControllerStyleActionSheet];
+    [ac addAction:[UIAlertAction actionWithTitle:@"授权诊断" style:UIAlertActionStyleDefault
+                                          handler:^(UIAlertAction *a) { [self svbShowDiagnose]; }]];
+    [ac addAction:[UIAlertAction actionWithTitle:(offline ? @"切换到在线模式（需要能联网）"
+                                                          : @"切换到纯离线模式（不需要网络）")
+                                          style:UIAlertActionStyleDefault
+                                          handler:^(UIAlertAction *a) {
+        SVBAuthSetOfflineOnlyMode(!offline);
+        [self svbReloadAuthState];
+        [self.tableView reloadData];
+        [self svbAlert:(offline ? @"已切到在线模式" : @"已切到纯离线模式")
+                   msg:(offline
+            ? @"插件会开始联网拉取作者名单。作者删掉你这条 UDID 后，本机最多 30 分钟掉授权。\n\n"
+              @"注意：这条通道要求本机能连上托管地址，国内网络可能需要代理。"
+            : @"插件已停止一切联网请求，只认已导入的授权串。\n\n"
+              @"客户不需要任何代理 / 梯子；作者删除 UDID 不再影响本机，授权只得到期为止。")];
+    }]];
+    if (!offline) {
+        [ac addAction:[UIAlertAction actionWithTitle:@"自定义授权服务地址" style:UIAlertActionStyleDefault
+                                              handler:^(UIAlertAction *a) { [self editAuthSource]; }]];
+        [ac addAction:[UIAlertAction actionWithTitle:@"Gitee 名单地址" style:UIAlertActionStyleDefault
+                                              handler:^(UIAlertAction *a) { [self editGiteeSource]; }]];
+    }
+    [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    ac.popoverPresentationController.sourceView = self.tableView;
+    ac.popoverPresentationController.sourceRect =
+        CGRectMake(self.tableView.bounds.size.width / 2, 80, 1, 1);
+    [self presentViewController:ac animated:YES completion:nil];
 }
 
 // v10.1.0: 粘贴作者发来的离线授权串 (无需联网)
@@ -697,7 +751,7 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
     UIAlertController *ac = [UIAlertController
         alertControllerWithTitle:@"粘贴离线授权串"
                          message:@"把作者发给你的一整段文本（以 SVBOFFLINE1: 开头）粘进来。\n"
-                                 @"不用联网立即生效；有效期最长 90 天，联网校验成功后自动转成完整期限。"
+                                 @"不用联网立即生效，有效期按作者签发的天数计。"
                   preferredStyle:UIAlertControllerStyleAlert];
     [ac addTextFieldWithConfigurationHandler:^(UITextField *tf) {
         tf.text = [clip rangeOfString:@"SVBOFFLINE1:"].location != NSNotFound ? clip : @"";
@@ -820,7 +874,7 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
 }
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
-    if (![self authOK]) return 4;  // 授权状态 / 本机 UDID / 立即联网校验 / 粘贴离线授权
+    if (![self authOK]) return [self authRowCount];
     if (section == 0) return 1;
     if (section == 1) return (NSInteger)_defs.count;
     if (section == 2) return 2; // 切后台自动清理 / 注入诊断横幅 (v9.9.11)
@@ -836,12 +890,19 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
 }
 
 - (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
-    if (![self authOK])
-        return @"【方式一 · 联网】点上面「本机 UDID」那一行复制，发给作者；作者签发后点「立即联网校验」即可生效。\n"
+    if (![self authOK]) {
+        if ([self authOfflineOnly])
+            return @"① 点「本机 UDID」那一行复制，发给作者；\n"
+                    "② 作者会回你一段以 SVBOFFLINE1: 开头的授权串；\n"
+                    "③ 点「粘贴离线授权」把它导入，立刻生效。\n\n"
+                    "本机已关闭全部联网请求，不需要任何代理 / 梯子。有效期按作者签发的内容计，"
+                    "到期找作者要一段新的即可。\n\n"
+                    "长按第一行可查看「授权诊断」，或切换到「在线模式」。";
+        return @"【方式一 · 联网】点「本机 UDID」复制发给作者；作者签发后点「立即联网校验」生效。\n"
                 "作者删除你这条 UDID 记录后，本机最多 30 分钟掉授权。\n\n"
-                "【方式二 · 不联网】把作者发来的一整段授权串，点最后一行「粘贴离线授权」导入，"
-                "不用连网立刻生效（有效期最长 90 天，联网校验成功后自动转成完整期限）。\n\n"
-                "如果联网校验一直不过，长按任意一行可以：查看「授权诊断」、填写「Gitee 名单地址」或「自定义授权服务地址」。";
+                "【方式二 · 不联网】点「粘贴离线授权」导入作者发来的授权串，不用连网立刻生效。\n\n"
+                "长按第一行可查看「授权诊断」，或切回「纯离线模式」（不需要梯子）。";
+    }
     if (section == 1)
         return @"点按某一行可为该界面导入/选用素材并单独设置不透明度/模糊度/音量。每个界面对应素材目录下一个独立的文件夹，用 Filza 直接放入视频同样生效。\n\n「对话详情」= 点进某个对话后上下聊天的那个界面（不是列表）。「未导入素材」的界面不会显示视频背景，导入并打开开关后生效。";
     if (section == 2)
@@ -870,7 +931,10 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
     c.accessoryType = UITableViewCellAccessoryNone;
     c.selectionStyle = UITableViewCellSelectionStyleDefault;
 
-    if (row == 0) {
+    NSInteger kind = [self authRowKindAt:row];
+    NSInteger total = [self authRowCount];
+
+    if (kind == 0) {
         BOOL ok = (_authState == SVBAuthStateAuthorized);
         c.textLabel.text = @"授权状态";
         c.detailTextLabel.text = SVBAuthStateText(_authState, _authDetail);
@@ -882,7 +946,7 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
             ok ? [UIColor colorWithRed:0.35 green:0.85 blue:0.65 alpha:1]
                : [UIColor colorWithRed:1.00 green:0.42 blue:0.30 alpha:1]);
         c.selectionStyle = UITableViewCellSelectionStyleNone;   // 纯信息, 点不动
-    } else if (row == 1) {
+    } else if (kind == 1) {
         c.textLabel.text = @"本机 UDID";
         c.detailTextLabel.text = SVBAuthUDID() ?: @"读取失败";
         c.detailTextLabel.font = [UIFont monospacedSystemFontOfSize:12.5 weight:UIFontWeightSemibold];
@@ -890,7 +954,7 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
         c.imageView.image = SVBBadgeIcon(@"iphone.gen3",
             [UIColor colorWithRed:0.25 green:0.55 blue:1.00 alpha:1],
             [UIColor colorWithRed:0.40 green:0.80 blue:1.00 alpha:1]);
-    } else if (row == 2) {
+    } else if (kind == 2) {
         NSTimeInterval ts = SVBAuthLastSyncTime();
         NSDateFormatter *df = [[NSDateFormatter alloc] init];
         df.dateFormat = @"MM-dd HH:mm";
@@ -904,6 +968,7 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
             [UIColor colorWithRed:0.55 green:0.45 blue:1.00 alpha:1]);
     } else {
         // v10.1.0: 完全不需要联网的兜底 —— 粘贴作者发的离线授权串
+        // v10.2.0: 纯离线模式下这就是唯一入口, 提到最显眼位置
         c.textLabel.text = @"粘贴离线授权";
         c.detailTextLabel.text = SVBAuthOfflineTicketInfo();
         c.detailTextLabel.font = [UIFont systemFontOfSize:13.5];
@@ -913,7 +978,7 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
             [UIColor colorWithRed:0.45 green:0.75 blue:0.35 alpha:1],
             [UIColor colorWithRed:0.70 green:0.85 blue:0.40 alpha:1]);
     }
-    SVBApplyCardStyle(c, row, 4);
+    SVBApplyCardStyle(c, row, total);
     return c;
 }
 
@@ -1119,9 +1184,10 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
     // v10.0.1: 未授权首页只有授权栏, 点行直接办事, 不再跳授权页
     if (![self authOK]) {
-        if (indexPath.row == 1) [self svbCopyUDID];
-        else if (indexPath.row == 2) [self svbAuthSync];
-        else if (indexPath.row == 3) [self svbImportTicket];
+        NSInteger kind = [self authRowKindAt:indexPath.row];
+        if (kind == 1)      [self svbCopyUDID];      // 本机 UDID -> 复制
+        else if (kind == 2) [self svbAuthSync];      // 立即联网校验 (仅在线模式)
+        else if (kind == 3) [self svbImportTicket];  // 粘贴离线授权
         return;
     }
     if (indexPath.section == 2 && indexPath.row == 0) {
@@ -1685,6 +1751,9 @@ static void SVBAppPickImage(UIViewController *host, void (^done)(UIImage *image)
     BOOL _syncing;
 }
 
+// v10.2.0: 纯离线模式 (默认) —— 插件不发起任何网络请求
+- (BOOL)authOfflineOnly { return SVBAuthOfflineOnlyMode(); }
+
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.title = @"授权";
@@ -1767,6 +1836,13 @@ static void SVBAppPickImage(UIViewController *host, void (^done)(UIImage *image)
 }
 
 - (void)syncNow {
+    if ([self authOfflineOnly]) {   // v10.2.0: 纯离线模式不联网
+        [self alert:@"当前是纯离线模式"
+                msg:@"本机已关闭全部联网请求，所以不会去拉取作者名单。\n\n"
+                    @"把作者发来的授权串（以 SVBOFFLINE1: 开头）用「粘贴离线授权」导入即可。\n"
+                    @"想改成联网校验，请点「授权模式」切换。"];
+        return;
+    }
     SVBAuthRefreshIfNeeded(YES);
     _syncing = YES;
     [self reloadAuth];
@@ -1784,25 +1860,33 @@ static void SVBAppPickImage(UIViewController *host, void (^done)(UIImage *image)
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
     if (section == 0) return 2;   // 本机 UDID / 授权状态
-    if (section == 1) return 2;   // 立即联网校验 / 粘贴离线授权
+    // 授权模式 / [在线] 立即联网校验 / 粘贴离线授权
+    if (section == 1) return [self authOfflineOnly] ? 2 : 3;
     return 1;                     // 授权诊断
 }
 
 - (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
     if (section == 0) return @"设备";
-    if (section == 1) return @"同步";
+    if (section == 1) return @"授权方式";
     return @"排查";
 }
 
 - (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
     if (section == 0) return nil;
-    if (section == 1)
+    if (section == 1) {
+        if ([self authOfflineOnly])
+            return @"当前为「纯离线模式」：本机不发起任何网络请求，不需要代理 / 梯子。\n\n"
+                    "把作者发来的授权串（以 SVBOFFLINE1: 开头）点「粘贴离线授权」导入即可，立刻生效。\n"
+                    "有效期按作者签发的天数计，到期找作者要一段新的。\n\n"
+                    "想恢复「作者删掉 UDID 即掉授权」，点「授权模式」切到在线。";
         return @"【联网】点「立即联网校验」从作者名单拉取授权；作者删掉你这条 UDID 后，本机最多 30 分钟掉授权。\n\n"
-                "【不联网】点「粘贴离线授权」导入作者发来的一整段授权串，不用任何网络立即生效"
-                "（有效期最长 90 天，成功联网校验一次后会自动转成完整期限的在线授权）。\n\n"
-                "两条路可以同时用：平时走联网，网络不通时用离线串顶着。";
+                "【不联网】点「粘贴离线授权」导入作者发来的授权串，不用任何网络立即生效。\n\n"
+                "两条路可以同时用：平时走联网，网络不通时用离线串顶着。\n"
+                "若本机网络连不上托管地址，点「授权模式」切回纯离线即可（不需要梯子）。";
+    }
     return @"「授权诊断」会逐个源实测连通性，直接告诉你是网络拉不通、UDID 不在作者名单里，还是名单被改坏了。\n\n"
-            "长按这一行可填写 Gitee 名单地址（国内直连首选）；长按「立即联网校验」可填自定义授权服务地址。";
+            "长按「授权模式」可填写 Gitee 名单地址（国内直连首选）；长按「立即联网校验」可填自定义授权服务地址。\n\n"
+            "（纯离线模式下这些联网入口都不生效，因为插件不会联网。）";
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
@@ -1843,9 +1927,28 @@ static void SVBAppPickImage(UIViewController *host, void (^done)(UIImage *image)
         return c;
     }
 
-    // section 1: 同步
+    // section 1: 授权方式
     if (indexPath.section == 1) {
+        BOOL offline = [self authOfflineOnly];
+        NSInteger total = offline ? 2 : 3;
+
         if (indexPath.row == 0) {
+            // v10.2.0: 授权模式 —— 纯离线(默认, 客户不需要梯子) / 在线(可远程撤销)
+            c.textLabel.text = @"授权模式";
+            c.detailTextLabel.text = offline ? @"纯离线（不联网）" : @"在线（联网校验）";
+            c.detailTextLabel.font = [UIFont systemFontOfSize:13.5];
+            c.detailTextLabel.textColor = offline ? SVBAccent() : [UIColor systemOrangeColor];
+            c.imageView.image = SVBBadgeIcon(offline ? @"wifi.slash" : @"wifi",
+                offline ? [UIColor colorWithRed:0.35 green:0.72 blue:0.45 alpha:1]
+                        : [UIColor colorWithRed:0.30 green:0.62 blue:1.00 alpha:1],
+                offline ? [UIColor colorWithRed:0.60 green:0.85 blue:0.50 alpha:1]
+                        : [UIColor colorWithRed:0.55 green:0.45 blue:1.00 alpha:1]);
+            c.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+            SVBApplyCardStyle(c, 0, total);
+            return c;
+        }
+
+        if (!offline && indexPath.row == 1) {
             NSTimeInterval ts = SVBAuthLastSyncTime();
             NSDateFormatter *df = [[NSDateFormatter alloc] init];
             df.dateFormat = @"MM-dd HH:mm";
@@ -1859,10 +1962,11 @@ static void SVBAppPickImage(UIViewController *host, void (^done)(UIImage *image)
                 [UIColor colorWithRed:0.30 green:0.62 blue:1.00 alpha:1],
                 [UIColor colorWithRed:0.55 green:0.45 blue:1.00 alpha:1]);
             c.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
-            SVBApplyCardStyle(c, 0, 2);
+            SVBApplyCardStyle(c, 1, total);
             return c;
         }
-        // v10.1.0: 不需要联网的兜底
+
+        // v10.1.0: 不需要联网的兜底 —— 粘贴作者发的离线授权串
         c.textLabel.text = @"粘贴离线授权";
         c.detailTextLabel.text = SVBAuthOfflineTicketInfo();
         c.detailTextLabel.font = [UIFont systemFontOfSize:13.5];
@@ -1872,7 +1976,7 @@ static void SVBAppPickImage(UIViewController *host, void (^done)(UIImage *image)
             [UIColor colorWithRed:0.45 green:0.75 blue:0.35 alpha:1],
             [UIColor colorWithRed:0.70 green:0.85 blue:0.40 alpha:1]);
         c.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
-        SVBApplyCardStyle(c, 1, 2);
+        SVBApplyCardStyle(c, total - 1, total);
         return c;
     }
 
@@ -1908,11 +2012,49 @@ static void SVBAppPickImage(UIViewController *host, void (^done)(UIImage *image)
         return;
     }
     if (indexPath.section == 1) {
-        if (indexPath.row == 0) [self syncNow];
-        else [self importTicket];
+        BOOL offline = [self authOfflineOnly];
+        if (indexPath.row == 0) { [self toggleAuthMode]; return; }         // 授权模式
+        if (!offline && indexPath.row == 1) { [self syncNow]; return; }    // 立即联网校验
+        [self importTicket];                                               // 粘贴离线授权
         return;
     }
     [self showDiagnose];
+}
+
+// v10.2.0: 切换「纯离线 / 在线」授权模式
+- (void)toggleAuthMode {
+    BOOL offline = [self authOfflineOnly];
+    UIAlertController *ac = [UIAlertController
+        alertControllerWithTitle:@"授权模式"
+                         message:(offline
+            ? @"当前：纯离线 —— 本机不联网，靠作者发来的授权串授权，不需要代理 / 梯子。\n\n"
+              @"代价：作者删除某条 UDID 不会影响本机，授权只得到期为止。"
+            : @"当前：在线 —— 本机从托管地址拉取作者名单，作者删掉 UDID 最多 30 分钟掉授权。\n\n"
+              @"注意：这条通道要求能连上托管地址，国内网络可能需要代理。")
+                  preferredStyle:UIAlertControllerStyleActionSheet];
+    [ac addAction:[UIAlertAction actionWithTitle:(offline ? @"切换到在线模式（需要能联网）"
+                                                          : @"切换到纯离线模式（不需要网络）")
+                                          style:UIAlertActionStyleDefault
+                                          handler:^(UIAlertAction *a) {
+        SVBAuthSetOfflineOnlyMode(!offline);
+        [self reloadAuth];
+        [self alert:(offline ? @"已切到在线模式" : @"已切到纯离线模式")
+                msg:(offline
+            ? @"插件会开始联网拉取作者名单；作者删掉你这条 UDID 后最多 30 分钟掉授权。"
+            : @"插件已停止一切联网请求，只认已导入的授权串。\n\n"
+              @"客户不需要任何代理 / 梯子；作者删除 UDID 不再影响本机，授权只得到期为止。")];
+    }]];
+    if (!offline) {
+        [ac addAction:[UIAlertAction actionWithTitle:@"自定义授权服务地址" style:UIAlertActionStyleDefault
+                                              handler:^(UIAlertAction *a) { [self editAuthSource]; }]];
+        [ac addAction:[UIAlertAction actionWithTitle:@"Gitee 名单地址" style:UIAlertActionStyleDefault
+                                              handler:^(UIAlertAction *a) { [self editGiteeSource]; }]];
+    }
+    [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    ac.popoverPresentationController.sourceView = self.tableView;
+    ac.popoverPresentationController.sourceRect =
+        CGRectMake(self.tableView.bounds.size.width / 2, 80, 1, 1);
+    [self presentViewController:ac animated:YES completion:nil];
 }
 
 // v10.1.0: 粘贴离线授权串
@@ -1921,7 +2063,7 @@ static void SVBAppPickImage(UIViewController *host, void (^done)(UIImage *image)
     UIAlertController *ac = [UIAlertController
         alertControllerWithTitle:@"粘贴离线授权串"
                          message:@"把作者发给你的一整段文本（以 SVBOFFLINE1: 开头）粘进来。\n"
-                                 @"不用联网立即生效；有效期最长 90 天，联网校验成功后自动转成完整期限。"
+                                 @"不用联网立即生效，有效期按作者签发的天数计。"
                   preferredStyle:UIAlertControllerStyleAlert];
     [ac addTextFieldWithConfigurationHandler:^(UITextField *tf) {
         tf.text = [clip rangeOfString:@"SVBOFFLINE1:"].location != NSNotFound ? clip : @"";

@@ -285,6 +285,9 @@ static UITextField *KGField(NSString *placeholder, CGFloat fontSize, BOOL digits
     [_daysField.widthAnchor constraintEqualToConstant:110].active = YES;
     [_daysField.heightAnchor constraintEqualToConstant:44].active = YES;
     [stack addArrangedSubview:KGRow(@"有效天数", _daysField, nil)];
+    [stack addArrangedSubview:KGLabel(
+        @"这个天数同时决定在线名单的到期日和你发给客户的离线授权串的有效期 —— 客户侧不再截断，你签多久就是多久。",
+        12, UIFontWeightRegular, [UIColor tertiaryLabelColor])];
 
     UIStackView *chips = [[UIStackView alloc] initWithFrame:CGRectZero];
     chips.axis = UILayoutConstraintAxisHorizontal;
@@ -387,10 +390,10 @@ static UITextField *KGField(NSString *placeholder, CGFloat fontSize, BOOL digits
 
 - (UIView *)giteeCard {
     UIStackView *stack;
-    UIView *card = KGCard(@"Gitee 同步（国内直连 · 客户不用挂代理）", &stack);
+    UIView *card = KGCard(@"Gitee 同步（可选 · 仅「在线模式」需要）", &stack);
 
     [stack addArrangedSubview:KGLabel(
-        @"Gitee 是国内站点，客户手机直连就能拉到名单。建议和 GitHub 同时开，两边名单内容完全一样（只有指纹，没有 UDID 原文）。",
+        @"客户侧默认是「纯离线模式」，插件根本不联网，靠你发过去的离线授权串授权，不需要任何梯子 —— 这时本卡片完全不用配。\n只有你想保留「删掉 UDID 即掉授权」时，才需要配好这里，并让客户在控制 App 里切到在线模式。Gitee 是国内站点，客户手机直连就能拉到名单（两边名单内容完全一样，只有指纹，没有 UDID 原文）。",
         12.5, UIFontWeightRegular, [UIColor tertiaryLabelColor])];
 
     _giteeTokenField = KGField(@"Gitee 私人令牌（设置→私人令牌，勾 projects）", 12.5, NO);
@@ -466,7 +469,7 @@ static UITextField *KGField(NSString *placeholder, CGFloat fontSize, BOOL digits
 }
 
 - (UIView *)footerLabel {
-    return KGLabel(@"SMSVideoBG v10 · 授权 = UDID 白名单（在线名单 + 离线授权串双通道）",
+    return KGLabel(@"SMSVideoBG v10.2 · 客户侧默认纯离线（不联网、不需要梯子），靠你发的离线授权串授权",
                    12, UIFontWeightRegular, [UIColor tertiaryLabelColor]);
 }
 
@@ -750,13 +753,11 @@ static UITextField *KGField(NSString *placeholder, CGFloat fontSize, BOOL digits
     }
 
     [UIPasteboard generalPasteboard].string = ticket;
-    uint32_t cap = KGDayIndexFromNow(90);
-    BOOL capped = (exp == KG_AUTH_FOREVER || exp > cap);
 
-    NSString *msg = [NSString stringWithFormat:@"%@\n\n（全文已复制到剪贴板，直接粘给客户即可）\n\n让客户在控制 App 里点「粘贴离线授权」导入：\n- 不需要任何网络就能生效\n- 只对这台设备有效（已绑定它的 UDID）\n- 离线有效期最长 90 天%@\n- 客户一旦联网校验成功，会自动转成完整期限：%@",
+    // v2.2.0: 客户侧默认「纯离线模式」—— 不再有 90 天上限, 期限完全按你签的算
+    NSString *msg = [NSString stringWithFormat:@"%@\n\n（全文已复制到剪贴板，直接粘给客户即可）\n\n让客户在控制 App 里点「粘贴离线授权」导入：\n- 不需要任何网络就能生效（客户端默认不联网，不需要梯子）\n- 只对这台设备有效（已绑定它的 UDID）\n- 有效期到 %@\n\n注意：离线串一旦发出，到期前无法远程收回；想控制节奏就签短一点（如 30 天），到期让他来找你换新的。",
         KGAuthShortTicket(ticket),
-        capped ? @"（本单按 90 天算）" : @"（按你签的期限算）",
-        KGDateTextForDayIndex(exp)];
+        (exp == KG_AUTH_FOREVER) ? @"永久" : KGDateTextForDayIndex(exp)];
     [self kgAlert:@"离线授权串已复制" msg:msg];
 }
 

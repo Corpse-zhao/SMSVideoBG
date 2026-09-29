@@ -18,14 +18,18 @@ static const char *const kAuthSecret = SVB_LICENSE_SECRET;
 #define SVB_AUTH_KEY_VTS @"auth_ver_ts"     // 缓存: 已采用名单自带的 ts (防旧名单回滚)
 #define SVB_AUTH_KEY_URL @"auth_url"        // 自定义授权服务地址 (空 = 用内置多源)
 #define SVB_AUTH_KEY_GITEE @"auth_gitee"    // Gitee(码云) 名单地址 (国内直连)
-#define SVB_AUTH_KEY_OFFLINE @"auth_offline" // 离线授权串: {"e":到期dayIndex,"at":导入时间}
+#define SVB_AUTH_KEY_MODE @"auth_offline_only" // 纯离线模式开关 (默认 YES, v10.2.0)
+#define SVB_AUTH_KEY_OFFLINE @"auth_offline" // 离线授权串: {"h","e","t","s","at"}
 #define SVB_AUTH_INTERVAL (30 * 60.0)       // 30 分钟拉一次
 #define SVB_AUTH_TIMEOUT  9.0               // 单源超时 (并发拉, 不必留太长)
 #define SVB_AUTH_BODY_WINDOW 3.0            // 拿到首个可用响应后再等这么久, 取最新的一份
 
-// --- 离线授权串 (v10.1.0) ---
+// --- 离线授权串 (v10.1.0, v10.2.0 支持自定义期限) ---
 #define SVB_AUTH_TICKET_TAG @"SVBOFFLINE1:"
-#define SVB_AUTH_TICKET_MAX_DAYS 90         // 离线授权有效期上限(天): 防断网永久白嫖
+// 仅用于兼容 v10.1.x 的旧记录 (那种记录没存签名, 本地可被手改, 只能硬截断保平安);
+// v10.2.0 起新记录会把整串字段存下来并在每次读取时复验签名, 因此期限由作者自由指定,
+// 不再有上限 —— 篡改任何字段都会导致验签失败, 记录作废。
+#define SVB_AUTH_TICKET_LEGACY_MAX_DAYS 90
 
 // 编译期内置的 Gitee 名单地址 (CI 用 GitHub Secret SVB_GITEE_URL 注入;
 // 也可在控制 App 里填, 写入配置键 auth_gitee 后优先级更高)
@@ -35,6 +39,9 @@ static const char *const kAuthSecret = SVB_LICENSE_SECRET;
 
 // UDID 哈希前缀 (与签发 App 严格一致)
 static NSString * const kAuthHashPrefix = @"SMSVideoBG-AUTH/v1|";
+
+// 前置声明: 「判定」区会用到离线串的签名原文构造函数 (定义在后面的「离线授权串」区)
+static NSString *SVBAuthOfflinePayload(NSString *h32, uint32_t exp, NSInteger ts);
 
 #pragma mark - 日期工具
 
@@ -216,20 +223,65 @@ BOOL SVBAuthCachedHasSelf(NSString **expText) {
 
 #pragma mark - 判定
 
+#pragma mark 纯离线模式 (v10.2.0, 默认开启)
+
+// 默认 YES: 插件一个网络请求都不发 —— 客户国内网络直连即可, 完全不需要梯子。
+// 授权靠作者发来的一段离线授权串(纯本地验签), 期限由作者签发时自由指定。
+// 关掉它 = 走在线名单(Gitee / GitHub 系源), 恢复"作者删掉 UDID 即掉授权"的能力,
+// 但那条路要求客户手机能连上托管地址。
+BOOL SVBAuthOfflineOnlyMode(void) {
+    @try {
+        id v = [[SVBManager shared] configValueForKey:SVB_AUTH_KEY_MODE];
+        if ([v respondsToSelector:@selector(boolValue)]) return [v boolValue];
+    } @catch (NSException *e) {}
+    return YES;   // 默认纯离线 (新装即为离线, 不需要任何联网)
+}
+
+void SVBAuthSetOfflineOnlyMode(BOOL only) {
+    @try {
+        [[SVBManager shared] setConfigValue:@(only) forKey:SVB_AUTH_KEY_MODE];
+        SVBAuthInvalidateCache();
+    } @catch (NSException *e) {}
+}
+
 // 离线授权串是否有效 (有效时回传到期 dayIndex)
+// v10.2.0: 记录里存了完整字段(h/e/t/s), 每次读取都复验一次签名 ——
+//   因此有效期由作者自由指定, 不再有 90 天上限; 客户手改 plist 里任何一位
+//   都会导致验签失败 -> 记录直接作废 (这是把上限让给作者的前提)。
 static BOOL SVBAuthOfflineTicketExp(uint32_t *outExp) {
     id raw = nil;
     @try { raw = [[SVBManager shared] configValueForKey:SVB_AUTH_KEY_OFFLINE]; } @catch (NSException *e) {}
     if (![raw isKindOfClass:[NSDictionary class]]) return NO;
-    id e = [(NSDictionary *)raw objectForKey:@"e"];
+    NSDictionary *d = (NSDictionary *)raw;
+
+    id e = d[@"e"];
     if (![e respondsToSelector:@selector(unsignedIntValue)]) return NO;
     uint32_t exp = (uint32_t)[e unsignedIntValue];
-    // 硬性上限: 就算记录被手改, 也只认"导入日起最多 90 天"这一档
-    if (exp != SVB_AUTH_FOREVER) {
-        uint32_t cap = SVBAuthDayIndexNow() + SVB_AUTH_TICKET_MAX_DAYS;
+
+    NSString *h = d[@"h"];
+    NSString *sig = d[@"s"];
+    id t = d[@"t"];
+
+    if ([h isKindOfClass:[NSString class]] && h.length &&
+        [sig isKindOfClass:[NSString class]] && sig.length &&
+        [t respondsToSelector:@selector(integerValue)]) {
+        // ---- v10.2.0 新格式: 有签名, 逐次复验 ----
+        NSString *mine = SVBAuthDeviceHash();
+        if (!mine.length || ![[h uppercaseString] isEqualToString:mine]) return NO;
+        NSString *expect = SVBAuthSignatureHex(
+            SVBAuthOfflinePayload([h uppercaseString], exp, [t integerValue]));
+        if (![[sig lowercaseString] isEqualToString:expect]) return NO;
+    } else {
+        // ---- v10.1.x 旧格式: 没存签名, 本地可被手改, 只能硬截断保平安 ----
+        if (exp == SVB_AUTH_FOREVER) return NO;     // 旧格式不允许永久
+        id at = d[@"at"];
+        NSTimeInterval imported = [at respondsToSelector:@selector(doubleValue)] ? [at doubleValue] : 0;
+        NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
+        if (imported <= 0 || (now - imported) > SVB_AUTH_TICKET_LEGACY_MAX_DAYS * 86400.0) return NO;
+        uint32_t cap = SVBAuthDayIndexNow() + SVB_AUTH_TICKET_LEGACY_MAX_DAYS;
         if (exp > cap) exp = cap;
     }
-    if (exp == SVB_AUTH_FOREVER) return NO;     // 离线串不允许永久
+
     if (SVBAuthDayIndexNow() > exp) return NO;  // 已过期
     if (outExp) *outExp = exp;
     return YES;
@@ -244,9 +296,47 @@ SVBAuthState SVBAuthCurrentState(NSString **detail) {
         return SVBAuthStateNoUDID;
     }
 
-    // 顺手触发一次后台同步 (30 分钟节流)
-    SVBAuthRefreshIfNeeded(NO);
+    BOOL offlineOnly = SVBAuthOfflineOnlyMode();
 
+    // 只有在线模式才发起网络请求。纯离线模式下这里一个请求都不发 ——
+    // 客户国内网络直连即可, 不需要梯子, 也不会有失败重试在后台耗电。
+    if (!offlineOnly) SVBAuthRefreshIfNeeded(NO);
+
+    uint32_t offExp = 0;
+    BOOL offOK = SVBAuthOfflineTicketExp(&offExp);
+
+    // ① 离线授权串: 纯本地验签, 不看网络 —— 这是纯离线模式的主通道
+    if (offOK) {
+        if (detail) *detail = (offExp == SVB_AUTH_FOREVER)
+            ? @"离线授权 · 永久有效"
+            : [NSString stringWithFormat:@"离线授权 · 有效期至 %@",
+               SVBAuthDateTextForDayIndex(offExp)];
+        return SVBAuthStateAuthorized;
+    }
+
+    // ---- 纯离线模式: 不再看「名单新鲜度」, 因为我们已经放弃了远程撤销 ----
+    if (offlineOnly) {
+        NSNumber *n0 = [SVBAuthCachedMap() objectForKey:hash];
+        if ([n0 isKindOfClass:[NSNumber class]]) {
+            uint32_t exp0 = (uint32_t)[n0 unsignedIntValue];
+            if (exp0 == SVB_AUTH_FOREVER) {
+                if (detail) *detail = @"永久授权";
+                return SVBAuthStateAuthorized;
+            }
+            if (SVBAuthDayIndexNow() <= exp0) {
+                if (detail) *detail = [NSString stringWithFormat:@"有效期至 %@",
+                                       SVBAuthDateTextForDayIndex(exp0)];
+                return SVBAuthStateAuthorized;
+            }
+            if (detail) *detail = [NSString stringWithFormat:@"已于 %@ 到期",
+                                   SVBAuthDateTextForDayIndex(exp0)];
+            return SVBAuthStateExpired;
+        }
+        if (detail) *detail = @"尚未导入授权";
+        return SVBAuthStateUnauthorized;
+    }
+
+    // ================= 以下为在线模式 (需要能连上托管地址) =================
     NSDictionary<NSString *, NSNumber *> *map = SVBAuthCachedMap();
     NSTimeInterval ts = SVBAuthLastSyncTime();
     NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
@@ -255,9 +345,6 @@ SVBAuthState SVBAuthCurrentState(NSString **detail) {
     BOOL onlineFresh = (ts > 0 &&
                         (now - ts) <= SVB_AUTH_MAX_OFFLINE_DAYS * 86400.0 &&
                         now + 86400.0 >= ts);
-
-    uint32_t offExp = 0;
-    BOOL offOK = SVBAuthOfflineTicketExp(&offExp);
 
     NSNumber *n = [map objectForKey:hash];
 
@@ -280,28 +367,14 @@ SVBAuthState SVBAuthCurrentState(NSString **detail) {
             return SVBAuthStateAuthorized;
         }
 
-        // 名单命中但离线过久: 有离线串先用离线串的期限顶着
-        if (offOK) {
-            if (detail) *detail = [NSString stringWithFormat:@"离线授权 · 有效期至 %@",
-                                   SVBAuthDateTextForDayIndex(offExp)];
-            return SVBAuthStateAuthorized;
-        }
         if (detail) *detail = @"离线过久，需要联网校验授权";
         return SVBAuthStateOffline;
     }
 
-    // 名单里没有本机:
-    // 名单非空 + 刚联网确认过 -> 以在线为准(作者删掉 UDID 即掉授权, 离线串不救)
+    // 名单里没有本机 + 刚联网确认过 -> 以在线为准(作者删掉 UDID 即掉授权)
     if (onlineFresh && map.count > 0) {
         if (detail) *detail = @"本机不在授权名单里";
         return SVBAuthStateUnauthorized;
-    }
-
-    // 名单为空 / 尚未联网: 允许离线授权串生效
-    if (offOK) {
-        if (detail) *detail = [NSString stringWithFormat:@"离线授权 · 有效期至 %@",
-                               SVBAuthDateTextForDayIndex(offExp)];
-        return SVBAuthStateAuthorized;
     }
 
     if (ts <= 0) {
@@ -424,22 +497,29 @@ BOOL SVBAuthImportTicket(NSString *text, NSString **message) {
             break;
         }
 
-        // ③ 有效期强制截断到 90 天内
+        // ③ 期限完全按作者签发的内容 (v10.2.0: 不再有 90 天上限)
+        //    本条记录会把 h/e/t/s 一起存下来, 每次判定都复验签名 ——
+        //    客户手改 plist 里任何一位都会验签失败, 记录直接作废。
         uint32_t today = SVBAuthDayIndexNow();
-        uint32_t cap = today + SVB_AUTH_TICKET_MAX_DAYS;
-        uint32_t use = (want == SVB_AUTH_FOREVER || want > cap) ? cap : want;
-        if (use < today) { fail = @"这段授权串已经过期了"; break; }
+        uint32_t use = want;
+        if (use != SVB_AUTH_FOREVER && use < today) {
+            fail = @"这段授权串已经过期了";
+            break;
+        }
 
-        [SVBManager.shared setConfigValue:@{ @"e": @(use),
+        [SVBManager.shared setConfigValue:@{ @"h": [mine uppercaseString],
+                                             @"e": @(use),
+                                             @"t": tk,
+                                             @"s": [sig lowercaseString],
                                              @"at": @([[NSDate date] timeIntervalSince1970]) }
                                    forKey:SVB_AUTH_KEY_OFFLINE];
         SVBAuthInvalidateCache();
 
         if (message) {
-            *message = [NSString stringWithFormat:
-                @"导入成功，本机已授权（离线有效期至 %@）。\n"
-                @"联网校验成功一次后会自动转成完整期限的在线授权。",
-                SVBAuthDateTextForDayIndex(use)];
+            *message = (use == SVB_AUTH_FOREVER)
+                ? @"导入成功，本机已授权（永久有效）。"
+                : [NSString stringWithFormat:@"导入成功，本机已授权（有效期至 %@）。",
+                   SVBAuthDateTextForDayIndex(use)];
         }
         return YES;
     } while (0);
@@ -663,6 +743,10 @@ static void SVBAuthRefreshForce(void) {
 
 void SVBAuthRefreshIfNeeded(BOOL force) {
     @try {
+        // v10.2.0: 纯离线模式下一个请求都不发 (含手动触发) ——
+        // 客户国内网络直连即可, 不需要梯子。要联网请先在控制 App 里切到在线模式。
+        if (SVBAuthOfflineOnlyMode()) return;
+
         SVBManager *mgr = [SVBManager shared];
         NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
 

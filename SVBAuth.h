@@ -27,10 +27,15 @@
 //        粘贴导入 -> 立即授权, 全程不需要任何网络。
 //        串格式: "SVBOFFLINE1:" + base64({"h":H32,"e":到期dayIndex,"t":ts,"s":sig})
 //        签名原文 = "SVBGOFFLINE/v1|<H32>|<e>|<t>", 同样 HMAC-SHA256。
-//        导入时的规则: ① h 必须等于本机指纹(防止一串通用); ② 验签;
-//        ③ 有效期强制截断到 90 天内(离线授权最长续 90 天, 防断网永久白嫖)。
-//        一旦成功联网校验且在线名单非空, 就改以在线名单为准 —— 作者删掉
-//        UDID 仍然会掉授权, 离线串不会把它救回来。
+//
+//   v10.2.0 —— 默认「纯离线模式」(SVBAuthOfflineOnlyMode 默认 YES):
+//     · 插件不再发起任何网络请求, 因此客户**国内网络直连即可, 完全不需要梯子**;
+//     · 判定只看离线授权串(纯本地 HMAC 验签), 完全离线可用;
+//     · 离线串的有效期由作者签发时自由指定(不再有 90 天上限) —— 前提是
+//       本机记录会把 h/e/t/s 全字段存下来并在**每次判定时复验签名**,
+//       客户手改 plist 里任何一位都会验签失败、记录作废;
+//     · 代价: 纯离线模式下无法远程撤销(作者删 UDID 不影响客户), 只能靠到期。
+//       想要"删掉即掉授权"就把开关关掉走在线名单(需要客户能连上托管地址)。
 // ============================================================
 
 #define SVB_AUTH_FOREVER 4294967295u
@@ -89,10 +94,17 @@ BOOL SVBAuthCachedHasSelf(NSString **expText);  // 本机命中缓存名单? 回
 NSString *SVBAuthGiteeURL(void);                   // nil = 未配置
 void SVBAuthSetGiteeURL(NSString *url);            // 传 nil/空串 = 清除
 
-// ---- 离线授权串 (v10.1.0, 完全不依赖网络) ----
+// ---- 纯离线模式 (v10.2.0, 默认开启) ----
+// YES = 不发任何网络请求, 授权完全靠离线授权串 (客户国内网络零依赖, 不需要梯子);
+// NO  = 走在线名单, 需要客户能连上 Gitee / GitHub 系源, 但恢复"删掉 UDID 即掉授权"。
+BOOL SVBAuthOfflineOnlyMode(void);
+void SVBAuthSetOfflineOnlyMode(BOOL only);
+
+// ---- 离线授权串 (v10.1.0, v10.2.0 支持自定义期限) ----
 // 作者在签发 App 里点「生成离线授权串」-> 复制发给客户
 // -> 客户在控制 App「粘贴离线授权」-> 立即生效, 全程不需要网络。
-// 有效期最长 90 天; 成功联网校验后自动转为在线授权(以作者名单为准)。
+// 有效期 = 作者签发时指定的天数 (支持永久), 客户端不再截断 ——
+// 因为本地记录存了 h/e/t/s 并在每次判定时复验签名, 篡改即作废。
 BOOL SVBAuthImportTicket(NSString *text, NSString **message);  // 导入, message 回传结果文案
 void SVBAuthClearTicket(void);                                 // 清除已导入的离线授权
 BOOL SVBAuthHasOfflineTicket(NSString **expText);              // 本地有有效离线授权? 回传到期文本
