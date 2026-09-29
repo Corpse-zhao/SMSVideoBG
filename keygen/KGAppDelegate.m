@@ -1,5 +1,6 @@
 #import "KGAppDelegate.h"
 #import "KGCore.h"
+#import "KGRevokeClient.h"
 #import <objc/runtime.h>
 
 // ============================================================
@@ -150,6 +151,13 @@ static UITextField *KGField(NSString *placeholder, CGFloat fontSize, BOOL digits
 @property (nonatomic, strong) UIButton *verifyBtn;
 @property (nonatomic, strong) UIStackView *historyStack;
 @property (nonatomic, strong) UIView *historyCard;
+// v1.1.0 远程作废
+@property (nonatomic, strong) UILabel *revokeStatusLabel;
+@property (nonatomic, strong) UITextField *tokenField;
+@property (nonatomic, strong) UITextField *repoField;
+@property (nonatomic, strong) NSMutableArray<NSString *> *revokedList;
+@property (nonatomic, assign) BOOL revokeDirty;
+@property (nonatomic, copy) NSString *revokeMessage;
 @end
 
 @implementation KGViewController
@@ -196,11 +204,15 @@ static UITextField *KGField(NSString *placeholder, CGFloat fontSize, BOOL digits
     [root addArrangedSubview:[self deviceCard]];
     [root addArrangedSubview:[self termCard]];
     [root addArrangedSubview:[self resultCard]];
-    [root addArrangedSubview:[self secretCard]];
     [root addArrangedSubview:[self buildHistoryCard]];
+    [root addArrangedSubview:[self revokeCard]];
+    [root addArrangedSubview:[self secretCard]];
     [root addArrangedSubview:[self footerLabel]];
     [self refreshSecretUI];
+    [self loadRevokeState];
     [self refreshHistory];
+    [self refreshRevokeUI];
+    if (!_revokeDirty) [self autoPullRevoke];   // 悄悄拉一次远端名单 (失败不影响使用)
 }
 
 - (void)dismissKeyboard { [self.view endEditing:YES]; }
@@ -236,10 +248,10 @@ static UITextField *KGField(NSString *placeholder, CGFloat fontSize, BOOL digits
     UIStackView *stack;
     UIView *card = KGCard(@"目标设备", &stack);
 
-    _deviceField = KGField(@"ABCD-EFGH", 17, NO);
+    _deviceField = KGField(@"ABCD-EFGH 或 序列号/UDID", 17, NO);
     _deviceField.delegate = self;
     [_deviceField.heightAnchor constraintEqualToConstant:44].active = YES;
-    [stack addArrangedSubview:KGRow(@"设备码", _deviceField, @"在客户手机上打开控制 App → 授权 → 复制设备码")];
+    [stack addArrangedSubview:KGRow(@"设备码", _deviceField, @"控制 App → 授权 → 复制设备码；也可直接粘贴客户的序列号 / UDID（硬件绑定，重装 App 也不变）")];
 
     _universalSwitch = [[UISwitch alloc] initWithFrame:CGRectZero];
     _universalSwitch.onTintColor = KGAccent();
@@ -367,7 +379,7 @@ static UITextField *KGField(NSString *placeholder, CGFloat fontSize, BOOL digits
 
 - (UIView *)buildHistoryCard {
     UIStackView *stack;
-    UIView *card = KGCard(@"签发历史 (点击复制, 最多留 15 条)", &stack);
+    UIView *card = KGCard(@"签发历史（点击复制 / 右侧作废，最多留 15 条）", &stack);
     _historyCard = card;
     _historyStack = stack;
     return card;
@@ -417,12 +429,204 @@ static UITextField *KGField(NSString *placeholder, CGFloat fontSize, BOOL digits
         [v addArrangedSubview:l1];
         [v addArrangedSubview:l2];
 
-        NSString *code = [d objectForKey:@"code"];
+        NSString *code = [d objectForKey:@"code"] ?: @"";
+        NSString *hash = KGRevokeHashForCode(code);
+        BOOL revoked = (hash.length > 0 && [_revokedList containsObject:hash]);
+
+        NSString *who = [d objectForKey:@"universal"] ? @"通用码" :
+            [NSString stringWithFormat:@"设备 %@", [d objectForKey:@"device"] ?: @"-"];
+        UILabel *l1 = KGLabel([NSString stringWithFormat:@"%@ · %@%@", who,
+                               [d objectForKey:@"exp"] ?: @"-", revoked ? @" · 已作废" : @""],
+                              12.5, UIFontWeightMedium,
+                              revoked ? [UIColor systemRedColor] : [UIColor secondaryLabelColor]);
+        UILabel *l2 = KGLabel(code, 13.5, UIFontWeightSemibold,
+                              revoked ? [UIColor systemRedColor] : [UIColor labelColor]);
+        l2.font = [UIFont monospacedSystemFontOfSize:13 weight:UIFontWeightSemibold];
+        [v addArrangedSubview:l1];
+        [v addArrangedSubview:l2];
+
         UITapGestureRecognizer *t = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(historyTapped:)];
         [row addGestureRecognizer:t];
         objc_setAssociatedObject(row, "kg_code", code, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        [_historyStack addArrangedSubview:row];
+
+        // 作废 / 恢复 (改动即同步到远端名单)
+        UIButton *tg = KGButton(revoked ? @"恢复" : @"作废",
+                                [UIColor tertiarySystemFillColor],
+                                revoked ? [UIColor systemGreenColor] : [UIColor systemRedColor], 32);
+        tg.titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
+        tg.layer.cornerRadius = 10;
+        objc_setAssociatedObject(tg, "kg_code", code, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        [tg addTarget:self action:@selector(revokeTapped:) forControlEvents:UIControlEventTouchUpInside];
+        [tg.widthAnchor constraintEqualToConstant:62].active = YES;
+        [tg setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+
+        UIStackView *line = [[UIStackView alloc] initWithFrame:CGRectZero];
+        line.axis = UILayoutConstraintAxisHorizontal;
+        line.spacing = 8;
+        line.alignment = UIStackViewAlignmentCenter;
+        [row setContentHuggingPriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisHorizontal];
+        [line addArrangedSubview:row];
+        [line addArrangedSubview:tg];
+        [_historyStack addArrangedSubview:line];
     }
+}
+
+#pragma mark 远程作废名单
+
+- (UIView *)revokeCard {
+    UIStackView *stack;
+    UIView *card = KGCard(@"远程作废名单", &stack);
+
+    _revokeStatusLabel = KGLabel(@"", 13, UIFontWeightMedium, [UIColor secondaryLabelColor]);
+    [stack addArrangedSubview:_revokeStatusLabel];
+
+    UIStackView *btns = [[UIStackView alloc] initWithFrame:CGRectZero];
+    btns.axis = UILayoutConstraintAxisHorizontal;
+    btns.distribution = UIStackViewDistributionFillEqually;
+    btns.spacing = 8;
+    UIButton *pull = KGButton(@"拉取远端", [UIColor tertiarySystemFillColor], [UIColor labelColor], 40);
+    UIButton *push = KGButton(@"推送本地", KGAccent(), UIColor.whiteColor, 40);
+    [pull addTarget:self action:@selector(pullRevokeTapped) forControlEvents:UIControlEventTouchUpInside];
+    [push addTarget:self action:@selector(pushRevokeTapped) forControlEvents:UIControlEventTouchUpInside];
+    [btns addArrangedSubview:pull];
+    [btns addArrangedSubview:push];
+    [stack addArrangedSubview:btns];
+
+    _tokenField = KGField(@"GitHub Token（repo 权限，只存在本机）", 12.5, NO);
+    _tokenField.text = [KGRevokeClient token];
+    _tokenField.autocapitalizationType = UITextAutocapitalizationTypeNone;
+    _tokenField.delegate = self;
+    [_tokenField.heightAnchor constraintEqualToConstant:40].active = YES;
+    [stack addArrangedSubview:_tokenField];
+
+    _repoField = KGField(@"仓库 owner/name", 12.5, NO);
+    _repoField.text = [KGRevokeClient repo];
+    _repoField.autocapitalizationType = UITextAutocapitalizationTypeNone;
+    _repoField.delegate = self;
+    [_repoField.heightAnchor constraintEqualToConstant:40].active = YES;
+    [stack addArrangedSubview:_repoField];
+
+    [stack addArrangedSubview:KGLabel(@"点历史记录右侧「作废」→ 名单自动推送一次。客户插件每 30 分钟（或打开控制 App 时）同步一次名单，命中即掉授权；被作废的设备会看到「已作废」并停止生效。", 12.5, UIFontWeightRegular, [UIColor tertiaryLabelColor])];
+    return card;
+}
+
+- (void)loadRevokeState {
+    NSArray *a = [[NSUserDefaults standardUserDefaults] arrayForKey:@"kg_revoked"];
+    _revokedList = [NSMutableArray array];
+    for (id h in a) if ([h isKindOfClass:[NSString class]]) [_revokedList addObject:[(NSString *)h uppercaseString]];
+    _revokeDirty = [[NSUserDefaults standardUserDefaults] boolForKey:@"kg_revoked_dirty"];
+}
+
+- (void)saveRevokeState {
+    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+    [d setObject:_revokedList forKey:@"kg_revoked"];
+    [d setBool:_revokeDirty forKey:@"kg_revoked_dirty"];
+}
+
+- (void)refreshRevokeUI {
+    if (!_revokeStatusLabel) return;
+    NSMutableString *s = [NSMutableString stringWithFormat:@"本机名单 %lu 条",
+                          (unsigned long)_revokedList.count];
+    NSTimeInterval ts = [[NSUserDefaults standardUserDefaults] doubleForKey:@"kg_revoked_ts"];
+    if (ts > 0) {
+        NSDateFormatter *df = [[NSDateFormatter alloc] init];
+        df.dateFormat = @"MM-dd HH:mm";
+        [s appendFormat:@" · 同步于 %@", [df stringFromDate:[NSDate dateWithTimeIntervalSince1970:ts]]];
+    } else {
+        [s appendString:@" · 尚未同步"];
+    }
+    if (_revokeDirty) [s appendString:@" · 有未推送改动"];
+    if (![KGRevokeClient configured]) [s appendString:@" · 未配 Token（只能拉取）"];
+    if (_revokeMessage.length) [s appendFormat:@"\n%@", _revokeMessage];
+    _revokeStatusLabel.text = s;
+    _revokeStatusLabel.textColor = [_revokeMessage hasPrefix:@"✗"] ? [UIColor systemRedColor]
+                               : ([_revokeMessage hasPrefix:@"✓"] ? [UIColor systemGreenColor]
+                                                                 : [UIColor secondaryLabelColor]);
+}
+
+- (void)autoPullRevoke {
+    __weak typeof(self) ws = self;
+    [KGRevokeClient fetchWithSecret:[self currentSecret] completion:^(NSArray *hashes, NSString *error) {
+        if (!ws || !hashes) return;   // 失败静默: 用本地缓存继续
+        ws.revokedList = [hashes mutableCopy];
+        ws.revokeDirty = NO;
+        [[NSUserDefaults standardUserDefaults] setDouble:[[NSDate date] timeIntervalSince1970]
+                                                  forKey:@"kg_revoked_ts"];
+        [ws saveRevokeState];
+        [ws refreshHistory];
+        [ws refreshRevokeUI];
+    }];
+}
+
+- (void)pullRevokeTapped {
+    [self.view endEditing:YES];
+    _revokeMessage = @"正在拉取远端名单…";
+    [self refreshRevokeUI];
+    __weak typeof(self) ws = self;
+    [KGRevokeClient fetchWithSecret:[self currentSecret] completion:^(NSArray *hashes, NSString *error) {
+        if (!ws) return;
+        if (hashes) {
+            ws.revokedList = [hashes mutableCopy];
+            ws.revokeDirty = NO;
+            [[NSUserDefaults standardUserDefaults] setDouble:[[NSDate date] timeIntervalSince1970]
+                                                      forKey:@"kg_revoked_ts"];
+            [ws saveRevokeState];
+            [ws refreshHistory];
+            ws.revokeMessage = [NSString stringWithFormat:@"✓ 已拉取 %lu 条", (unsigned long)hashes.count];
+        } else {
+            ws.revokeMessage = [NSString stringWithFormat:@"✗ %@", error ?: @"拉取失败"];
+        }
+        [ws refreshRevokeUI];
+    }];
+}
+
+- (void)pushRevokeTapped {
+    [self.view endEditing:YES];
+    [self pushRevoke];
+}
+
+- (void)pushRevoke {
+    if (![KGRevokeClient configured]) {
+        _revokeMessage = @"✗ 未配置 GitHub Token，无法推送";
+        [self refreshRevokeUI];
+        return;
+    }
+    _revokeMessage = @"正在推送…";
+    [self refreshRevokeUI];
+
+    NSArray *snapshot = [_revokedList copy];
+    __weak typeof(self) ws = self;
+    [KGRevokeClient pushHashes:snapshot secret:[self currentSecret]
+                    completion:^(BOOL ok, NSString *error) {
+        if (!ws) return;
+        if (ok) {
+            ws.revokeDirty = NO;
+            [[NSUserDefaults standardUserDefaults] setDouble:[[NSDate date] timeIntervalSince1970]
+                                                      forKey:@"kg_revoked_ts"];
+            [ws saveRevokeState];
+            ws.revokeMessage = [NSString stringWithFormat:@"✓ 已推送 %lu 条到 %@",
+                                (unsigned long)snapshot.count, [KGRevokeClient repo]];
+        } else {
+            ws.revokeMessage = [NSString stringWithFormat:@"✗ %@", error ?: @"推送失败"];
+        }
+        [ws refreshRevokeUI];
+    }];
+}
+
+- (void)revokeTapped:(UIButton *)b {
+    NSString *code = objc_getAssociatedObject(b, "kg_code");
+    if (!code.length) return;
+    NSString *h = KGRevokeHashForCode(code);
+    if (!h.length) return;
+
+    if ([_revokedList containsObject:h]) [_revokedList removeObject:h];
+    else [_revokedList addObject:h];
+    _revokeDirty = YES;
+    [self saveRevokeState];
+    [self refreshHistory];
+    _revokeMessage = [KGRevokeClient configured] ? @"正在推送…" : @"仅本地生效（未配 Token）";
+    [self refreshRevokeUI];
+    if ([KGRevokeClient configured]) [self pushRevoke];
 }
 
 - (void)historyTapped:(UITapGestureRecognizer *)g {
@@ -463,6 +667,20 @@ static UITextField *KGField(NSString *placeholder, CGFloat fontSize, BOOL digits
     BOOL forever = _foreverSwitch.on;
     NSInteger days = [_daysField.text integerValue];
 
+    // 先算一遍目标标识: 既做校验, 也拿到规范化的设备码用于历史记录
+    NSString *devMode = nil;
+    NSString *canonCode = nil;
+    if (!uni) {
+        NSData *d = KGDeviceBytesFromInput(device, &devMode, NULL);
+        if (!d) {
+            _codeLabel.text = @"—";
+            _statusLabel.text = @"⚠️ 设备码/硬件标识不合法（8 位设备码，或 ≥9 位的序列号/UDID）";
+            _statusLabel.textColor = [UIColor systemOrangeColor];
+            return;
+        }
+        canonCode = KGDeviceCodeFromBytes(d);
+    }
+
     NSString *exp = nil, *err = nil;
     NSString *code = KGBuildCode(secret, device, uni, forever, days, &exp, &err);
     if (!code) {
@@ -474,10 +692,10 @@ static UITextField *KGField(NSString *placeholder, CGFloat fontSize, BOOL digits
     _codeLabel.text = code;
     _statusLabel.textColor = [UIColor secondaryLabelColor];
     _statusLabel.text = [NSString stringWithFormat:@"%@ · 有效期至 %@",
-                         uni ? @"通用码" : [NSString stringWithFormat:@"设备 %@", KGDeviceNormalize(device) ?: device ?: @"-"],
+                         uni ? @"通用码" : [NSString stringWithFormat:@"%@ %@", devMode ?: @"设备", canonCode ?: @"-"],
                          exp ?: @"-"];
     [self copyText:code];
-    [self saveHistoryCode:code device:KGDeviceNormalize(device) universal:uni exp:exp];
+    [self saveHistoryCode:code device:canonCode universal:uni exp:exp];
 }
 
 - (void)copyTapped {
@@ -518,6 +736,8 @@ static UITextField *KGField(NSString *placeholder, CGFloat fontSize, BOOL digits
         return;
     }
     NSString *res = KGVerifyCode(secret, code, _deviceField.text);
+    NSString *h = KGRevokeHashForCode(code);
+    if (h.length && [_revokedList containsObject:h]) res = @"✗ 该码已在本地作废名单里";
     _statusLabel.text = res;
     _statusLabel.textColor = [res hasPrefix:@"✓"] ? [UIColor systemGreenColor] : [UIColor systemRedColor];
 }
@@ -549,6 +769,19 @@ static UITextField *KGField(NSString *placeholder, CGFloat fontSize, BOOL digits
             [[NSUserDefaults standardUserDefaults] setObject:t forKey:KGPrefSecret];
         }
         [self refreshSecretUI];
+        return;
+    }
+    if (textField == _tokenField) {
+        [KGRevokeClient setToken:[textField.text stringByTrimmingCharactersInSet:
+                                  [NSCharacterSet whitespaceAndNewlineCharacterSet]]];
+        [self refreshRevokeUI];
+        return;
+    }
+    if (textField == _repoField) {
+        [KGRevokeClient setRepo:[textField.text stringByTrimmingCharactersInSet:
+                                 [NSCharacterSet whitespaceAndNewlineCharacterSet]]];
+        [self refreshRevokeUI];
+        return;
     }
 }
 

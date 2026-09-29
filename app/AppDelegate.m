@@ -1,5 +1,6 @@
 #import "AppDelegate.h"
 #import "SVBLicense.h"
+#import "SVBRevoke.h"
 #import <dlfcn.h>
 #import <objc/runtime.h>
 #import <QuartzCore/QuartzCore.h>
@@ -1341,6 +1342,8 @@ static void SVBAppPickImage(UIViewController *host, void (^done)(UIImage *image)
 
 - (void)reloadLicenseState {
     NSString *det = nil;
+    // v9.9.10: 打开授权页顺便同步一次作废名单 (内部节流, 不会每次都发请求)
+    SVBRevokeRefreshIfNeeded(NO);
     _state = SVBLicenseCurrentState(&det);
     _statusDetail = det;
     [self.tableView reloadData];
@@ -1349,7 +1352,7 @@ static void SVBAppPickImage(UIViewController *host, void (^done)(UIImage *image)
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView { return 2; }
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
-    if (section == 0) return 2;                                  // 设备码 / 激活码
+    if (section == 0) return 3;                                  // 设备码 / 激活码 / 作废名单
     return (_state == SVBLicenseStateUnlicensed) ? 0 : 1;        // 移除激活
 }
 
@@ -1360,7 +1363,8 @@ static void SVBAppPickImage(UIViewController *host, void (^done)(UIImage *image)
 - (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
     if (section != 0) return nil;
     return @"把「设备码」发给作者换取激活码，粘贴进来保存即可。激活码与本机绑定，"
-            "换机需要重新获取；到期后重新激活。\n未激活/已过期时，信息 App 里的视频背景不会生效。";
+            "换机需要重新获取；到期后重新激活。\n未激活/已过期时，信息 App 里的视频背景不会生效。\n"
+            "作者可远程作废激活码：作废后本机最多 30 分钟内自动掉授权（需联网）。";
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
@@ -1379,10 +1383,10 @@ static void SVBAppPickImage(UIViewController *host, void (^done)(UIImage *image)
         c.imageView.image = SVBBadgeIcon(@"iphone.gen3",
             [UIColor colorWithRed:0.25 green:0.55 blue:1.00 alpha:1],
             [UIColor colorWithRed:0.40 green:0.80 blue:1.00 alpha:1]);
-        SVBApplyCardStyle(c, 0, 2);
+        SVBApplyCardStyle(c, 0, 3);
         return c;
     }
-    if (indexPath.section == 0) {
+    if (indexPath.section == 0 && indexPath.row == 1) {
         BOOL ok = (_state == SVBLicenseStateValid);
         c.textLabel.text = ok ? @"激活码" : @"输入激活码";
         c.detailTextLabel.text = SVBLicenseStateText(_state, _statusDetail);
@@ -1393,7 +1397,25 @@ static void SVBAppPickImage(UIViewController *host, void (^done)(UIImage *image)
             ok ? [UIColor colorWithRed:0.35 green:0.85 blue:0.65 alpha:1]
                : [UIColor colorWithRed:1.00 green:0.42 blue:0.30 alpha:1]);
         c.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
-        SVBApplyCardStyle(c, 1, 2);
+        SVBApplyCardStyle(c, 1, 3);
+        return c;
+    }
+    if (indexPath.section == 0) {
+        NSInteger n = SVBRevokeCachedCount();
+        NSTimeInterval ts = SVBRevokeLastFetchTime();
+        NSDateFormatter *df = [[NSDateFormatter alloc] init];
+        df.dateFormat = @"MM-dd HH:mm";
+        c.textLabel.text = @"作废名单";
+        c.detailTextLabel.text = ts > 0
+            ? [NSString stringWithFormat:@"%ld 条 · %@", (long)n, [df stringFromDate:[NSDate dateWithTimeIntervalSince1970:ts]]]
+            : @"未同步";
+        c.detailTextLabel.font = [UIFont systemFontOfSize:14];
+        c.detailTextLabel.textColor = [UIColor secondaryLabelColor];
+        c.imageView.image = SVBBadgeIcon(@"nosign",
+            [UIColor colorWithRed:0.45 green:0.45 blue:0.55 alpha:1],
+            [UIColor colorWithRed:0.65 green:0.62 blue:0.75 alpha:1]);
+        c.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+        SVBApplyCardStyle(c, 2, 3);
         return c;
     }
 
@@ -1413,8 +1435,27 @@ static void SVBAppPickImage(UIViewController *host, void (^done)(UIImage *image)
         NSString *dev = SVBDeviceCodeEnsure() ?: @"";
         if (dev.length) {
             [UIPasteboard generalPasteboard].string = dev;
-            [self alert:@"已复制设备码" msg:[NSString stringWithFormat:@"%@\n把它发给作者换取激活码。", dev]];
+            NSString *raw = SVBHardwareRawIDForDisplay();
+            NSMutableString *msg = [NSMutableString stringWithFormat:
+                @"%@\n识别方式：%@\n把它发给作者换取激活码。",
+                dev, SVBHardwareIDSource()];
+            if (raw.length) [msg appendFormat:@"\n\n硬件标识（也可以直接发这个）：\n%@", raw];
+            NSInteger n = (NSInteger)SVBDeviceCodeCandidates().count;
+            if (n > 1) [msg appendFormat:@"\n\n本机历史设备码 %ld 个，之前发过的老激活码依然有效。", (long)n];
+            [self alert:@"已复制设备码" msg:msg];
         }
+        return;
+    }
+    if (indexPath.section == 0 && indexPath.row == 2) {
+        SVBRevokeRefreshIfNeeded(YES);
+        NSInteger n = SVBRevokeCachedCount();
+        NSTimeInterval ts = SVBRevokeLastFetchTime();
+        NSDateFormatter *df = [[NSDateFormatter alloc] init];
+        df.dateFormat = @"yyyy-MM-dd HH:mm";
+        NSString *when = ts > 0 ? [df stringFromDate:[NSDate dateWithTimeIntervalSince1970:ts]] : @"从未";
+        [self alert:@"作废名单" msg:[NSString stringWithFormat:
+            @"本地名单 %ld 条\n上次同步：%@\n\n已发起一次同步，几秒后重进本页可看到结果。\n作者作废某枚激活码后，本机最多 30 分钟内会自动掉授权。",
+            (long)n, when]];
         return;
     }
     if (indexPath.section == 0) { [self inputLicense]; return; }
@@ -1457,6 +1498,13 @@ static void SVBAppPickImage(UIViewController *host, void (^done)(UIImage *image)
         [mgr setConfigValue:@([[NSDate date] timeIntervalSince1970]) forKey:@"license_last_seen"];
         [mgr postChangeNotification];
         [self reloadLicenseState];
+    }
+
+    if (st == SVBLicenseStateValid && SVBRevokeIsCodeRevoked(norm)) {
+        // v9.9.10: 码本身合法, 但已被作者作废 —— 不落库, 直接告知
+        [self alert:@"该激活码已被作废"
+                 msg:@"作者已远程取消这枚激活码，请向作者索取新的。"];
+        return;
     }
 
     if (st == SVBLicenseStateValid) {

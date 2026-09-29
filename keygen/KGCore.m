@@ -121,6 +121,147 @@ NSString *KGDateTextForDayIndex(uint32_t idx) {
     return [df stringFromDate:[NSDate dateWithTimeIntervalSince1970:KG_EPOCH + (NSTimeInterval)idx * 86400.0]];
 }
 
+NSString *KGCodeNormalize(NSString *raw) { return KGClean(raw); }
+
+// 只保留 A-Z0-9 并转大写 (硬件标识归一化, 与插件端一致)
+static NSString *KGAlnumUpper(NSString *raw) {
+    if (![raw isKindOfClass:[NSString class]] || !raw.length) return @"";
+    NSString *up = [raw uppercaseString];
+    NSMutableString *s = [NSMutableString stringWithCapacity:up.length];
+    for (NSUInteger i = 0; i < up.length; i++) {
+        unichar c = [up characterAtIndex:i];
+        if ((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) [s appendFormat:@"%c", (char)c];
+    }
+    return s;
+}
+
+NSString *KGDeviceCodeFromBytes(NSData *dev5) {
+    if (!dev5.length) return nil;
+    return KGGrouped(KGB32Encode(dev5));
+}
+
+// v1.2.0: 硬件标识 -> 5 字节 (SHA256 前 5 字节), 与插件端 SVBFingerprint5FromString 一致
+static NSData *KGFingerprint5FromHardwareID(NSString *raw) {
+    NSString *norm = KGAlnumUpper(raw);
+    if (!norm.length) return nil;
+    const char *utf8 = norm.UTF8String;
+    unsigned char digest[CC_SHA256_DIGEST_LENGTH] = {0};
+    CC_SHA256(utf8, (CC_LONG)strlen(utf8), digest);
+    return [NSData dataWithBytes:digest length:5];
+}
+
+NSData *KGDeviceBytesFromInput(NSString *input, NSString **mode, NSString **error) {
+    if (mode) *mode = nil;
+    if (error) *error = nil;
+
+    NSString *alnum = KGAlnumUpper(input);
+    if (!alnum.length) {
+        if (error) *error = @"请填设备码 (ABCD-EFGH) 或硬件标识 (序列号/UDID)";
+        return nil;
+    }
+
+    // 8 位且全部落在 Base32 表内 -> 视为设备码
+    BOOL looksLikeCode = (alnum.length == 8);
+    if (looksLikeCode) {
+        for (NSUInteger i = 0; i < alnum.length; i++) {
+            unichar c = [alnum characterAtIndex:i];
+            if (!strchr(kB32Table, (char)c)) { looksLikeCode = NO; break; }
+        }
+    }
+
+    if (looksLikeCode) {
+        NSData *d = KGB32Decode(alnum);
+        if (!d || d.length != 5) {
+            if (error) *error = @"设备码解码失败 (应为 5 字节)";
+            return nil;
+        }
+        if (mode) *mode = @"设备码";
+        return d;
+    }
+
+    if (alnum.length < 9) {
+        if (error) *error = @"设备码不合法: 8 位设备码, 或 ≥9 位的硬件标识 (序列号/UDID)";
+        return nil;
+    }
+
+    NSData *d = KGFingerprint5FromHardwareID(alnum);
+    if (!d) {
+        if (error) *error = @"硬件标识归一化失败";
+        return nil;
+    }
+    if (mode) *mode = @"硬件标识";
+    return d;
+}
+
+#pragma mark - 远程作废名单 (v1.1.0)
+
+static NSString *KGHexLower(const unsigned char *bytes, int n) {
+    NSMutableString *s = [NSMutableString stringWithCapacity:n * 2];
+    for (int i = 0; i < n; i++) [s appendFormat:@"%02x", bytes[i]];
+    return s;
+}
+
+NSString *KGRevokeHashForCode(NSString *code) {
+    NSString *norm = KGClean(code);
+    if (!norm.length) return nil;
+    const char *utf8 = norm.UTF8String;
+    unsigned char digest[CC_SHA256_DIGEST_LENGTH] = {0};
+    CC_SHA256(utf8, (CC_LONG)strlen(utf8), digest);
+    return [KGHexLower(digest, 8) uppercaseString];
+}
+
+NSString *KGRevokePayloadString(NSInteger ts, NSArray<NSString *> *hashes) {
+    NSArray *sorted = [hashes sortedArrayUsingSelector:@selector(compare:)];
+    return [NSString stringWithFormat:@"SVBGREVOKE/v1|%ld|%@",
+            (long)ts, [sorted componentsJoinedByString:@","]];
+}
+
+NSString *KGRevokeSignatureHex(NSString *payload, NSString *secret) {
+    if (!payload.length || !secret.length) return @"";
+    const char *key = secret.UTF8String;
+    const char *msg = payload.UTF8String;
+    unsigned char mac[CC_SHA256_DIGEST_LENGTH] = {0};
+    CCHmac(kCCHmacAlgSHA256, key, strlen(key), msg, strlen(msg), mac);
+    return KGHexLower(mac, CC_SHA256_DIGEST_LENGTH);
+}
+
+NSArray<NSString *> *KGRevokeParseJSON(NSData *json, NSString *secret) {
+    if (!json.length) return nil;
+    id obj = [NSJSONSerialization JSONObjectWithData:json options:0 error:NULL];
+    if (![obj isKindOfClass:[NSDictionary class]]) return nil;
+    NSDictionary *d = (NSDictionary *)obj;
+    NSNumber *ver = d[@"v"], *ts = d[@"ts"];
+    NSArray *rev = d[@"revoked"];
+    NSString *sig = d[@"sig"];
+    if (![ver isKindOfClass:[NSNumber class]] || ver.integerValue != 1) return nil;
+    if (![ts isKindOfClass:[NSNumber class]]) return nil;
+    if (![rev isKindOfClass:[NSArray class]]) return nil;
+    if (![sig isKindOfClass:[NSString class]] || sig.length != 64) return nil;
+
+    NSMutableArray *clean = [NSMutableArray arrayWithCapacity:rev.count];
+    for (id h in rev) {
+        if (![h isKindOfClass:[NSString class]]) return nil;
+        NSString *u = [(NSString *)h uppercaseString];
+        if (u.length != 16) return nil;
+        [clean addObject:u];
+    }
+    NSString *expect = KGRevokeSignatureHex(KGRevokePayloadString(ts.integerValue, clean), secret);
+    if (![[sig lowercaseString] isEqualToString:expect]) return nil;
+    return clean;
+}
+
+NSData *KGRevokeBuildJSON(NSString *secret, NSInteger ts, NSArray<NSString *> *hashes) {
+    NSArray *sorted = [hashes sortedArrayUsingSelector:@selector(compare:)];
+    NSString *payload = KGRevokePayloadString(ts, sorted);
+    NSDictionary *d = @{@"v": @1,
+                        @"ts": @(ts),
+                        @"revoked": sorted,
+                        @"sig": KGRevokeSignatureHex(payload, secret)};
+    return [NSJSONSerialization dataWithJSONObject:d
+                                           options:NSJSONWritingPrettyPrinted | NSJSONWritingSortedKeys
+                                             error:NULL];
+}
+
 static NSString *KGDateTextForTimestamp(NSTimeInterval ts) {
     NSDateFormatter *df = [[NSDateFormatter alloc] init];
     df.dateFormat = @"yyyy-MM-dd";
@@ -143,14 +284,9 @@ NSString *KGBuildCode(NSString *secret, NSString *device, BOOL universal,
 
     uint8_t dev[5] = {0};
     if (!universal) {
-        NSString *norm = KGDeviceNormalize(device);
-        if (!norm) {
-            if (error) *error = @"设备码不合法: 应为 8 位 Base32 字符 (形如 ABCD-EFGH)";
-            return nil;
-        }
-        NSData *d = KGB32Decode(norm);
+        NSData *d = KGDeviceBytesFromInput(device, NULL, error);
         if (!d || d.length != 5) {
-            if (error) *error = @"设备码解码失败 (应为 5 字节)";
+            if (error && !*error) *error = @"设备码/硬件标识不合法";
             return nil;
         }
         memcpy(dev, d.bytes, 5);
@@ -220,8 +356,7 @@ NSString *KGVerifyCode(NSString *secret, NSString *code, NSString *device) {
         [NSString stringWithFormat:@"绑 %@", KGGrouped(KGB32Encode([NSData dataWithBytes:p length:5]))];
 
     if (!universal && device.length) {
-        NSString *norm = KGDeviceNormalize(device);
-        NSData *mine = norm ? KGB32Decode(norm) : nil;
+        NSData *mine = KGDeviceBytesFromInput(device, NULL, NULL);
         if (mine && mine.length == 5 && memcmp(mine.bytes, p, 5) != 0)
             return [NSString stringWithFormat:@"✗ 签名有效但设备不匹配 (%@)", who];
     }

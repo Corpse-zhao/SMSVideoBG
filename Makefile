@@ -23,7 +23,7 @@ LICENSE_CFLAGS = -DSVB_LICENSE_SECRET='"$(SVB_LICENSE_SECRET)"'
 
 # 实例 1: 主插件 (注入信息 App, 视频背景渲染)
 TWEAK_NAME = SMSVideoBG
-SMSVideoBG_FILES = Tweak.x SVBCommon.m SVBLicense.m
+SMSVideoBG_FILES = Tweak.x SVBCommon.m SVBLicense.m SVBRevoke.m
 SMSVideoBG_FRAMEWORKS = UIKit AVFoundation CoreMedia
 SMSVideoBG_CFLAGS = -fobjc-arc -fno-threadsafe-statics -Wno-deprecated-declarations $(LICENSE_CFLAGS)
 
@@ -32,7 +32,7 @@ include $(THEOS_MAKE_PATH)/tweak.mk
 # 实例 2: 独立控制 App (v1.1 起取消设置面板: 面板加载进「设置」进程有闪退风险,
 # 且用户偏好独立 App 控制, 功能完全等价)
 APPLICATION_NAME = SMSVideoBGApp
-SMSVideoBGApp_FILES = app/main.m app/AppDelegate.m SVBCommon.m SVBLicense.m
+SMSVideoBGApp_FILES = app/main.m app/AppDelegate.m SVBCommon.m SVBLicense.m SVBRevoke.m
 SMSVideoBGApp_FRAMEWORKS = UIKit AVFoundation AVKit CoreMedia
 SMSVideoBGApp_CFLAGS = -fobjc-arc -fno-threadsafe-statics -Wno-deprecated-declarations $(LICENSE_CFLAGS)
 SMSVideoBGApp_INSTALL_PATH = /Applications

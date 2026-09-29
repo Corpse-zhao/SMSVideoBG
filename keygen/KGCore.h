@@ -28,6 +28,18 @@ uint32_t KGDayIndexFromNow(NSInteger daysFromNow);
 // 到期天数索引 -> UTC 日期文本 "2027-09-29"; 0xFFFFFFFF -> "永久"
 NSString *KGDateTextForDayIndex(uint32_t idx);
 
+// 清洗用户输入: 去空白/分隔符, 转大写, 只留 Base32 字符
+NSString *KGCodeNormalize(NSString *raw);
+
+// 从 8 字节设备码 → 格式化成 ABCD-EFGH (用于展示/核对)
+NSString *KGDeviceCodeFromBytes(NSData *dev5);
+
+// v1.2.0: 设备输入统一入口 —— 现在既能收 8 位设备码, 也能收硬件标识/UDID/序列号
+//   输入 "ABCD-EFGH"  : 按设备码解码成 5 字节
+//   输入 其它(≥9位)   : 按归一化后的硬件标识做 SHA256, 取前 5 字节 (与插件端一致)
+//   mode 回传识别结果 ("设备码" / "硬件标识"), error 回传错误描述
+NSData *KGDeviceBytesFromInput(NSString *input, NSString **mode, NSString **error);
+
 // 签发一枚激活码
 //   secret     签名密钥
 //   device     设备码 ("ABCD-EFGH"); universal=YES 时忽略
@@ -43,3 +55,18 @@ NSString *KGBuildCode(NSString *secret, NSString *device, BOOL universal,
 
 // 校验一枚激活码 (本地自检 / 验客户回传的码), 返回人话结论
 NSString *KGVerifyCode(NSString *secret, NSString *code, NSString *device);
+
+// ============================================================
+// 远程作废名单 (v1.1.0, 与插件端 SVBRevoke.m 严格对齐)
+//   {"v":1,"ts":<unix秒>,"revoked":["16位大写HEX",...],"sig":"<64位小写HEX>"}
+//   签名原文: "SVBGREVOKE/v1|<ts>|<hash 升序逗号连接>"
+//   签名算法: HMAC-SHA256(secret, 原文) 全 32 字节十六进制
+//   条目      = SHA256(归一化激活码) 前 8 字节的大写十六进制
+// ============================================================
+NSString *KGRevokeHashForCode(NSString *code);
+NSString *KGRevokePayloadString(NSInteger ts, NSArray<NSString *> *hashes);
+NSString *KGRevokeSignatureHex(NSString *payload, NSString *secret);
+// 解析并验签; 通过返回条目数组(大写), 否则 nil
+NSArray<NSString *> *KGRevokeParseJSON(NSData *json, NSString *secret);
+// 生成名单文件内容
+NSData *KGRevokeBuildJSON(NSString *secret, NSInteger ts, NSArray<NSString *> *hashes);

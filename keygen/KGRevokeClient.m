@@ -1,0 +1,175 @@
+#import "KGRevokeClient.h"
+#import "KGCore.h"
+
+static NSString * const kKGTokenKey = @"kg_gh_token";
+static NSString * const kKGRepoKey  = @"kg_gh_repo";
+static NSString * const kKGFileKey  = @"kg_gh_file";
+
+static NSString *KGPref(NSString *key, NSString *fallback) {
+    NSString *v = [[NSUserDefaults standardUserDefaults] stringForKey:key];
+    return v.length ? v : fallback;
+}
+
+@implementation KGRevokeClient
+
++ (NSString *)token { return KGPref(kKGTokenKey, @""); }
++ (void)setToken:(NSString *)t {
+    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+    if (t.length) [d setObject:t forKey:kKGTokenKey]; else [d removeObjectForKey:kKGTokenKey];
+}
++ (NSString *)repo { return KGPref(kKGRepoKey, @"Corpse-zhao/SMSVideoBG"); }
++ (void)setRepo:(NSString *)r {
+    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+    if (r.length) [d setObject:r forKey:kKGRepoKey]; else [d removeObjectForKey:kKGRepoKey];
+}
++ (NSString *)filePath { return KGPref(kKGFileKey, @"revoked.json"); }
++ (void)setFilePath:(NSString *)p {
+    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+    if (p.length) [d setObject:p forKey:kKGFileKey]; else [d removeObjectForKey:kKGFileKey];
+}
++ (BOOL)configured { return self.token.length > 0; }
+
+#pragma mark - 底层同步请求 (在后台队列调用, 阻塞至多 20 秒)
+
++ (NSDictionary *)syncRequest:(NSString *)method
+                          url:(NSString *)urlStr
+                        token:(NSString *)token
+                         body:(NSData *)body
+                       accept:(NSString *)accept {
+    NSURL *url = [NSURL URLWithString:urlStr];
+    if (!url) return @{@"status": @0, @"data": [NSData data]};
+
+    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url];
+    req.HTTPMethod = method;
+    req.timeoutInterval = 15;
+    req.cachePolicy = NSURLRequestReloadIgnoringLocalCacheData;
+    [req setValue:@"SMSVideoBG-KeyGen" forHTTPHeaderField:@"User-Agent"];
+    if (token.length) [req setValue:[NSString stringWithFormat:@"Bearer %@", token] forHTTPHeaderField:@"Authorization"];
+    if (accept.length) [req setValue:accept forHTTPHeaderField:@"Accept"];
+    if (body) {
+        req.HTTPBody = body;
+        [req setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
+    }
+
+    __block NSData *data = nil;
+    __block NSInteger status = 0;
+    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+    NSURLSessionDataTask *task = [[NSURLSession sharedSession]
+        dataTaskWithRequest:req
+          completionHandler:^(NSData *d, NSURLResponse *r, NSError *e) {
+            data = d;
+            if ([r isKindOfClass:[NSHTTPURLResponse class]])
+                status = ((NSHTTPURLResponse *)r).statusCode;
+            dispatch_semaphore_signal(sem);
+        }];
+    [task resume];
+    dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(22 * NSEC_PER_SEC)));
+    return @{@"status": @(status), @"data": data ?: [NSData data]};
+}
+
++ (NSString *)errorTextForStatus:(NSInteger)status data:(NSData *)data {
+    NSString *msg = nil;
+    if (data.length) {
+        id obj = [NSJSONSerialization JSONObjectWithData:data options:0 error:NULL];
+        if ([obj isKindOfClass:[NSDictionary class]] && [obj[@"message"] isKindOfClass:[NSString class]])
+            msg = obj[@"message"];
+    }
+    if (status == 401) return @"Token 无效或已过期";
+    if (status == 403) return @"被拒绝：Token 权限不足或触发限流";
+    if (status == 404) return @"仓库或文件不存在（检查仓库名，Token 需要 repo 权限）";
+    if (status == 0)   return @"连不上 GitHub（检查网络/代理）";
+    return msg.length ? [NSString stringWithFormat:@"HTTP %ld：%@", (long)status, msg]
+                      : [NSString stringWithFormat:@"HTTP %ld", (long)status];
+}
+
++ (NSArray<NSString *> *)fetchURLs {
+    NSString *rep = [self repo];
+    NSString *path = [self filePath];
+    return @[[NSString stringWithFormat:@"https://api.github.com/repos/%@/contents/%@", rep, path],
+             [NSString stringWithFormat:@"https://cdn.jsdelivr.net/gh/%@@main/%@", rep, path],
+             [NSString stringWithFormat:@"https://raw.githubusercontent.com/%@/main/%@", rep, path]];
+}
+
+#pragma mark - 拉取 / 推送
+
++ (void)fetchWithSecret:(NSString *)secret
+             completion:(void (^)(NSArray<NSString *> *, NSString *))done {
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSArray *urls = [KGRevokeClient fetchURLs];
+        NSArray *result = nil;
+        NSString *err = @"连不上远端（检查网络）";
+
+        for (NSUInteger i = 0; i < urls.count; i++) {
+            NSString *accept = (i == 0) ? @"application/vnd.github.raw" : nil;
+            NSDictionary *r = [KGRevokeClient syncRequest:@"GET" url:urls[i]
+                                                    token:(i == 0 ? [KGRevokeClient token] : nil)
+                                                     body:nil accept:accept];
+            NSInteger status = [r[@"status"] integerValue];
+            NSData *data = r[@"data"];
+
+            if (status == 200) {
+                NSArray *hashes = KGRevokeParseJSON(data, secret);
+                if (hashes) { result = hashes; err = nil; break; }
+                err = @"远端名单验签失败（密钥不一致 / 文件被改过）";
+                continue;
+            }
+            if (status == 404) { result = @[]; err = nil; break; }   // 还没有名单文件 = 空名单
+            err = [KGRevokeClient errorTextForStatus:status data:data];
+        }
+
+        dispatch_async(dispatch_get_main_queue(), ^{ done(result, err); });
+    });
+}
+
++ (void)pushHashes:(NSArray<NSString *> *)hashes
+            secret:(NSString *)secret
+        completion:(void (^)(BOOL, NSString *))done {
+    NSString *tok = [self token];
+    if (!tok.length) { done(NO, @"未配置 GitHub Token，无法推送"); return; }
+    if (!secret.length) { done(NO, @"签名密钥为空"); return; }
+
+    NSString *apiURL = [NSString stringWithFormat:@"https://api.github.com/repos/%@/contents/%@",
+                        [self repo], [self filePath]];
+
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSString *err = @"推送失败";
+        BOOL ok = NO;
+
+        for (int attempt = 0; attempt < 2; attempt++) {
+            NSString *sha = nil;
+            NSDictionary *g = [KGRevokeClient syncRequest:@"GET" url:apiURL token:tok
+                                                     body:nil accept:@"application/vnd.github+json"];
+            NSInteger gs = [g[@"status"] integerValue];
+            if (gs == 200) {
+                id obj = [NSJSONSerialization JSONObjectWithData:g[@"data"] options:0 error:NULL];
+                if ([obj isKindOfClass:[NSDictionary class]] && [obj[@"sha"] isKindOfClass:[NSString class]])
+                    sha = obj[@"sha"];
+            } else if (gs != 404) {
+                err = [KGRevokeClient errorTextForStatus:gs data:g[@"data"]];
+                break;
+            }
+
+            NSData *content = KGRevokeBuildJSON(secret, (NSInteger)[[NSDate date] timeIntervalSince1970], hashes);
+            if (!content) { err = @"名单序列化失败"; break; }
+
+            NSMutableDictionary *payload = [NSMutableDictionary dictionary];
+            payload[@"message"] = [NSString stringWithFormat:@"更新作废名单 (%lu 条)", (unsigned long)hashes.count];
+            payload[@"content"] = [content base64EncodedStringWithOptions:0];
+            payload[@"branch"] = @"main";
+            if (sha.length) payload[@"sha"] = sha;
+
+            NSData *body = [NSJSONSerialization dataWithJSONObject:payload options:0 error:NULL];
+            NSDictionary *p = [KGRevokeClient syncRequest:@"PUT" url:apiURL token:tok
+                                                     body:body accept:@"application/vnd.github+json"];
+            NSInteger ps = [p[@"status"] integerValue];
+            if (ps == 200 || ps == 201) { ok = YES; err = nil; break; }
+            if (ps == 409 || ps == 422) { err = @"写入冲突（远端被同时修改），已重试"; continue; }
+            err = [KGRevokeClient errorTextForStatus:ps data:p[@"data"]];
+            break;
+        }
+
+        dispatch_async(dispatch_get_main_queue(), ^{ done(ok, err); });
+    });
+}
+
+@end
