@@ -57,15 +57,17 @@ jobs:
             echo "::warning::未配置密钥, 跳过注入校验"
             exit 0
           fi
-          if [ -f .theos/obj/SVBKeyGen ]; then
-            if grep -q "$SVB_LICENSE_SECRET" .theos/obj/SVBKeyGen; then
-              echo "OK  SVBKeyGen 已注入密钥"
+          bin=$(find .theos -type f -name SVBKeyGen 2>/dev/null | head -1)
+          if [ -n "$bin" ]; then
+            if grep -q "$SVB_LICENSE_SECRET" "$bin"; then
+              echo "OK  $bin 已注入密钥"
             else
               echo "::error::密钥未能注入二进制"
               exit 1
             fi
           else
-            echo "::error::未找到编译产物 .theos/obj/SVBKeyGen"
+            echo "::error::未找到编译产物 SVBKeyGen"
+            find .theos -maxdepth 4 -type f -name "SVBKeyGen*" 2>/dev/null
             exit 1
           fi
 
