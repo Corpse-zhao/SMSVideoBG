@@ -59,6 +59,13 @@ void SVBAuthRefreshIfNeeded(BOOL force);     // force=YES 立即拉一次
 // 作废 SVBAuthIsAuthorized 的 60 秒判定缓存 (拉取成功后内部自动调用;
 // 控制 App 收到同步完成通知时也可以主动调一次, 让界面立刻反映新结论)
 void SVBAuthInvalidateCache(void);
+
+// ---- 自定义授权服务地址 (v10.0.2) ----
+// 内置多源: 自定义(若有) + ghfast.top / gh-proxy.com / ghproxy.net 三个国内可直连镜像
+//           + api.github.com + raw.githubusercontent.com, 并发拉取取最新一份。
+// 想换成自建托管点(如腾讯云 COS)时, 把完整 URL 填进来即可, 无需改代码。
+NSString *SVBAuthCustomSourceURL(void);            // nil = 用内置多源
+void SVBAuthSetCustomSourceURL(NSString *url);     // 传 nil/空串 = 恢复内置多源
 NSInteger SVBAuthCachedCount(void);          // 缓存名单里的台数
 NSTimeInterval SVBAuthLastSyncTime(void);    // 上次成功同步时间 (0 = 从未)
 BOOL SVBAuthCachedHasSelf(NSString **expText);  // 本机命中缓存名单? 回传到期文本

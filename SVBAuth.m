@@ -15,8 +15,11 @@ static const char *const kAuthSecret = SVB_LICENSE_SECRET;
 #define SVB_AUTH_KEY_MAP @"auth_map"        // 缓存: {H32: 到期dayIndex}
 #define SVB_AUTH_KEY_TS  @"auth_ts"         // 缓存: 上次成功同步时间
 #define SVB_AUTH_KEY_TRY @"auth_try_ts"     // 缓存: 上次尝试时间 (节流)
+#define SVB_AUTH_KEY_VTS @"auth_ver_ts"     // 缓存: 已采用名单自带的 ts (防旧名单回滚)
+#define SVB_AUTH_KEY_URL @"auth_url"        // 自定义授权服务地址 (空 = 用内置多源)
 #define SVB_AUTH_INTERVAL (30 * 60.0)       // 30 分钟拉一次
-#define SVB_AUTH_TIMEOUT  12.0
+#define SVB_AUTH_TIMEOUT  9.0               // 单源超时 (并发拉, 不必留太长)
+#define SVB_AUTH_BODY_WINDOW 3.0            // 拿到首个可用响应后再等这么久, 取最新的一份
 
 // UDID 哈希前缀 (与签发 App 严格一致)
 static NSString * const kAuthHashPrefix = @"SMSVideoBG-AUTH/v1|";
@@ -142,7 +145,9 @@ static NSString *SVBAuthSignatureHex(NSString *payload) {
 }
 
 // 解析并验签; 通过返回 {H32: @(dayIndex)}, 否则 nil
-static NSDictionary<NSString *, NSNumber *> *SVBAuthMapFromJSON(NSData *json) {
+// outTs (可空) 回传名单自带的 ts —— 多源竞速时用它挑最新的一份
+static NSDictionary<NSString *, NSNumber *> *SVBAuthMapFromJSON(NSData *json, NSInteger *outTs) {
+    if (outTs) *outTs = 0;
     if (!json.length) return nil;
     id obj = [NSJSONSerialization JSONObjectWithData:json options:0 error:NULL];
     if (![obj isKindOfClass:[NSDictionary class]]) return nil;
@@ -166,6 +171,7 @@ static NSDictionary<NSString *, NSNumber *> *SVBAuthMapFromJSON(NSData *json) {
     }
     NSString *expect = SVBAuthSignatureHex(SVBAuthPayloadString(ts.integerValue, clean));
     if (![[sig lowercaseString] isEqualToString:expect]) return nil;
+    if (outTs) *outTs = ts.integerValue;
     return clean;
 }
 
@@ -288,20 +294,44 @@ NSString *SVBAuthStateText(SVBAuthState st, NSString *detail) {
 
 #pragma mark - 拉取
 
+// v10.0.2: 多源「并发竞速」—— 国内网络不挂代理也能激活
+//   · 国内直连 raw.githubusercontent / api.github.com 基本不通, 靠公共加速镜像兜底;
+//   · 名单是 HMAC 签名的, 走任何第三方镜像都无法伪造 (改一个字节就验签失败 -> 忽略),
+//     所以"并发拉多个不可信源"在安全上是成立的;
+//   · 不再使用 cdn.jsdelivr.net: 它对分支引用有最长 12 小时缓存, 作者删掉 UDID 后
+//     可能长时间还拉到旧名单, 与"删除即失效"的语义冲突, 故移除;
+//   · 并发而不是顺序: 顺序时每个死源都要把超时耗完才轮到下一个, 首次激活体验很差。
+
+NSString *SVBAuthCustomSourceURL(void) {
+    id v = nil;
+    @try { v = [[SVBManager shared] configValueForKey:SVB_AUTH_KEY_URL]; } @catch (NSException *e) {}
+    return ([v isKindOfClass:[NSString class]] && [(NSString *)v length]) ? (NSString *)v : nil;
+}
+
+void SVBAuthSetCustomSourceURL(NSString *url) {
+    @try {
+        NSString *t = url ? [url stringByTrimmingCharactersInSet:
+                                 [NSCharacterSet whitespaceAndNewlineCharacterSet]] : @"";
+        SVBManager *mgr = [SVBManager shared];
+        [mgr setConfigValue:(t.length ? t : @"") forKey:SVB_AUTH_KEY_URL];
+        [mgr setConfigValue:@(0) forKey:SVB_AUTH_KEY_TRY];   // 清节流: 下次立即按新地址拉
+        SVBAuthInvalidateCache();
+    } @catch (NSException *e) {}
+}
+
 static NSArray<NSString *> *SVBAuthURLs(void) {
     NSMutableArray *urls = [NSMutableArray array];
-    @try {
-        id custom = [[SVBManager shared] configValueForKey:@"auth_url"];
-        if ([custom isKindOfClass:[NSString class]] && [(NSString *)custom length])
-            [urls addObject:custom];
-    } @catch (NSException *e) {}
-    NSString *base = @"Corpse-zhao/SMSVideoBG";
-    [urls addObject:[NSString stringWithFormat:
-        @"https://api.github.com/repos/%@/contents/auth.json?ref=revoke", base]];
-    [urls addObject:[NSString stringWithFormat:
-        @"https://cdn.jsdelivr.net/gh/%@@revoke/auth.json", base]];
-    [urls addObject:[NSString stringWithFormat:
-        @"https://raw.githubusercontent.com/%@/revoke/auth.json", base]];
+    NSString *custom = SVBAuthCustomSourceURL();
+    if (custom) [urls addObject:custom];
+
+    NSString *raw = @"https://raw.githubusercontent.com/Corpse-zhao/SMSVideoBG/revoke/auth.json";
+    // 国内可直连的 GitHub 加速镜像 (返回的就是原始文件内容, 不夹带页面)
+    [urls addObject:[@"https://ghfast.top/"   stringByAppendingString:raw]];
+    [urls addObject:[@"https://gh-proxy.com/" stringByAppendingString:raw]];
+    [urls addObject:[@"https://ghproxy.net/"  stringByAppendingString:raw]];
+    // 原生源 (海外网络 / 挂了代理时最快最可靠)
+    [urls addObject:@"https://api.github.com/repos/Corpse-zhao/SMSVideoBG/contents/auth.json?ref=revoke"];
+    [urls addObject:raw];
     return urls;
 }
 
@@ -314,66 +344,114 @@ static NSLock *SVBAuthLock(void) {
 
 static BOOL gSVBAuthRunning = NO;
 
-// 逐个 URL 试, 命中即停
-static void SVBAuthFetchChain(NSArray<NSString *> *urls, NSUInteger idx) {
-    if (idx >= urls.count) return;
-    NSString *urlStr = urls[idx];
-    NSURL *url = [NSURL URLWithString:urlStr];
-    if (!url) { SVBAuthFetchChain(urls, idx + 1); return; }
+static void SVBAuthFetchAll(NSArray<NSString *> *urls) {
+    if (!urls.count) return;
 
-    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url];
-    req.timeoutInterval = SVB_AUTH_TIMEOUT;
-    req.cachePolicy = NSURLRequestReloadIgnoringLocalCacheData;
-    req.HTTPShouldHandleCookies = NO;
-    if ([urlStr containsString:@"api.github.com"])
-        [req setValue:@"application/vnd.github.raw" forHTTPHeaderField:@"Accept"];
+    NSLock *lock = [[NSLock alloc] init];
+    __block NSMutableArray *bodies = [NSMutableArray array];   // 200 响应体
+    __block NSTimeInterval firstBodyAt = 0;                    // 首个响应体到达时间
+    __block NSInteger saw404 = 0;
 
-    __block NSData *body = nil;
-    __block NSInteger status = 0;
-    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
-    NSURLSessionDataTask *task = [[NSURLSession sharedSession]
-        dataTaskWithRequest:req
-          completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
-            body = data;
-            if ([resp isKindOfClass:[NSHTTPURLResponse class]])
-                status = ((NSHTTPURLResponse *)resp).statusCode;
-            if (err) body = nil;
-            dispatch_semaphore_signal(sem);
-        }];
-    [task resume];
-    dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW,
-                                              (int64_t)((SVB_AUTH_TIMEOUT + 6.0) * NSEC_PER_SEC)));
+    dispatch_group_t grp = dispatch_group_create();
+    for (NSString *urlStr in urls) {
+        NSURL *url = [NSURL URLWithString:urlStr];
+        if (!url) continue;
+
+        NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url];
+        req.timeoutInterval = SVB_AUTH_TIMEOUT;
+        req.cachePolicy = NSURLRequestReloadIgnoringLocalCacheData;
+        req.HTTPShouldHandleCookies = NO;
+        if ([urlStr containsString:@"api.github.com"])
+            [req setValue:@"application/vnd.github.raw" forHTTPHeaderField:@"Accept"];
+
+        dispatch_group_enter(grp);
+        NSURLSessionDataTask *task = [[NSURLSession sharedSession]
+            dataTaskWithRequest:req
+              completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
+                @try {
+                    NSInteger status = 0;
+                    if ([resp isKindOfClass:[NSHTTPURLResponse class]])
+                        status = ((NSHTTPURLResponse *)resp).statusCode;
+                    [lock lock];
+                    if (status == 404) {
+                        saw404++;
+                    } else if (!err && status == 200 && data.length) {
+                        [bodies addObject:data];
+                        if (firstBodyAt <= 0)
+                            firstBodyAt = [[NSDate date] timeIntervalSince1970];
+                    }
+                    [lock unlock];
+                } @catch (NSException *e) {}
+                dispatch_group_leave(grp);
+            }];
+        [task resume];
+    }
+
+    // 收集窗口: 全部完成 / 拿到首个响应后再等一会 / 总超时, 三者先到为准
+    NSTimeInterval deadline = [[NSDate date] timeIntervalSince1970] + SVB_AUTH_TIMEOUT + 3.0;
+    while (1) {
+        NSTimeInterval tick = [[NSDate date] timeIntervalSince1970];
+        if (tick >= deadline) break;
+        [lock lock];
+        NSUInteger cnt = bodies.count;
+        NSTimeInterval fb = firstBodyAt;
+        [lock unlock];
+        if (cnt > 0 && fb > 0 && tick - fb >= SVB_AUTH_BODY_WINDOW) break;
+        if (dispatch_group_wait(grp, dispatch_time(DISPATCH_TIME_NOW,
+                                                   (int64_t)(0.25 * NSEC_PER_SEC))) == 0) break;
+    }
+
+    [lock lock];
+    NSArray *snapshot = [bodies copy];
+    NSInteger n404 = saw404;
+    [lock unlock];
+
+    // 取 ts 最大的那一份 (并发多源里可能有缓存住的旧名单)
+    NSDictionary *best = nil;
+    NSInteger bestTs = 0;
+    for (NSData *b in snapshot) {
+        NSInteger t = 0;
+        NSDictionary *m = SVBAuthMapFromJSON(b, &t);
+        if (!m) continue;
+        if (!best || t > bestTs) { best = m; bestTs = t; }
+    }
 
     SVBManager *mgr = [SVBManager shared];
     NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
 
-    if (status == 404) {
-        // 名单文件还不存在 = 还没授权过任何设备
-        [mgr setConfigValue:@{} forKey:SVB_AUTH_KEY_MAP];
-        [mgr setConfigValue:@(now) forKey:SVB_AUTH_KEY_TS];
-        SVBAuthInvalidateCache();   // v10.0.1: 结论可能变了, 立即作废 60 秒缓存
-        [mgr log:@"[auth] 名单不存在(404), 按空名单处理 via %@", urlStr];
-        return;
-    }
-    if (status == 200 && body.length) {
-        NSDictionary *map = SVBAuthMapFromJSON(body);
-        if (map) {
-            [mgr setConfigValue:map forKey:SVB_AUTH_KEY_MAP];
-            [mgr setConfigValue:@(now) forKey:SVB_AUTH_KEY_TS];
-            SVBAuthInvalidateCache();   // v10.0.1: 结论可能变了, 立即作废 60 秒缓存
-            [mgr log:@"[auth] 授权名单已更新: %lu 台设备 via %@",
-                     (unsigned long)map.count, urlStr];
+    if (best) {
+        id pv = [mgr configValueForKey:SVB_AUTH_KEY_VTS];
+        NSInteger prevTs = [pv respondsToSelector:@selector(integerValue)] ? [pv integerValue] : 0;
+        if (bestTs < prevTs) {   // 防"旧名单回滚"把已删除的设备复活
+            [mgr log:@"[auth] 拉到的名单更旧 (v=%ld < %ld), 忽略", (long)bestTs, (long)prevTs];
             return;
         }
-        [mgr log:@"[auth] 名单验签失败, 忽略该响应 via %@", urlStr];
+        [mgr setConfigValue:best forKey:SVB_AUTH_KEY_MAP];
+        [mgr setConfigValue:@(bestTs) forKey:SVB_AUTH_KEY_VTS];
+        [mgr setConfigValue:@(now) forKey:SVB_AUTH_KEY_TS];
+        SVBAuthInvalidateCache();   // v10.0.1: 结论可能变了, 立即作废 60 秒判定缓存
+        [mgr log:@"[auth] 授权名单已更新: %lu 台设备 (v=%ld)",
+                 (unsigned long)best.count, (long)bestTs];
+        return;
     }
-    SVBAuthFetchChain(urls, idx + 1);
+
+    if (n404 > 0) {
+        // 各源都说"没有名单文件": 只有本地也没缓存时才认定为"确认未授权"
+        if (SVBAuthCachedCount() == 0) {
+            [mgr setConfigValue:@(now) forKey:SVB_AUTH_KEY_TS];
+            SVBAuthInvalidateCache();
+        }
+        [mgr log:@"[auth] 各源均无名单文件(404), 本地缓存 %ld 台",
+                 (long)SVBAuthCachedCount()];
+        return;
+    }
+    [mgr log:@"[auth] 全部源失败或验签不通过, 沿用旧缓存"];
 }
 
 static void SVBAuthRefreshForce(void) {
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
         @try {
-            SVBAuthFetchChain(SVBAuthURLs(), 0);
+            SVBAuthFetchAll(SVBAuthURLs());
         } @catch (NSException *e) {}
         [SVBAuthLock() lock];
         gSVBAuthRunning = NO;

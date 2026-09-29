@@ -664,6 +664,54 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
     self.tableView.backgroundColor = [UIColor systemGroupedBackgroundColor];
     self.tableView.separatorStyle = UITableViewCellSeparatorStyleNone;
     self.tableView.tableHeaderView = [self makeHeroHeader];
+    // v10.0.2: 长按「立即联网校验」行可改自定义授权服务地址 (GitHub 全不通时的兜底)
+    UILongPressGestureRecognizer *lp = [[UILongPressGestureRecognizer alloc]
+        initWithTarget:self action:@selector(tableLongPressed:)];
+    [self.tableView addGestureRecognizer:lp];
+}
+
+- (void)tableLongPressed:(UILongPressGestureRecognizer *)gr {
+    if (gr.state != UIGestureRecognizerStateBegan) return;
+    CGPoint p = [gr locationInView:self.tableView];
+    NSIndexPath *ip = [self.tableView indexPathForRowAtPoint:p];
+    if (!ip) return;
+    if (![self authOK]) {
+        if (ip.row == 2) [self editAuthSource];   // 未授权栏第 3 行
+        return;
+    }
+    if (ip.section == 3 && ip.row == 0) [self editAuthSource];   // 说明 -> 授权状态
+}
+
+- (void)editAuthSource {
+    NSString *cur = SVBAuthCustomSourceURL();
+    UIAlertController *ac = [UIAlertController
+        alertControllerWithTitle:@"授权服务地址"
+                         message:@"留空 = 用内置多源（国内加速镜像 + GitHub 官方），一般不用改。\n"
+                                 @"若你有自己的托管地址（如对象存储），把完整 URL 填在这里。"
+                  preferredStyle:UIAlertControllerStyleAlert];
+    [ac addTextFieldWithConfigurationHandler:^(UITextField *tf) {
+        tf.text = cur ?: @"";
+        tf.placeholder = @"https://example.com/auth.json";
+        tf.keyboardType = UIKeyboardTypeURL;
+        tf.autocapitalizationType = UITextAutocapitalizationTypeNone;
+        tf.autocorrectionType = UITextAutocorrectionTypeNo;
+        tf.clearButtonMode = UITextFieldViewModeAlways;
+    }];
+    [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    [ac addAction:[UIAlertAction actionWithTitle:@"保存并校验" style:UIAlertActionStyleDefault
+                                        handler:^(UIAlertAction *a) {
+        SVBAuthSetCustomSourceURL(ac.textFields.firstObject.text);
+        [self svbAuthSync];
+        UIAlertController *ok = [UIAlertController
+            alertControllerWithTitle:@"已保存"
+                             message:[SVBAuthCustomSourceURL() length]
+                                     ? @"已改用你填写的地址校验。"
+                                     : @"已恢复内置多源。"
+                      preferredStyle:UIAlertControllerStyleAlert];
+        [ok addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
+        [self presentViewController:ok animated:YES completion:nil];
+    }]];
+    [self presentViewController:ac animated:YES completion:nil];
 }
 
 - (void)viewWillAppear:(BOOL)animated {
@@ -699,7 +747,8 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
         return @"本插件按设备授权。把上面「本机 UDID」那一行点一下复制，发给作者；"
                 "作者签发后本机联网（点「立即联网校验」）即可生效。\n\n"
                 "未授权时，信息 App 里的视频背景不会生效，设置项也已全部隐藏。\n"
-                "作者删除你这条 UDID 记录后，本机最多 30 分钟掉授权（需联网）。";
+                "作者删除你这条 UDID 记录后，本机最多 30 分钟掉授权（需联网）。\n\n"
+                "如果反复校验不过，长按「立即联网校验」那一行可以填写自定义授权服务地址。";
     if (section == 1)
         return @"点按某一行可为该界面导入/选用素材并单独设置不透明度/模糊度/音量。每个界面对应素材目录下一个独立的文件夹，用 Filza 直接放入视频同样生效。\n\n「对话详情」= 点进某个对话后上下聊天的那个界面（不是列表）。「未导入素材」的界面不会显示视频背景，导入并打开开关后生效。";
     if (section == 2)
@@ -1537,7 +1586,41 @@ static void SVBAppPickImage(UIViewController *host, void (^done)(UIImage *image)
     self.title = @"授权";
     self.tableView.backgroundColor = [UIColor systemGroupedBackgroundColor];
     self.tableView.separatorStyle = UITableViewCellSeparatorStyleNone;
+    // v10.0.2: 长按「立即联网校验」可改自定义授权服务地址
+    UILongPressGestureRecognizer *lp = [[UILongPressGestureRecognizer alloc]
+        initWithTarget:self action:@selector(tableLongPressed:)];
+    [self.tableView addGestureRecognizer:lp];
     [self reloadAuth];
+}
+
+- (void)tableLongPressed:(UILongPressGestureRecognizer *)gr {
+    if (gr.state != UIGestureRecognizerStateBegan) return;
+    NSIndexPath *ip = [self.tableView indexPathForRowAtPoint:[gr locationInView:self.tableView]];
+    if (!ip || ip.section != 1) return;
+    [self editAuthSource];
+}
+
+- (void)editAuthSource {
+    NSString *cur = SVBAuthCustomSourceURL();
+    UIAlertController *ac = [UIAlertController
+        alertControllerWithTitle:@"授权服务地址"
+                         message:@"留空 = 用内置多源（国内加速镜像 + GitHub 官方），一般不用改。"
+                  preferredStyle:UIAlertControllerStyleAlert];
+    [ac addTextFieldWithConfigurationHandler:^(UITextField *tf) {
+        tf.text = cur ?: @"";
+        tf.placeholder = @"https://example.com/auth.json";
+        tf.keyboardType = UIKeyboardTypeURL;
+        tf.autocapitalizationType = UITextAutocapitalizationTypeNone;
+        tf.autocorrectionType = UITextAutocorrectionTypeNo;
+        tf.clearButtonMode = UITextFieldViewModeAlways;
+    }];
+    [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    [ac addAction:[UIAlertAction actionWithTitle:@"保存并校验" style:UIAlertActionStyleDefault
+                                        handler:^(UIAlertAction *a) {
+        SVBAuthSetCustomSourceURL(ac.textFields.firstObject.text);
+        [self syncNow];
+    }]];
+    [self presentViewController:ac animated:YES completion:nil];
 }
 
 - (void)viewWillAppear:(BOOL)animated {
