@@ -14,7 +14,6 @@
 
 static char SVBSwitchAssocKey;
 static char SVBProxyAssocKey;
-static char SVBBgKillLabelKey;   // v9.9.11: 切后台清理行的延时标签
 
 #pragma mark - 主题
 
@@ -626,7 +625,7 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
     if (section == 1)
         return @"点按某一行可为该界面导入/选用素材并单独设置不透明度/模糊度/音量。每个界面对应素材目录下一个独立的文件夹，用 Filza 直接放入视频同样生效。\n\n「对话详情」= 点进某个对话后上下聊天的那个界面（不是列表）。「未导入素材」的界面不会显示视频背景，导入并打开开关后生效。";
     if (section == 2)
-        return @"「切后台自动清理」：信息App 划到后台超过设定时间就自动结束它的进程（从后台再进去等于重开），用来解决个别情况下回前台视频卡住的问题；设定时间内回来（复制粘贴、看眼别的 App）不会被清理。点左侧秒数可以改时间。\n\n「显示注入诊断横幅」：打开信息App（或备忘录）时，窗口顶部会显示一条横幅：能看到它 = 插件注入成功。横幅里列出每个素材根是否可读、有几个素材，点一下可临时隐藏。";
+        return @"「切后台自动清理」：信息App 划到后台超过设定时间就自动结束它的进程（从后台再进去等于重开），用来解决个别情况下回前台视频卡住的问题；设定时间内回来（复制粘贴、看眼别的 App）不会被清理。点这一行可以改时间。\n\n「显示注入诊断横幅」：打开信息App（或备忘录）时，窗口顶部会显示一条横幅：能看到它 = 插件注入成功。横幅里列出每个素材根是否可读、有几个素材，点一下可临时隐藏。";
     if (section == 3) {
         NSString *primary = [[SVBManager shared] mediaDirectory];
         return [NSString stringWithFormat:
@@ -695,29 +694,19 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
             static NSString *bgKillId = @"svb-cell-bgkill";
             UITableViewCell *c = [tableView dequeueReusableCellWithIdentifier:bgKillId];
             if (!c) {
-                c = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:bgKillId];
-                UILabel *lbl = [UILabel new];
-                lbl.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
-                lbl.textColor = SVBAccent();
-                lbl.userInteractionEnabled = YES;   // 点秒数改时间
-                [lbl addGestureRecognizer:[[UITapGestureRecognizer alloc]
-                                            initWithTarget:self action:@selector(bgKillDelayTapped)]];
+                // v9.9.13: 秒数放行尾 detailText, 开关独立做 accessoryView
+                // (旧版把标签+开关塞 StackView 当 accessoryView, 布局不稳会跑位)
+                c = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:bgKillId];
                 UISwitch *sw = [UISwitch new];
                 sw.onTintColor = SVBAccent();
                 [sw addTarget:self action:@selector(bgKillToggled:) forControlEvents:UIControlEventValueChanged];
-                UIStackView *box = [[UIStackView alloc] initWithArrangedSubviews:@[lbl, sw]];
-                box.axis = UILayoutConstraintAxisHorizontal;
-                box.spacing = 8;
-                box.alignment = UIStackViewAlignmentCenter;
-                c.accessoryView = box;
-                objc_setAssociatedObject(c, &SVBBgKillLabelKey, lbl, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                c.accessoryView = sw;
             }
-            UILabel *lbl = objc_getAssociatedObject(c, &SVBBgKillLabelKey);
             BOOL on = [mgr bgKillEnabled];
-            lbl.text = on ? [NSString stringWithFormat:@"%.0f 秒", [mgr bgKillDelay]] : @"";
-            UIStackView *box = (UIStackView *)c.accessoryView;
-            [(UISwitch *)box.arrangedSubviews.lastObject setOn:on];
             c.textLabel.text = @"切后台自动清理";
+            c.detailTextLabel.text = on ? [NSString stringWithFormat:@"%.0f 秒", [mgr bgKillDelay]] : @"关闭";
+            c.detailTextLabel.textColor = on ? SVBAccent() : [UIColor secondaryLabelColor];
+            ((UISwitch *)c.accessoryView).on = on;
             c.imageView.image = SVBBadgeIcon(@"bolt.slash.fill",
                 [UIColor colorWithRed:1.00 green:0.45 blue:0.35 alpha:1],
                 [UIColor colorWithRed:1.00 green:0.28 blue:0.45 alpha:1]);
@@ -787,8 +776,16 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
 #pragma mark - v9.9.11 切后台自动清理
 
 - (void)bgKillToggled:(UISwitch *)sw {
-    [SVBManager shared].bgKillEnabled = sw.on;
-    [self.tableView reloadData];
+    SVBManager *mgr = [SVBManager shared];
+    mgr.bgKillEnabled = sw.on;
+    // 只刷新这一行, 更新行尾秒数/关闭文案
+    for (UITableViewCell *c in self.tableView.visibleCells) {
+        if ([c.reuseIdentifier isEqualToString:@"svb-cell-bgkill"]) {
+            BOOL on = mgr.bgKillEnabled;
+            c.detailTextLabel.text = on ? [NSString stringWithFormat:@"%.0f 秒", mgr.bgKillDelay] : @"关闭";
+            c.detailTextLabel.textColor = on ? SVBAccent() : [UIColor secondaryLabelColor];
+        }
+    }
 }
 
 - (void)bgKillDelayTapped {
@@ -836,6 +833,10 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
 
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
+    if (indexPath.section == 2 && indexPath.row == 0) {
+        [self bgKillDelayTapped];   // v9.9.13: 点整行改清理延时
+        return;
+    }
     if (indexPath.section == 1) {
         NSArray<NSString *> *def = _defs[indexPath.row];
         SVBAppMaterialController *vc = [[SVBAppMaterialController alloc] initWithContext:def[0] title:def[1]];
