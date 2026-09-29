@@ -378,6 +378,17 @@ static void SVBClearChatBubbleBGs(UIView *v, NSInteger depth) {
             if (v.layer.backgroundColor &&
                 !CGColorEqualToColor(v.layer.backgroundColor, [UIColor clearColor].CGColor))
                 v.layer.backgroundColor = NULL;
+            if (v.layer.shadowOpacity != 0) v.layer.shadowOpacity = 0;
+            // 宽幅 UIImageView = 气泡九宫格底图 (九宫格图以 layer.contents 承载)。
+            // 只在「子树含文字」时清: 头像/照片消息(无文字)不受影响。
+            if ([v isKindOfClass:[UIImageView class]]) {
+                UIImageView *iv = (UIImageView *)v;
+                CGFloat supW = v.superview ? v.superview.bounds.size.width : 0;
+                if (iv.image && v.bounds.size.width >= 100 &&
+                    (supW <= 0 || v.bounds.size.width >= supW * 0.5) &&
+                    SVBSubtreeHasContent(v, 0) && v.layer.contents)
+                    v.layer.contents = NULL;
+            }
         }
     } @catch (NSException *e) {}
     for (UIView *s in v.subviews) SVBClearChatBubbleBGs(s, depth + 1);
@@ -432,6 +443,30 @@ static void SVBPrefsChanged(CFNotificationCenterRef center, void *observer,
     [[SVBManager shared] refreshVisibleBackgrounds];
 }
 
+
+// 气泡的「涂料」全清: 底色 + 阴影 + 自绘内容(layer.contents) + 形状图层描填。
+// iOS16 实测: 只清 backgroundColor 时气泡残留一块深色底 —— 它还有 drawRect/图层画的部分。
+static void SVBStripBalloonPaint(UIView *v) {
+    if (!v) return;
+    @try {
+        if (v.backgroundColor && ![v.backgroundColor isEqual:[UIColor clearColor]])
+            v.backgroundColor = [UIColor clearColor];
+        if (v.layer.backgroundColor &&
+            !CGColorEqualToColor(v.layer.backgroundColor, [UIColor clearColor].CGColor))
+            v.layer.backgroundColor = NULL;
+        if (v.layer.shadowOpacity != 0) v.layer.shadowOpacity = 0;
+        // 九宫格气泡图走 layer.contents; 只在「含文字」的气泡上清,
+        // 图片消息(照片即内容)不动, 避免把照片一并清没
+        if (v.layer.contents && SVBSubtreeHasContent(v, 0)) v.layer.contents = NULL;
+        for (CALayer *sl in v.layer.sublayers) {
+            if ([sl isKindOfClass:[CAShapeLayer class]]) {
+                CAShapeLayer *sh = (CAShapeLayer *)sl;
+                if (sh.fillColor) sh.fillColor = NULL;
+                if (sh.strokeColor) sh.strokeColor = NULL;
+            }
+        }
+    } @catch (NSException *e) {}
+}
 
 #pragma mark - 信息 App Hook
 
@@ -680,27 +715,28 @@ static char SVBDetectedCtxKey;
 }
 %end
 
-// 消息气泡本体: 系统每次给气泡上色都改成透明 (滚动复用/新消息即时生效)
+// 消息气泡本体: 涂料全清 (底色/阴影/自绘图层/形状图层), 滚动复用/新消息即时生效
 // 注: CKBalloonView 只有前向声明, 属性一律经由 UIView* 访问
 %hook CKBalloonView
 - (void)setBackgroundColor:(UIColor *)color {
     %orig;
-    // 先让系统把色赋上, 再覆盖成透明; color 已是透明时不再赋值, 避免递归
+    // 先让系统把色赋上, 再清掉; color 已是透明时不再赋值, 避免递归
     UIView *v = (UIView *)self;
     if (SVBBubbleSweepActive() && color && ![color isEqual:[UIColor clearColor]])
-        v.backgroundColor = [UIColor clearColor];
+        SVBStripBalloonPaint(v);
+}
+// 气泡底(含尾巴)若走 drawRect 自绘: 直接跳过绘制, 文字在独立子视图不受影响
+- (void)drawRect:(CGRect)rect {
+    if (SVBBubbleSweepActive()) return;
+    %orig;
 }
 - (void)didMoveToSuperview {
     %orig;
-    if (!SVBBubbleSweepActive()) return;
-    @try {
-        UIView *v = (UIView *)self;
-        if (v.backgroundColor && ![v.backgroundColor isEqual:[UIColor clearColor]])
-            v.backgroundColor = [UIColor clearColor];
-        if (v.layer.backgroundColor &&
-            !CGColorEqualToColor(v.layer.backgroundColor, [UIColor clearColor].CGColor))
-            v.layer.backgroundColor = NULL;
-    } @catch (NSException *e) {}
+    if (SVBBubbleSweepActive()) SVBStripBalloonPaint((UIView *)self);
+}
+- (void)layoutSubviews {
+    %orig;
+    if (SVBBubbleSweepActive()) SVBStripBalloonPaint((UIView *)self);
 }
 %end
 
