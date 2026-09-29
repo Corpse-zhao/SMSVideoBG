@@ -312,4 +312,51 @@ static NSString *KGPref(NSString *key, NSString *fallback) {
     });
 }
 
+// v1.4.0: 追加作废条目 (拉远端现名单合并后整体重签, 不清掉已有条目)
++ (void)revokeAdditionalHashes:(NSArray<NSString *> *)add
+                        secret:(NSString *)secret
+                    completion:(void (^)(BOOL, NSString *))done {
+    NSString *tok = [self token];
+    if (!tok.length) { done(NO, @"未配置 GitHub Token，无法推送"); return; }
+    if (!secret.length) { done(NO, @"签名密钥为空"); return; }
+
+    NSMutableArray *adds = [NSMutableArray array];
+    for (NSString *h in add) {
+        NSString *u = [h uppercaseString];
+        if (u.length == 16 && ![adds containsObject:u]) [adds addObject:u];
+    }
+    if (!adds.count) { done(NO, @"没有要作废的条目"); return; }
+
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        // 拉远端现名单 (任一源 200 即用; 404 = 空名单)
+        NSArray *current = nil;
+        NSString *err = nil;
+        NSArray *urls = [KGRevokeClient fetchURLs];
+        for (NSUInteger i = 0; i < urls.count; i++) {
+            NSString *accept = (i == 0) ? @"application/vnd.github.raw" : nil;
+            NSDictionary *r = [KGRevokeClient syncRequest:@"GET" url:urls[i]
+                                                    token:(i == 0 ? tok : nil)
+                                                     body:nil accept:accept];
+            NSInteger st = [r[@"status"] integerValue];
+            if (st == 200) {
+                NSArray *parsed = KGRevokeParseJSON(r[@"data"], secret);
+                if (parsed) { current = parsed; break; }
+                err = @"远端名单验签失败（密钥不一致 / 文件被改过）";
+                continue;
+            }
+            if (st == 404) { current = @[]; break; }
+            err = [KGRevokeClient errorTextForStatus:st data:r[@"data"]];
+        }
+        if (!current && err) {
+            dispatch_async(dispatch_get_main_queue(), ^{ done(NO, err); });
+            return;
+        }
+
+        NSMutableArray *merged = [current ?: @[] mutableCopy];
+        for (NSString *u in adds) if (![merged containsObject:u]) [merged addObject:u];
+
+        [KGRevokeClient pushHashes:merged secret:secret completion:done];
+    });
+}
+
 @end

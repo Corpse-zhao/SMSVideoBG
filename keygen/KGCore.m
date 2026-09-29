@@ -338,6 +338,25 @@ NSString *KGBuildCode(NSString *secret, NSString *device, BOOL universal,
         if (error) *error = @"签名密钥为空, 请先在下方设置";
         return nil;
     }
+    if (!forever && days <= 0) {
+        if (error) *error = @"有效期天数需为正整数, 或打开「永久有效」";
+        return nil;
+    }
+    uint32_t dayIndex = forever ? KG_NO_EXPIRE : KGDayIndexFromNow(days);
+    return KGBuildCodeWithDayIndex(secret, device, universal, dayIndex, expiryText, error);
+}
+
+// v1.4.0: 按绝对到期天数索引签发 (dayIndex = KG_NO_EXPIRE 即永久)
+NSString *KGBuildCodeWithDayIndex(NSString *secret, NSString *device, BOOL universal,
+                                  uint32_t dayIndex,
+                                  NSString **expiryText, NSString **error) {
+    if (expiryText) *expiryText = nil;
+    if (error) *error = nil;
+
+    if (secret.length == 0) {
+        if (error) *error = @"签名密钥为空, 请先在下方设置";
+        return nil;
+    }
 
     uint8_t dev[5] = {0};
     if (!universal) {
@@ -349,16 +368,10 @@ NSString *KGBuildCode(NSString *secret, NSString *device, BOOL universal,
         memcpy(dev, d.bytes, 5);
     }
 
-    uint32_t expDays;
-    if (forever) {
-        expDays = KG_NO_EXPIRE;
+    uint32_t expDays = dayIndex;
+    if (expDays == KG_NO_EXPIRE) {
         if (expiryText) *expiryText = @"永久";
     } else {
-        if (days <= 0) {
-            if (error) *error = @"有效期天数需为正整数, 或打开「永久有效」";
-            return nil;
-        }
-        expDays = KGDayIndexFromNow(days);
         if (expDays == 0) {
             if (error) *error = @"到期时间超出可表示范围";
             return nil;

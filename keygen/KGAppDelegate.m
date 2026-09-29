@@ -504,6 +504,14 @@ static UITextField *KGField(NSString *placeholder, CGFloat fontSize, BOOL digits
     [reg addTarget:self action:@selector(registerReceiptTapped) forControlEvents:UIControlEventTouchUpInside];
     [stack addArrangedSubview:reg];
 
+    // v1.4.0: 全员强制升级 —— 台账所有客户旧码作废, 新码走续签通道自动送达
+    UIButton *fu = KGButton(@"⚠️ 全员强制升级（老版本客户全部丢授权）",
+                            [UIColor systemOrangeColor], UIColor.whiteColor, 40);
+    fu.titleLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightSemibold];
+    fu.layer.cornerRadius = 12;
+    [fu addTarget:self action:@selector(forceUpgradeAllTapped) forControlEvents:UIControlEventTouchUpInside];
+    [stack addArrangedSubview:fu];
+
     _ledgerStatusLabel = KGLabel(@"", 12.5, UIFontWeightMedium, [UIColor secondaryLabelColor]);
     [stack addArrangedSubview:_ledgerStatusLabel];
 
@@ -514,8 +522,9 @@ static UITextField *KGField(NSString *placeholder, CGFloat fontSize, BOOL digits
 
     [stack addArrangedSubview:KGLabel(
         @"客户操作：控制 App → 授权 → 授权凭证 → 复制后发给你。"
-        @"粘进来点登记，台账会记下设备码、激活时间、到期日。点某一行可以改备注 / 续签 / 删除。"
-        @"v1.3.0 续签直达：续签后新码自动送达对方设备（插件联网 30 分钟内自动换新），客户无需重新输入激活码。",
+        @"粘进来点登记，台账会记下设备码、激活时间、到期日。点某一行可以改备注 / 续签 / 强制升级 / 删除。"
+        @"v1.3.0 续签直达：续签后新码自动送达对方设备（插件联网 30 分钟内自动换新），客户无需重新输入激活码。"
+        @"v1.4.0 强制升级：把旧码作废 + 新码直达 —— 装老版本（9.9.13 及更早）的客户直接丢授权，装新版的不受影响，逼客户升级。",
         12.5, UIFontWeightRegular, [UIColor tertiaryLabelColor])];
     return card;
 }
@@ -640,6 +649,9 @@ static UITextField *KGField(NSString *placeholder, CGFloat fontSize, BOOL digits
                                           handler:^(UIAlertAction *a) { [w editLedgerNote:i]; }]];
     [ac addAction:[UIAlertAction actionWithTitle:@"续签（签新码并复制）" style:UIAlertActionStyleDefault
                                           handler:^(UIAlertAction *a) { [w renewLedger:i]; }]];
+    [ac addAction:[UIAlertAction actionWithTitle:@"强制升级（作废旧码·对方须装新版）"
+                                           style:UIAlertActionStyleDefault
+                                          handler:^(UIAlertAction *a) { [w forceUpgradeLedger:i]; }]];
     [ac addAction:[UIAlertAction actionWithTitle:@"复制设备码" style:UIAlertActionStyleDefault
                                           handler:^(UIAlertAction *a) {
         [w ledgerCopy:[d objectForKey:@"device"] label:@"设备码"]; }]];
@@ -773,6 +785,151 @@ static UITextField *KGField(NSString *placeholder, CGFloat fontSize, BOOL digits
         }];
     }]];
     [self presentViewController:ac animated:YES completion:nil];
+}
+
+#pragma mark 强制升级 (v1.4.0)
+
+// 原理: 老版本插件 (≤9.9.13) 只认离线签名 + 远程作废名单, 没有续签通道。
+// 把客户旧码加进作废名单 -> 老版本直接「已作废」;
+// 同时把 {旧码: 新码(原有效期)} 推进续签表 -> 9.9.14+ 插件拉到后先自动换新码
+// 再做作废判定, 所以新版本完全不受影响 —— 即「不升级就丢授权」。
+
+// 单个客户: 原有效期重签 + 送达 + 作废旧码
+- (void)forceUpgradeLedger:(NSInteger)i {
+    if (i < 0 || i >= self.ledger.count) return;
+    NSDictionary *d = self.ledger[i];
+    NSString *oldCode = [d objectForKey:@"code"];
+    NSString *devRaw = [d objectForKey:@"deviceRaw"];
+    if (!devRaw.length) devRaw = [[d objectForKey:@"device"] stringByReplacingOccurrencesOfString:@"-" withString:@""];
+    if (oldCode.length != 24 || devRaw.length != 8) {
+        _ledgerStatusLabel.text = @"⚠️ 这条登记缺旧码或设备码, 无法强制升级 (让对方重发一次授权凭证)";
+        _ledgerStatusLabel.textColor = [UIColor systemOrangeColor];
+        return;
+    }
+
+    UIAlertController *ac = [UIAlertController
+        alertControllerWithTitle:@"强制升级"
+                         message:[NSString stringWithFormat:@"%@\n\n做两件事:\n① 旧码加入远程作废名单 —— 对方装的老版本 (9.9.13 及更早) 30 分钟内直接显示「已作废」;\n② 按原有效期签新码并推进续签表 —— 对方装了 9.9.14+ 的话会自动换新码, 授权不受影响。\n\n等于告诉客户: 想继续用, 请升级。",
+                                  [d objectForKey:@"note"] ?: ([d objectForKey:@"device"] ?: @"-")]
+                  preferredStyle:UIAlertControllerStyleAlert];
+    __weak typeof(self) w = self;
+    [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    [ac addAction:[UIAlertAction actionWithTitle:@"执行" style:UIAlertActionStyleDestructive
+                                          handler:^(UIAlertAction *a) { [w forceUpgradeApply:@[i] title:@"该客户"]; }]];
+    [self presentViewController:ac animated:YES completion:nil];
+}
+
+- (void)forceUpgradeAllTapped {
+    if (!self.ledger.count) {
+        _ledgerStatusLabel.text = @"⚠️ 台账里还没有客户";
+        _ledgerStatusLabel.textColor = [UIColor systemOrangeColor];
+        return;
+    }
+    UIAlertController *ac = [UIAlertController
+        alertControllerWithTitle:@"全员强制升级"
+                         message:[NSString stringWithFormat:@"对台账里的全部 %lu 位客户执行:\n\n① 旧码全部加入远程作废名单 —— 装老版本 (9.9.13 及更早) 的 30 分钟内直接「已作废」;\n② 按各自原有效期重签新码并推进续签表 —— 装了 9.9.14+ 的自动换新码, 授权不受影响。\n\n请确认客户都已拿到新版 deb 后再执行。",
+                                  (unsigned long)self.ledger.count]
+                  preferredStyle:UIAlertControllerStyleAlert];
+    __weak typeof(self) w = self;
+    [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    [ac addAction:[UIAlertAction actionWithTitle:@"全员执行" style:UIAlertActionStyleDestructive
+                                          handler:^(UIAlertAction *a) {
+        NSMutableArray *idx = [NSMutableArray array];
+        for (NSInteger k = 0; k < (NSInteger)w.ledger.count; k++) [idx addObject:@(k)];
+        [w forceUpgradeApply:idx title:@"全员"];
+    }]];
+    [self presentViewController:ac animated:YES completion:nil];
+}
+
+// 批量执行: 重签(保有效期) -> 更新台账 -> 推续签表 -> 成功后把旧码追加进作废名单
+- (void)forceUpgradeApply:(NSArray<NSNumber *> *)indexes title:(NSString *)title {
+    NSString *secret = _secretField.text.length ? _secretField.text : [self currentSecret];
+    NSMutableDictionary<NSString *, NSString *> *renewMap = [NSMutableDictionary dictionary];
+    NSMutableArray<NSString *> *oldHashes = [NSMutableArray array];
+    NSMutableArray<NSDictionary *> *updates = [NSMutableArray array];   // (idx, 新码, exp, forever, daysLeft)
+    NSInteger skipped = 0;
+
+    for (NSNumber *n in indexes) {
+        NSInteger i = [n integerValue];
+        if (i < 0 || i >= (NSInteger)self.ledger.count) continue;
+        NSDictionary *d = self.ledger[i];
+        NSString *oldCode = [d objectForKey:@"code"];
+        NSString *devRaw = [d objectForKey:@"deviceRaw"];
+        if (!devRaw.length) devRaw = [[d objectForKey:@"device"] stringByReplacingOccurrencesOfString:@"-" withString:@""];
+        NSDictionary *dec = KGDecodeCode(oldCode);
+        if (oldCode.length != 24 || devRaw.length != 8 || !dec) { skipped++; continue; }
+
+        uint32_t dayIdx = (uint32_t)[[dec objectForKey:@"dayIndex"] unsignedIntValue];
+        NSString *exp = nil, *err = nil;
+        NSString *newCode = KGBuildCodeWithDayIndex(secret, devRaw, NO, dayIdx, &exp, &err);
+        if (!newCode.length) { skipped++; continue; }
+
+        NSString *oldHash = KGRevokeHashForCode(oldCode);
+        if (oldHash.length == 16) {
+            [renewMap setObject:KGCodeNormalize(newCode) forKey:oldHash];
+            if (![oldHashes containsObject:oldHash]) [oldHashes addObject:oldHash];
+        }
+        [updates addObject:@{@"idx": @(i), @"code": newCode, @"exp": exp ?: @"-",
+                             @"forever": [dec objectForKey:@"forever"] ?: @NO,
+                             @"daysLeft": [dec objectForKey:@"daysLeft"] ?: @(-1)}];
+    }
+
+    if (!updates.count) {
+        _ledgerStatusLabel.text = @"⚠️ 没有可强制升级的登记 (缺旧码/设备码)";
+        _ledgerStatusLabel.textColor = [UIColor systemOrangeColor];
+        return;
+    }
+
+    // 先更新台账 (本地), 再推续签表, 成功后才作废旧码 —— 顺序保证新版本客户不掉授权
+    for (NSDictionary *u in updates) {
+        NSInteger i = [[u objectForKey:@"idx"] integerValue];
+        NSMutableDictionary *m = [self.ledger[i] mutableCopy];
+        m[@"code"]      = [u objectForKey:@"code"];
+        m[@"exp"]       = [u objectForKey:@"exp"];
+        m[@"forever"]   = [u objectForKey:@"forever"];
+        m[@"daysLeft"]  = [u objectForKey:@"daysLeft"];
+        m[@"renewedAt"] = @([[NSDate date] timeIntervalSince1970]);
+        m[@"forceUpgradedAt"] = @([[NSDate date] timeIntervalSince1970]);
+        [self.ledger replaceObjectAtIndex:i withObject:m];
+        [self saveHistoryCode:[u objectForKey:@"code"]
+                       device:[self.ledger[i] objectForKey:@"device"]
+                     universal:NO
+                           exp:[u objectForKey:@"exp"]];
+    }
+    [self saveLedger];
+    [self refreshLedger];
+    _ledgerStatusLabel.text = [NSString stringWithFormat:
+        @"⏳ %@强制升级: 已重签 %lu 位客户 (跳过 %ld), 正在送达…",
+        title, (unsigned long)updates.count, (long)skipped];
+    _ledgerStatusLabel.textColor = [UIColor secondaryLabelColor];
+
+    __weak typeof(self) w = self;
+    [KGRevokeClient pushRenewals:renewMap secret:secret completion:^(BOOL ok, NSString *error) {
+        if (!w) return;
+        if (!ok) {
+            w.ledgerStatusLabel.text =
+                [NSString stringWithFormat:@"⚠️ 新码已签并复制在台账里, 但送达失败（%@）—— 不要作废旧码, 客户暂不受影响", error ?: @"未知错误"];
+            w.ledgerStatusLabel.textColor = [UIColor systemOrangeColor];
+            return;
+        }
+        // 续签表已送达, 现在可以安全作废旧码 (老版本失效, 新版本已换新)
+        [KGRevokeClient revokeAdditionalHashes:oldHashes secret:secret completion:^(BOOL ok2, NSString *error2) {
+            if (!w) return;
+            if (ok2) {
+                w.ledgerStatusLabel.text =
+                    [NSString stringWithFormat:
+                     @"✓ %@强制升级完成: %lu 位客户已重签并送达, 旧码已作废 —— 老版本 30 分钟内丢授权, 9.9.14+ 自动换新不受影响",
+                     title, (unsigned long)updates.count];
+                w.ledgerStatusLabel.textColor = [UIColor systemGreenColor];
+            } else {
+                w.ledgerStatusLabel.text =
+                    [NSString stringWithFormat:
+                     @"⚠️ 新码已送达, 但旧码作废失败（%@）—— 老版本暂时还能用, 可稍后重试强制升级",
+                     error2 ?: @"未知错误"];
+                w.ledgerStatusLabel.textColor = [UIColor systemOrangeColor];
+            }
+        }];
+    }];
 }
 
 - (void)registerReceiptTapped {

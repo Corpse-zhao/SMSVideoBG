@@ -53,6 +53,12 @@ NSString *KGBuildCode(NSString *secret, NSString *device, BOOL universal,
                       BOOL forever, NSInteger days,
                       NSString **expiryText, NSString **error);
 
+// v1.4.0: 按绝对到期天数索引签发 (dayIndex = KG_NO_EXPIRE 即永久)。
+// 用于强制升级/续签时原样保留客户的剩余有效期。
+NSString *KGBuildCodeWithDayIndex(NSString *secret, NSString *device, BOOL universal,
+                                  uint32_t dayIndex,
+                                  NSString **expiryText, NSString **error);
+
 // 校验一枚激活码 (本地自检 / 验客户回传的码), 返回人话结论
 NSString *KGVerifyCode(NSString *secret, NSString *code, NSString *device);
 
