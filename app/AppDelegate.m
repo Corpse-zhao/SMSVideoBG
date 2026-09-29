@@ -150,15 +150,12 @@ static void SVBJumpToMediaPath(UIViewController *vc, NSString *path) {
     [vc presentViewController:ac animated:YES completion:nil];
 }
 
-#pragma mark - v10.4.0 诊断报告开关式
+#pragma mark - v10.4.0e 诊断报告开关式 (记录器)
 
 // 报告文件夹与「板栗仁」文件夹同级: /var/mobile/信息视频背景素材/看不懂的报告/
-// 里面放 诊断报告.txt (以后有问题要加别的报告也放这个文件夹)
+// 开关打开 = 开始记录; 关闭 = 停止并把过程日志存成「文件名带生成时间」的正式文件
 static NSString *SVBDiagnoseReportDir(void) {
     return [SVB_MEDIA_FRIENDLY_PARENT stringByAppendingPathComponent:@"看不懂的报告"];
-}
-static NSString *SVBDiagnoseReportPath(void) {
-    return [SVBDiagnoseReportDir() stringByAppendingPathComponent:@"诊断报告.txt"];
 }
 
 // 开关状态存配置 diagnose_report
@@ -167,29 +164,105 @@ static BOOL SVBDiagnoseReportEnabled(void) {
     return [v respondsToSelector:@selector(boolValue)] ? [v boolValue] : NO;
 }
 
-// 完整诊断报告文本 (报告页 / 文件共用; 函数体在文件末尾 SVBDiagnosticsController 段之前)
+// 完整诊断报告文本 (快照内容; 函数体在文件末尾 SVBDiagnosticsController 段之前)
 static NSString *SVBGenerateDiagnoseReport(void);
 
-// 按开关生成 / 删除报告文件夹 (App 启动与切换开关时各调一次)
-static void SVBRefreshDiagnoseReport(void) {
+// 时间戳: 文件名/快照头用
+static NSString *SVBDiagStamp(NSDate *d) {
+    static NSDateFormatter *df = nil;
+    if (!df) {
+        df = [[NSDateFormatter alloc] init];
+        df.dateFormat = @"yyyyMMdd-HHmmss";
+        df.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
+    }
+    return [df stringFromDate:d ?: [NSDate date]] ?: @"unknown";
+}
+
+// 进行中的日志 (点前缀隐藏, 关闭时改名成正式文件)
+static NSString *SVBDiagWorkingPath(void) {
+    return [SVBDiagnoseReportDir() stringByAppendingPathComponent:@".svb_report_session.log"];
+}
+
+// 追加一份快照到进行中的日志
+static void SVBDiagAppendSnapshot(NSString *reason) {
     @try {
         NSFileManager *fm = [NSFileManager defaultManager];
         NSString *dir = SVBDiagnoseReportDir();
-        NSString *p = SVBDiagnoseReportPath();
-        if (SVBDiagnoseReportEnabled()) {
-            SVBEnsureFriendlyMediaPath(NULL);   // 保证父目录存在
-            NSString *txt = SVBGenerateDiagnoseReport();
-            if (txt.length) {
-                [fm createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
-                [fm createFileAtPath:p
-                            contents:[txt dataUsingEncoding:NSUTF8StringEncoding]
-                           attributes:nil];
-            }
-        } else if ([fm fileExistsAtPath:dir]) {
-            // 关闭时整个文件夹删掉 (里面只有我们自己写的报告, 不会误删用户文件)
-            [fm removeItemAtPath:dir error:nil];
+        [fm createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+        NSMutableString *s = [NSMutableString string];
+        [s appendFormat:@"\n---- 快照 %@ (%@) ----\n", SVBDiagStamp(nil), reason ?: @"定时"];
+        [s appendString:SVBGenerateDiagnoseReport() ?: @""];
+        NSString *p = SVBDiagWorkingPath();
+        NSFileHandle *h = [fm fileHandleForWritingAtPath:p];
+        if (!h) {
+            NSString *head = [NSString stringWithFormat:
+                @"==== 诊断记录开始 %@ ====\n", SVBDiagStamp(nil)];
+            [fm createFileAtPath:p
+                          contents:[head dataUsingEncoding:NSUTF8StringEncoding]
+                         attributes:nil];
+            h = [fm fileHandleForWritingAtPath:p];
+        }
+        if (h) {
+            [h seekToEndOfFile];
+            [h writeData:[s dataUsingEncoding:NSUTF8StringEncoding]];
+            [h closeFile];
         }
     } @catch (NSException *e) {}
+}
+
+// 关闭开关: 进行中的日志改名成带生成时间的正式文件
+static void SVBDiagFinalize(void) {
+    @try {
+        NSFileManager *fm = [NSFileManager defaultManager];
+        NSString *p = SVBDiagWorkingPath();
+        if (![fm fileExistsAtPath:p]) return;
+        NSFileHandle *h = [fm fileHandleForWritingAtPath:p];
+        if (h) {
+            [h seekToEndOfFile];
+            NSData *tail = [[NSString stringWithFormat:
+                @"==== 记录结束 %@ ====\n", SVBDiagStamp(nil)]
+                dataUsingEncoding:NSUTF8StringEncoding];
+            [h writeData:tail];
+            [h closeFile];
+        }
+        NSString *final = [SVBDiagnoseReportDir() stringByAppendingPathComponent:
+            [NSString stringWithFormat:@"诊断报告_生成时间%@.txt", SVBDiagStamp(nil)]];
+        if ([fm fileExistsAtPath:final]) [fm removeItemAtPath:final error:nil];
+        [fm moveItemAtPath:p toPath:final error:nil];
+    } @catch (NSException *e) {}
+}
+
+// 记录期间定时快照 (60 秒一份; App 被杀后下次启动开关还开着就接着记)
+static NSTimer *sSVBDiagTimer = nil;
+
+static void SVBDiagStartTimer(void) {
+    if (sSVBDiagTimer) return;
+    sSVBDiagTimer = [NSTimer timerWithTimeInterval:60.0 repeats:YES block:^(NSTimer *t) {
+        if (!SVBDiagnoseReportEnabled()) {
+            [t invalidate];
+            sSVBDiagTimer = nil;
+            return;
+        }
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+            SVBDiagAppendSnapshot(@"定时");
+        });
+    }];
+    [[NSRunLoop mainRunLoop] addTimer:sSVBDiagTimer forMode:NSRunLoopCommonModes];
+}
+
+static void SVBDiagStopTimer(void) {
+    if (sSVBDiagTimer) {
+        [sSVBDiagTimer invalidate];
+        sSVBDiagTimer = nil;
+    }
+}
+
+// App 启动: 开关开着就接着记 (补一条「App 启动」快照), 关着不动旧报告
+static void SVBDiagnoseReportResume(void) {
+    if (!SVBDiagnoseReportEnabled()) return;
+    SVBEnsureFriendlyMediaPath(NULL);
+    SVBDiagAppendSnapshot(@"控制App 启动");
+    SVBDiagStartTimer();
 }
 
 #pragma mark - AppDelegate
@@ -207,8 +280,8 @@ static void SVBRefreshDiagnoseReport(void) {
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
             SVBCleanupHousekeeping();
         });
-        // v10.4.0: 诊断报告开关 —— 开着就刷新「看不懂的报告」, 关着就删掉旧文件
-        SVBRefreshDiagnoseReport();
+        // v10.4.0e: 诊断报告开关 —— 开着就接着记录过程日志, 关着不动旧报告
+        SVBDiagnoseReportResume();
     });
     self.window = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
     UINavigationController *nav = [[UINavigationController alloc]
@@ -879,8 +952,9 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
                 @"所有界面的素材都放在这一个文件夹里（点「素材路径」可直接跳到 Filza）：\n%@\n\n"
                 "不再分界面子文件夹 —— 把视频直接丢进去，主页面/所有信息/对话详情等每个界面都能选它当背景，"
                 "各界面可单独选不同的视频、单独调效果。\n"
-                "「诊断报告」开关：有问题时打开，会把完整报告生成到素材文件夹旁的「看不懂的报告」文件夹里（诊断报告.txt），"
-                "没问题就保持关闭（关闭时自动删除该文件夹）。点「诊断报告」这一行可当场查看。\n"
+                "「诊断报告」开关：有问题时打开 —— 打开后开始记录，每分钟记一次快照，"
+                "关闭开关时把从打开到关闭这期间的日志存进素材文件夹旁的「看不懂的报告」文件夹，"
+                "文件名带生成时间（如 诊断报告_生成时间20260929-211953.txt）；没问题就保持关闭。\n"
                 "各界面音量默认关闭。设置即时生效，无需注销。",
                 SVBMediaFriendlyRoot()];
     }
@@ -1076,7 +1150,7 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
         }
         BOOL on = SVBDiagnoseReportEnabled();
         dc.textLabel.text = @"诊断报告";
-        dc.detailTextLabel.text = on ? @"已生成 · 看不懂的报告" : @"关闭";
+        dc.detailTextLabel.text = on ? @"记录中 · 看不懂的报告" : @"关闭";
         dc.detailTextLabel.textColor = on ? SVBAccent() : [UIColor secondaryLabelColor];
         dc.detailTextLabel.lineBreakMode = NSLineBreakByTruncatingTail;
         dc.imageView.image = SVBIconForKey(@"__diag");
@@ -1101,11 +1175,19 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
     [mgr postChangeNotification];
 }
 
-// v10.4.0: 诊断报告开关 —— 开=立即生成「看不懂的报告」文件; 关=删除文件
+// v10.4.0e: 诊断报告开关 —— 开=开始记录(打开到关闭期间的日志); 关=停止并保存成带生成时间的文件
 - (void)diagnoseToggled:(UISwitch *)sw {
-    [[SVBManager shared] setConfigValue:@(sw.on) forKey:@"diagnose_report"];
+    BOOL on = sw.on;
+    [[SVBManager shared] setConfigValue:@(on) forKey:@"diagnose_report"];
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-        SVBRefreshDiagnoseReport();
+        SVBEnsureFriendlyMediaPath(NULL);
+        if (on) {
+            SVBDiagAppendSnapshot(@"开关打开");
+            SVBDiagStartTimer();
+        } else {
+            SVBDiagStopTimer();
+            SVBDiagFinalize();
+        }
     });
     [self.tableView reloadRowsAtIndexPaths:@[[NSIndexPath indexPathForRow:2 inSection:3]]
                           withRowAnimation:UITableViewRowAnimationNone];
@@ -1198,10 +1280,7 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
             SVBJumpToMediaPath(self, SVBMediaFriendlyRoot());
             return;
         }
-        if (indexPath.row == 2) {
-            [self.navigationController pushViewController:[[SVBDiagnosticsController alloc] init] animated:YES];
-            return;
-        }
+        // v10.4.0e: 诊断报告行点击不再跳查看页, 只留开关 (报告直接看文件)
         if (indexPath.row == 3) {
             [self.navigationController pushViewController:[[SVBAppIdentityController alloc] init] animated:YES];
             return;
