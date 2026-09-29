@@ -1334,6 +1334,9 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
         SVBApplyCardStyle(c, 0, rows);
         return c;
     }
+    // v10.4.0b: 空列表时行号整体后移 1 (第 0 行是占位提示), 否则「从相册导入」
+    // 的行号判断 (row == videos.count) 永远不成立, 那一行错画成 Filza 跳转
+    NSInteger mediaBase = videos.count ? (NSInteger)videos.count : 1;
     if (indexPath.row < (NSInteger)videos.count) {
         // v1.8.4: 显示素材本名 (用户会自己重命名; 隐藏扩展名, 超长中间截断)
         NSString *show = videos[indexPath.row].stringByDeletingPathExtension;
@@ -1350,7 +1353,7 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
         SVBApplyCardStyle(c, indexPath.row, rows);
         return c;
     }
-    if (indexPath.row == (NSInteger)videos.count) {
+    if (indexPath.row == mediaBase) {
         c.textLabel.text = @"从相册导入视频素材";
         c.textLabel.textColor = SVBAccent();
         c.textLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightMedium];
@@ -1378,9 +1381,11 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
     if (indexPath.section != 1) return;
     NSArray<NSString *> *videos = [[SVBManager shared] videosForContext:self.contextKey];
     NSInteger n = (NSInteger)videos.count;
+    // v10.4.0b: 空列表时行号后移 1 (与 cellForRowAtIndexPath 的 mediaBase 对齐)
+    NSInteger mediaBase = n ? n : 1;
     // v10.3.0: 最后一行 = 跳转素材路径 (Filza)
-    if (indexPath.row > n) { [self openFolderInFilza]; return; }
-    if (videos.count == 0 || indexPath.row >= n) {
+    if (indexPath.row > mediaBase) { [self openFolderInFilza]; return; }
+    if (indexPath.row == mediaBase || n == 0) {
         [self importFromLibrary];
         return;
     }
@@ -1416,9 +1421,10 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
 - (void)previewVideoNamed:(NSString *)name {
     NSString *path = nil;
     NSFileManager *fm = [NSFileManager defaultManager];
-    for (NSString *root in [[SVBManager shared] mediaRoots]) {
-        NSString *p = [[root stringByAppendingPathComponent:self.contextKey]
-                       stringByAppendingPathComponent:name];
+    // v10.4.0b: 素材在根「根部」(v10.4.0 摊平), 旧版子目录也兼容找一下
+    for (NSString *dir in [[SVBManager shared] directoriesForContext:self.contextKey
+                                                 includeRootFallback:YES]) {
+        NSString *p = [dir stringByAppendingPathComponent:name];
         if ([fm fileExistsAtPath:p]) { path = p; break; }
     }
     if (!path.length) {
