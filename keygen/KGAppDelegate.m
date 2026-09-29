@@ -815,7 +815,7 @@ static UITextField *KGField(NSString *placeholder, CGFloat fontSize, BOOL digits
     __weak typeof(self) w = self;
     [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
     [ac addAction:[UIAlertAction actionWithTitle:@"执行" style:UIAlertActionStyleDestructive
-                                          handler:^(UIAlertAction *a) { [w forceUpgradeApply:@[i] title:@"该客户"]; }]];
+                                          handler:^(UIAlertAction *a) { [w forceUpgradeApply:@[@(i)] title:@"该客户"]; }]];
     [self presentViewController:ac animated:YES completion:nil];
 }
 
