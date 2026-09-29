@@ -514,14 +514,21 @@ static void SVBMapBalloonText(UIView *balloon) {
         lb.tag = 0x53564242;               // 'SVBB'
         lb.numberOfLines = 0;
         lb.lineBreakMode = NSLineBreakByWordWrapping;
-        lb.textColor = [UIColor whiteColor];
-        lb.shadowColor = [UIColor colorWithWhite:0 alpha:0.75];
+        // 跟随系统深浅色: 深色模式白字 / 浅色模式黑字 (动态 provider 自动切换)
+        lb.textColor = [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *t) {
+            return (t.userInterfaceStyle == UIUserInterfaceStyleDark)
+                ? [UIColor whiteColor] : [UIColor blackColor];
+        }];
         lb.shadowOffset = CGSizeMake(0, 1);
         lb.font = [UIFont systemFontOfSize:17];
         [balloon.superview addSubview:lb];
         objc_setAssociatedObject(balloon, &SVBMappedLabelKey, lb,
                                  OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
+    // 影子跟模式走: 深色模式黑影衬白字 / 浅色模式白影衬黑字 (trait 变化后随布局刷新)
+    BOOL dark = (balloon.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark);
+    lb.shadowColor = dark ? [UIColor colorWithWhite:0 alpha:0.75]
+                          : [UIColor colorWithWhite:1 alpha:0.9];
     // 同步内容 / 字号 / 位置 (hidden 视图仍参与布局, frame 有效)
     NSString *text = tv.text ?: @"";
     if (![lb.text isEqualToString:text]) lb.text = text;
@@ -798,9 +805,28 @@ static char SVBDetectedCtxKey;
 }
 %end
 
-// 文字类气泡: 整体藏掉 + 文字映射成自己的 UILabel (白字黑影)。
+// 文字类气泡: 整体藏掉 + 文字映射成自己的 UILabel (深色白字/浅色黑字)。
+// didMoveToSuperview = 进层级就藏 (赶在首帧绘制前, 消除滚动/新消息时气泡闪一下);
 // 布局/复用都会重新映射, 滚动复用不串内容。
 %hook CKTextBalloonView
+- (void)didMoveToSuperview {
+    %orig;
+    if (SVBBubbleSweepActive()) {
+        // 此时文字可能还没赋值: 先把气泡藏住 (防闪), 文字在随后的 layoutSubviews 补映射
+        @try {
+            UIView *v = (UIView *)self;
+            if (!v.hidden && v.superview) {
+                if (!SVBHiddenBalloons) SVBHiddenBalloons = [NSMutableArray new];
+                objc_setAssociatedObject(v, &SVBBalloonAlphaKey, @(v.alpha),
+                                         OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                objc_setAssociatedObject(v, &SVBBalloonHiddenKey, @(v.hidden),
+                                         OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                [SVBHiddenBalloons addObject:v];
+                v.hidden = YES;
+            }
+        } @catch (NSException *e) {}
+    }
+}
 - (void)layoutSubviews {
     %orig;
     if (SVBBubbleSweepActive()) {
