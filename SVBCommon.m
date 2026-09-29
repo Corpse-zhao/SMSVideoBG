@@ -2008,6 +2008,63 @@ static void SVBCollectToolbars(UIView *view, NSMutableArray<UIToolbar *> *out_, 
     for (UIView *sub in view.subviews) [self refreshInView:sub];
 }
 
+#pragma mark - v10.4.0f 素材热刷新看门狗
+
+// 换素材不即时生效的死角 (此前只能注销解决):
+//   ① 在 Filza 里直接换/改名/替换视频文件 —— 没有任何通知发出来;
+//   ② 信息App 挂起(后台)期间发的 Darwin 通知可能被系统合并/丢弃;
+//   ③ 同名替换视频内容 —— 播放器按路径缓存, 路径没变就沿用旧播放器。
+// 这里每 2 秒轻检一次: 只在「选中素材路径变了 / 视频文件被同名替换」时才刷新,
+// 平时只是读一次文件属性, 几乎零开销。
+static dispatch_source_t sSVBWatchdog = nil;
+static NSMutableDictionary<NSString *, NSDate *> *sSVBPlayerMtimes = nil;
+
+- (void)startMediaWatchdog {
+    if (sSVBWatchdog) return;
+    sSVBWatchdog = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
+                                          dispatch_get_main_queue());
+    dispatch_source_set_timer(sSVBWatchdog,
+        dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)),
+        (uint64_t)(2 * NSEC_PER_SEC), (uint64_t)(1 * NSEC_PER_SEC));
+    dispatch_source_set_event_handler(sSVBWatchdog, ^{
+        [[SVBManager shared] watchdogTick];
+    });
+    dispatch_resume(sSVBWatchdog);
+}
+
+- (void)watchdogTick {
+    @try {
+        NSFileManager *fm = [NSFileManager defaultManager];
+        if (!sSVBPlayerMtimes) sSVBPlayerMtimes = [NSMutableDictionary dictionary];
+        __block BOOL changed = NO;
+        for (NSString *ctx in self.players.allKeys) {
+            NSString *path = [self activeVideoPathForContext:ctx];
+            if (!path.length) { changed = YES; break; }   // 素材被删/取消选中 -> 刷新(摘背景)
+            if (![self.playerPaths[ctx] isEqualToString:path]) { changed = YES; break; }
+            // 同名替换: 路径没变但文件内容变了 (mtime 变化)
+            NSDictionary *at = [fm attributesOfItemAtPath:path error:nil];
+            NSDate *mt = at[NSFileModificationDate];
+            NSDate *old = sSVBPlayerMtimes[path];
+            if (mt && old && ![mt isEqualToDate:old]) {
+                [self playerForContext:ctx forceRebuild:YES];
+                changed = YES;
+            }
+            if (mt) sSVBPlayerMtimes[path] = mt;
+        }
+        if (changed) {
+            [self refreshVisibleBackgrounds];
+            // 重建后重记各播放器文件的 mtime 基准
+            sSVBPlayerMtimes = [NSMutableDictionary dictionary];
+            for (NSString *ctx in self.players.allKeys) {
+                NSString *path = self.playerPaths[ctx];
+                NSDictionary *at = [fm attributesOfItemAtPath:path error:nil];
+                NSDate *mt = at[NSFileModificationDate];
+                if (path.length && mt) sSVBPlayerMtimes[path] = mt;
+            }
+        }
+    } @catch (NSException *e) {}
+}
+
 // 诊断: 每个类名只记录一次, 供后续版本校准界面识别
 - (void)logClassOnce:(NSString *)name context:(NSString *)ctx {
     if (!name || [self.loggedClasses containsObject:name]) return;

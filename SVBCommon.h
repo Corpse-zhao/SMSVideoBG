@@ -154,6 +154,9 @@ NSArray<NSArray<NSString *> *> *SVBContextDefinitions(void);
 - (void)detachFromViewController:(UIViewController *)vc;   // 页面离开时摘除背景
 - (void)refreshVisibleBackgrounds;
 - (void)postChangeNotification;
+// v10.4.0f: 素材热刷新看门狗 (2秒一检: 选中素材变了/同名文件被替换 -> 立即刷新,
+// 不再依赖 Darwin 通知 —— 通知在宿主挂起/直接改 Filza 文件时到不了)
+- (void)startMediaWatchdog;
 
 #pragma mark - v9.9.11 前后台自愈 (切后台再回前台视频不卡)
 

@@ -978,6 +978,10 @@ static char SVBDetectedCtxKey;
                                                 NULL,
                                                 CFNotificationSuspensionBehaviorDeliverImmediately);
 
+                // v10.4.0f: 素材热刷新看门狗 —— Darwin 通知在宿主挂起/直接改文件时
+                // 到不了, 换素材只能靠注销才生效; 这里 2 秒一检兜底
+                [[SVBManager shared] startMediaWatchdog];
+
                 // v9.9.11: 前后台自愈 —— 后台暂停、回前台重连显示管线并续播
                 // (AVPlayerLayer 的内容会被系统回收, 光 play 不重绘 -> 卡在最后一帧)
                 // 顺带监听音频中断结束 (来电/闹钟后自动续播)
