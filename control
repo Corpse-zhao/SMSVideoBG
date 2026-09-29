@@ -1,9 +1,11 @@
 Package: com.nvb.smsvideobg
 Name: 信息视频背景
-Version: 10.4.0
+Version: 11.0.0
 Architecture: iphoneos-arm64
-Description: FVV
+Description: 信息 + 备忘录视频背景 (双宿主版)
 Maintainer: 板栗仁
 Author: 板栗仁
 Section: Tweaks
 Depends: mobilesubstrate
+Conflicts: com.nvb.notesvideobg
+Replaces: com.nvb.notesvideobg
