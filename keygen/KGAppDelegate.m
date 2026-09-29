@@ -171,6 +171,13 @@ static UITextField *KGField(NSString *placeholder, CGFloat fontSize, BOOL digits
 @property (nonatomic, strong) NSDictionary<NSString *, NSNumber *> *remoteMap;  // 远端名单键
 @property (nonatomic, assign) NSTimeInterval lastSync;
 @property (nonatomic, assign) BOOL pushing;
+
+// v2.1.0 新增方法的前置声明 (定义在本类靠后位置)
+- (void)refreshGiteeStatus;
+- (void)saveGiteeSettings;
+- (void)offlineTicket:(NSInteger)i;
+- (void)pushAllWithCompletion:(void (^)(BOOL ok, NSString *msg))done;
+- (void)pushTapped;
 @end
 
 @implementation KGViewController

@@ -351,6 +351,9 @@ NSString *SVBAuthStateText(SVBAuthState st, NSString *detail) {
 
 #pragma mark - 离线授权串 (v10.1.0)
 
+// 前置声明 (定义在下面的「判定」区; C 里必须先声明再用)
+static BOOL SVBAuthOfflineTicketExp(uint32_t *outExp);
+
 // 只留 base64 合法字符, 并补齐 padding (客户复制时常带空格/换行)
 static NSData *SVBAuthB64Decode(NSString *s) {
     if (!s.length) return nil;
