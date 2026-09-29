@@ -27,3 +27,7 @@
 
 @interface SVBAppIdentityController : UITableViewController
 @end
+
+// v1.9.0 授权页: 设备码 / 输入激活码 / 移除激活
+@interface SVBLicenseController : UITableViewController
+@end

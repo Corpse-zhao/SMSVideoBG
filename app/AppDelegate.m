@@ -1,4 +1,5 @@
 #import "AppDelegate.h"
+#import "SVBLicense.h"
 #import <dlfcn.h>
 #import <objc/runtime.h>
 #import <QuartzCore/QuartzCore.h>
@@ -609,7 +610,7 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
     if (section == 0) return 1;
     if (section == 1) return (NSInteger)_defs.count;
     if (section == 2) return 1; // 注入诊断横幅
-    return 3; // 素材总目录 / 诊断报告 / App名称与图标 (v1.8.3)
+    return 4; // 授权状态 / 素材总目录 / 诊断报告 / App名称与图标 (v1.9.0 加授权)
 }
 
 - (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
@@ -704,14 +705,29 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
         return c;
     }
 
-    // 说明区
+    // 说明区 (v1.9.0: 授权状态提到第一行)
     UITableViewCell *c = [tableView dequeueReusableCellWithIdentifier:basicId];
     if (!c) c = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:basicId];
     if (indexPath.row == 0) {
+        NSString *det = nil;
+        SVBLicenseState st = SVBLicenseCurrentState(&det);
+        BOOL ok = (st == SVBLicenseStateValid);
+        c.textLabel.text = @"授权状态";
+        c.detailTextLabel.text = SVBLicenseStateText(st, det);
+        c.detailTextLabel.textColor = ok ? SVBAccent() : [UIColor systemOrangeColor];
+        c.imageView.image = SVBBadgeIcon(ok ? @"checkmark.seal.fill" : @"lock.fill",
+            ok ? [UIColor colorWithRed:0.20 green:0.78 blue:0.45 alpha:1]
+               : [UIColor colorWithRed:1.00 green:0.58 blue:0.00 alpha:1],
+            ok ? [UIColor colorWithRed:0.35 green:0.85 blue:0.65 alpha:1]
+               : [UIColor colorWithRed:1.00 green:0.42 blue:0.30 alpha:1]);
+        SVBApplyCardStyle(c, 0, 4);
+        return c;
+    }
+    if (indexPath.row == 1) {
         c.textLabel.text = @"素材总目录";
         c.detailTextLabel.text = @"查看/复制路径";
         c.imageView.image = SVBIconForKey(@"__folder");
-    } else if (indexPath.row == 1) {
+    } else if (indexPath.row == 2) {
         c.textLabel.text = @"诊断报告";
         c.detailTextLabel.text = @"排查问题";
         c.imageView.image = SVBIconForKey(@"__diag");
@@ -723,7 +739,7 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
             [UIColor colorWithRed:1.00 green:0.45 blue:0.55 alpha:1]);
     }
     c.detailTextLabel.textColor = SVBAccent();
-    SVBApplyCardStyle(c, indexPath.row, 3);
+    SVBApplyCardStyle(c, indexPath.row, 4);
     return c;
 }
 
@@ -764,11 +780,15 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
         return;
     }
     if (indexPath.section == 3) {
-        if (indexPath.row == 1) {
-            [self.navigationController pushViewController:[[SVBDiagnosticsController alloc] init] animated:YES];
+        if (indexPath.row == 0) {
+            [self.navigationController pushViewController:[[SVBLicenseController alloc] init] animated:YES];
             return;
         }
         if (indexPath.row == 2) {
+            [self.navigationController pushViewController:[[SVBDiagnosticsController alloc] init] animated:YES];
+            return;
+        }
+        if (indexPath.row == 3) {
             [self.navigationController pushViewController:[[SVBAppIdentityController alloc] init] animated:YES];
             return;
         }
@@ -1287,6 +1307,187 @@ static void SVBAppPickImage(UIViewController *host, void (^done)(UIImage *image)
         }
         [wself.tableView reloadData];
     });
+}
+
+- (void)alert:(NSString *)title msg:(NSString *)msg {
+    UIAlertController *ac = [UIAlertController alertControllerWithTitle:title
+                                                               message:msg
+                                                        preferredStyle:UIAlertControllerStyleAlert];
+    [ac addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
+    [self presentViewController:ac animated:YES completion:nil];
+}
+
+@end
+
+#pragma mark - 授权页 (v1.9.0)
+
+@implementation SVBLicenseController {
+    SVBLicenseState _state;
+    NSString *_statusDetail;
+}
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.title = @"授权";
+    self.tableView.backgroundColor = [UIColor systemGroupedBackgroundColor];
+    self.tableView.separatorStyle = UITableViewCellSeparatorStyleNone;
+    [self reloadLicenseState];
+}
+
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    [self reloadLicenseState];
+}
+
+- (void)reloadLicenseState {
+    NSString *det = nil;
+    _state = SVBLicenseCurrentState(&det);
+    _statusDetail = det;
+    [self.tableView reloadData];
+}
+
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView { return 2; }
+
+- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
+    if (section == 0) return 2;                                  // 设备码 / 激活码
+    return (_state == SVBLicenseStateUnlicensed) ? 0 : 1;        // 移除激活
+}
+
+- (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
+    return section == 0 ? @"激活" : nil;
+}
+
+- (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
+    if (section != 0) return nil;
+    return @"把「设备码」发给作者换取激活码，粘贴进来保存即可。激活码与本机绑定，"
+            "换机需要重新获取；到期后重新激活。\n未激活/已过期时，信息 App 里的视频背景不会生效。";
+}
+
+- (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
+    static NSString *cellId = @"svb-license";
+    UITableViewCell *c = [tableView dequeueReusableCellWithIdentifier:cellId];
+    if (!c) c = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:cellId];
+    c.textLabel.textColor = [UIColor labelColor];
+    c.detailTextLabel.font = [UIFont systemFontOfSize:15];
+    c.accessoryType = UITableViewCellAccessoryNone;
+
+    if (indexPath.section == 0 && indexPath.row == 0) {
+        c.textLabel.text = @"设备码";
+        c.detailTextLabel.text = SVBDeviceCodeEnsure() ?: @"获取失败";
+        c.detailTextLabel.font = [UIFont monospacedSystemFontOfSize:16 weight:UIFontWeightSemibold];
+        c.detailTextLabel.textColor = SVBAccent();
+        c.imageView.image = SVBBadgeIcon(@"iphone.gen3",
+            [UIColor colorWithRed:0.25 green:0.55 blue:1.00 alpha:1],
+            [UIColor colorWithRed:0.40 green:0.80 blue:1.00 alpha:1]);
+        SVBApplyCardStyle(c, 0, 2);
+        return c;
+    }
+    if (indexPath.section == 0) {
+        BOOL ok = (_state == SVBLicenseStateValid);
+        c.textLabel.text = ok ? @"激活码" : @"输入激活码";
+        c.detailTextLabel.text = SVBLicenseStateText(_state, _statusDetail);
+        c.detailTextLabel.textColor = ok ? SVBAccent() : [UIColor systemOrangeColor];
+        c.imageView.image = SVBBadgeIcon(ok ? @"key.fill" : @"lock.open.fill",
+            ok ? [UIColor colorWithRed:0.20 green:0.78 blue:0.45 alpha:1]
+               : [UIColor colorWithRed:1.00 green:0.58 blue:0.00 alpha:1],
+            ok ? [UIColor colorWithRed:0.35 green:0.85 blue:0.65 alpha:1]
+               : [UIColor colorWithRed:1.00 green:0.42 blue:0.30 alpha:1]);
+        c.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+        SVBApplyCardStyle(c, 1, 2);
+        return c;
+    }
+
+    c.textLabel.text = @"移除激活";
+    c.textLabel.textColor = [UIColor systemRedColor];
+    c.detailTextLabel.text = nil;
+    c.imageView.image = SVBBadgeIcon(@"trash.fill",
+        [UIColor colorWithRed:0.85 green:0.25 blue:0.28 alpha:1],
+        [UIColor colorWithRed:1.00 green:0.45 blue:0.42 alpha:1]);
+    SVBApplyCardStyle(c, 0, 1);
+    return c;
+}
+
+- (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
+    [tableView deselectRowAtIndexPath:indexPath animated:YES];
+    if (indexPath.section == 0 && indexPath.row == 0) {
+        NSString *dev = SVBDeviceCodeEnsure() ?: @"";
+        if (dev.length) {
+            [UIPasteboard generalPasteboard].string = dev;
+            [self alert:@"已复制设备码" msg:[NSString stringWithFormat:@"%@\n把它发给作者换取激活码。", dev]];
+        }
+        return;
+    }
+    if (indexPath.section == 0) { [self inputLicense]; return; }
+    [self removeLicense];
+}
+
+- (void)inputLicense {
+    UIAlertController *ac = [UIAlertController
+        alertControllerWithTitle:@"输入激活码"
+                         message:@"粘贴作者发给你的激活码（会与本机设备码绑定）"
+                  preferredStyle:UIAlertControllerStyleAlert];
+    [ac addTextFieldWithConfigurationHandler:^(UITextField *tf) {
+        tf.placeholder = @"XXXX-XXXX-XXXX-XXXX-XXXX-XXXX";
+        tf.autocapitalizationType = UITextAutocapitalizationTypeAllCharacters;
+        tf.autocorrectionType = UITextAutocorrectionTypeNo;
+        tf.clearButtonMode = UITextFieldViewModeWhileEditing;
+        NSString *cur = [[SVBManager shared] configValueForKey:@"license_code"];
+        if ([cur isKindOfClass:[NSString class]]) tf.text = cur;
+    }];
+    [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    __weak typeof(self) wself = self;
+    [ac addAction:[UIAlertAction actionWithTitle:@"保存" style:UIAlertActionStyleDefault
+                                          handler:^(UIAlertAction *a) {
+        [wself saveLicense:ac.textFields.firstObject.text];
+    }]];
+    [self presentViewController:ac animated:YES completion:nil];
+}
+
+- (void)saveLicense:(NSString *)raw {
+    NSString *norm = SVBLicenseNormalize(raw);
+    if (!norm.length) { [self alert:@"保存失败" msg:@"激活码为空。"]; return; }
+
+    NSString *det = nil;
+    SVBLicenseState st = SVBLicenseVerify(norm, &det);
+
+    // 只有签名正确(有效/已过期)才落库; 输错的码不覆盖已有状态
+    if (st == SVBLicenseStateValid || st == SVBLicenseStateExpired) {
+        SVBManager *mgr = [SVBManager shared];
+        [mgr setConfigValue:norm forKey:@"license_code"];
+        [mgr setConfigValue:@([[NSDate date] timeIntervalSince1970]) forKey:@"license_last_seen"];
+        [mgr postChangeNotification];
+        [self reloadLicenseState];
+    }
+
+    if (st == SVBLicenseStateValid) {
+        [self alert:@"激活成功" msg:SVBLicenseStateText(st, det)];
+    } else if (st == SVBLicenseStateExpired) {
+        [self alert:@"激活码已过期" msg:[NSString stringWithFormat:@"%@\n请联系作者续期。",
+                                        SVBLicenseStateText(st, det)]];
+    } else if (st == SVBLicenseStateWrongDevice) {
+        [self alert:@"设备不匹配"
+                 msg:[NSString stringWithFormat:@"这枚激活码绑的是别的设备。\n本机设备码：%@",
+                      SVBDeviceCodeEnsure() ?: @"(未知)"]];
+    } else {
+        [self alert:@"激活码无效" msg:@"请检查是否完整复制（含分隔符也没关系）。"];
+    }
+}
+
+- (void)removeLicense {
+    UIAlertController *ac = [UIAlertController
+        alertControllerWithTitle:@"移除激活"
+                         message:@"移除后视频背景会立即停止生效，确定？"
+                  preferredStyle:UIAlertControllerStyleAlert];
+    [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    __weak typeof(self) wself = self;
+    [ac addAction:[UIAlertAction actionWithTitle:@"移除" style:UIAlertActionStyleDestructive
+                                          handler:^(UIAlertAction *a) {
+        SVBManager *mgr = [SVBManager shared];
+        [mgr setConfigValue:@"" forKey:@"license_code"];
+        [mgr postChangeNotification];
+        [wself reloadLicenseState];
+    }]];
+    [self presentViewController:ac animated:YES completion:nil];
 }
 
 - (void)alert:(NSString *)title msg:(NSString *)msg {

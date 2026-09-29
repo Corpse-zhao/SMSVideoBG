@@ -20,7 +20,7 @@
 //   同时保留 jbroot / Documents 等共享根作为兜底, 用户放哪都能被扫到。
 // ============================================================
 
-#define SVB_VERSION @"1.8.6"
+#define SVB_VERSION @"1.9.0"
 #define SVB_SUITE @"com.nvb.smsvideobg"
 #define SVB_DARWIN_NOTE "com.nvb.smsvideobg/prefs.changed"
 #define SVB_MEDIA_DIR_NAME @"SMSVideoBG"
@@ -51,6 +51,8 @@ BOOL SVBDirWritablePath(NSString *dir);
 
 // 注入可视化横幅: 挂在宿主 App 窗口顶部, 点按隐藏
 void SVBShowDebugBanner(NSString *text);
+// v1.9.0: 忽略「诊断横幅」开关强制显示 (未授权提示用)
+void SVBShowDebugBannerForce(NSString *text);
 
 extern NSString * const SVBContextMain;     // 主页面 (信息App 根页: 过滤器列表)
 extern NSString * const SVBContextAll;      // 所有信息

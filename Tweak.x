@@ -1,4 +1,5 @@
 #import "SVBCommon.h"
+#import "SVBLicense.h"
 #import <CoreFoundation/CFNotificationCenter.h>
 
 // ============================================================
@@ -28,6 +29,14 @@ static BOOL SVBIsSMSProcess(void) {
         cached = [bid isEqualToString:SVB_SMS_BUNDLE_ID] ? 1 : 0;
     }
     return cached == 1;
+}
+
+// v1.9.0 授权总闸: 未激活/过期时, 所有「给视频背景让路」的透明化处理 (清底、藏卡、
+// 拆材质) 一律停手 —— 否则页面被清成透明却没有任何背景, 比不装插件还难看。
+// 同时 SVBManager 的挂载入口也做了同样判断 (双保险)。
+static BOOL SVBShouldProcess(void) {
+    if (!SVBIsLicensed()) return NO;
+    return [[SVBManager shared] masterEnabled];
 }
 
 // 类名 -> 界面语境 (信息 App 私有框架 CK*/MT*/IM* 前缀)
@@ -178,7 +187,9 @@ static NSString *SVBDetectListContext(UIViewController *vc, NSString *fallback) 
 // 横幅刷新 (注入探针进程也能用, 内容会标明是哪个 App)
 static void SVBRefreshBanner(NSString *ctx) {
     @try {
-        SVBShowDebugBanner([[SVBManager shared] bannerTextForContext:ctx]);
+        // v1.9.0: 未授权提示不受「诊断横幅」开关影响, 必须让用户看到原因
+        if (!SVBIsLicensed()) SVBShowDebugBannerForce([[SVBManager shared] bannerTextForContext:ctx]);
+        else                 SVBShowDebugBanner([[SVBManager shared] bannerTextForContext:ctx]);
     } @catch (NSException *e) {}
 }
 
@@ -256,6 +267,7 @@ static void SVBRestoreHiddenCards(void) {
 }
 
 static BOOL SVBMainSweepActive(void) {
+    if (!SVBIsLicensed()) return NO;   // v1.9.0: 未授权不做任何清扫
     SVBManager *m = [SVBManager shared];
     return m.masterEnabled && [m isEnabledForContext:SVBContextMain];
 }
@@ -367,7 +379,7 @@ static void SVBPrefsChanged(CFNotificationCenterRef center, void *observer,
 %hook UICollectionViewListCell
 - (void)setBackgroundConfiguration:(UIBackgroundConfiguration *)cfg {
     @try {
-        if (cfg && SVBIsSMSProcess() && [[SVBManager shared] masterEnabled])
+        if (cfg && SVBIsSMSProcess() && SVBShouldProcess())
             cfg.backgroundColor = [UIColor clearColor];
     } @catch (NSException *e) {}
     %orig(cfg);
@@ -382,7 +394,7 @@ static void SVBPrefsChanged(CFNotificationCenterRef center, void *observer,
     %orig;
     @try {
         if (!SVBIsSMSProcess()) return;
-        if (![[SVBManager shared] masterEnabled]) return;
+        if (!SVBShouldProcess()) return;
         if (self.backgroundConfiguration) return;
         __weak UICollectionViewListCell *wcell = self;
         dispatch_async(dispatch_get_main_queue(), ^{
@@ -397,7 +409,7 @@ static void SVBPrefsChanged(CFNotificationCenterRef center, void *observer,
     %orig;
     @try {
         if (!SVBIsSMSProcess()) return;
-        if (![[SVBManager shared] masterEnabled]) return;
+        if (!SVBShouldProcess()) return;
         // 只清 UIView 层底色 (UIView.backgroundColor 不触发集合布局失效, 安全)
         if (self.backgroundColor && ![self.backgroundColor isEqual:[UIColor clearColor]])
             self.backgroundColor = [UIColor clearColor];
@@ -414,7 +426,7 @@ static void SVBPrefsChanged(CFNotificationCenterRef center, void *observer,
     %orig;
     @try {
         if (!SVBIsSMSProcess()) return;
-        if (![[SVBManager shared] masterEnabled]) return;
+        if (!SVBShouldProcess()) return;
         if (self.backgroundColor && ![self.backgroundColor isEqual:[UIColor clearColor]])
             self.backgroundColor = [UIColor clearColor];
     } @catch (NSException *e) {}
@@ -426,7 +438,7 @@ static void SVBPrefsChanged(CFNotificationCenterRef center, void *observer,
     %orig;
     @try {
         if (!SVBIsSMSProcess()) return;
-        if (![[SVBManager shared] masterEnabled]) return;
+        if (!SVBShouldProcess()) return;
         if (self.backgroundView) self.backgroundView = nil;
         if (self.backgroundColor && ![self.backgroundColor isEqual:[UIColor clearColor]])
             self.backgroundColor = [UIColor clearColor];

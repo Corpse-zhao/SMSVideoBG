@@ -1,4 +1,5 @@
 #import "SVBCommon.h"
+#import "SVBLicense.h"
 #import <CoreFoundation/CFNotificationCenter.h>
 #import <unistd.h>
 #import <stdlib.h>
@@ -513,6 +514,18 @@ BOOL SVBDirWritablePath(NSString *dir) {
 
 // 注入横幅文案: 一眼看清「插件有没有进信息App」+「素材到底读没读到」
 - (NSString *)bannerTextForContext:(NSString *)ctx {
+    // v1.9.0: 未激活/过期时横幅只报授权状态 —— 用户得知道视频背景为什么不生效
+    NSString *licDetail = nil;
+    SVBLicenseState lic = SVBLicenseCurrentState(&licDetail);
+    if (lic != SVBLicenseStateValid) {
+        NSString *dev = SVBDeviceCode() ?: @"(打开控制App 查看)";
+        NSString *appName = [self appDisplayName];
+        if (!appName.length) appName = @"信息视频背景";
+        return [NSString stringWithFormat:
+            @"⚠️ SMSVideoBG v%@ 未生效\n授权状态：%@\n设备码 %@\n请在「%@」里输入激活码（点本横幅可隐藏）",
+            SVB_VERSION, SVBLicenseStateText(lic, licDetail), dev, appName];
+    }
+
     NSString *bid = SVBHostBundleIdentifier();
     NSString *host = [bid isEqualToString:SVB_SMS_BUNDLE_ID] ? @"信息App"
                    : ([bid isEqualToString:SVB_APP_BUNDLE_ID] ? @"控制App"
@@ -1021,7 +1034,9 @@ static void SVBCollectToolbars(UIView *view, NSMutableArray<UIToolbar *> *out_, 
         // v1.7.19: 记录该 VC 实际请求挂载的语境 (无论开关与否), 离开时按它精确暂停
         objc_setAssociatedObject(vc, &SVBAppliedCtxKey, ctx, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
-        BOOL on = [self masterEnabled] && [self isEnabledForContext:ctx] &&
+        // v1.9.0: 授权门禁 —— 所有挂背景的路径都汇聚到这里, 未激活/过期一律不挂
+        // (这样无论从哪个钩子进来都拦得住, 不需要在 Tweak.x 各处补判断)
+        BOOL on = SVBIsLicensed() && [self masterEnabled] && [self isEnabledForContext:ctx] &&
                   [self activeVideoPathForContext:ctx].length > 0;
 
         SVBVideoBackgroundView *bg = objc_getAssociatedObject(vc, &SVBBGKey);
@@ -1770,6 +1785,8 @@ static BOOL sSVBBannerDismissed = NO;
 @interface SVBDebugBanner : UIView
 @property (nonatomic, strong) UILabel *label;
 - (void)handleTap;
++ (void)show:(NSString *)text;
++ (void)show:(NSString *)text force:(BOOL)force;
 @end
 
 @implementation SVBDebugBanner
@@ -1805,8 +1822,14 @@ static BOOL sSVBBannerDismissed = NO;
 }
 
 + (void)show:(NSString *)text {
+    [self show:text force:NO];
+}
+
+// v1.9.0: force=YES 时忽略「诊断横幅开关」(未授权提示必须让用户看到),
+// 但用户点掉横幅 (dismissed) 仍然尊重, 免得反复弹出来烦人。
++ (void)show:(NSString *)text force:(BOOL)force {
     if (sSVBBannerDismissed || !text.length) return;
-    if (![[SVBManager shared] debugBannerEnabled]) return;
+    if (!force && ![[SVBManager shared] debugBannerEnabled]) return;
 
     void (^block)(void) = ^{
         @try {
@@ -1844,4 +1867,9 @@ static BOOL sSVBBannerDismissed = NO;
 
 void SVBShowDebugBanner(NSString *text) {
     [SVBDebugBanner show:text];
+}
+
+// v1.9.0: 强制显示 (忽略「诊断横幅」开关) —— 未授权提示用
+void SVBShowDebugBannerForce(NSString *text) {
+    [SVBDebugBanner show:text force:YES];
 }
