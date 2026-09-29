@@ -343,6 +343,89 @@ static void SVBScheduleMainPageCheck(UIViewController *vc) {
 }
 
 
+#pragma mark - 对话详情: 隐藏消息气泡, 只留文字 (v10.5.0)
+
+static BOOL SVBBubbleSweepActive(void) {
+    if (!SVBIsLicensed()) return NO;   // 未授权不做任何清扫
+    SVBManager *m = [SVBManager shared];
+    return m.masterEnabled && [m isEnabledForContext:SVBContextChat];
+}
+
+static char SVBOrigEffectKey;
+static NSMutableArray<UIVisualEffectView *> *SVBBlurredViews;
+
+// 气泡的本质 = 视图自身的底色 (backgroundColor / layer.backgroundColor), 气泡形状
+// 只是一个 mask。全部清透明后气泡消失, 文字 (UILabel/UITextView) 原样保留。
+// 日期/时间分隔的「模糊胶囊」: 去掉 effect (模糊), 里面的文字子视图照常显示。
+static void SVBClearChatBubbleBGs(UIView *v, NSInteger depth) {
+    if (!v || depth > 20) return;
+    if ([v isKindOfClass:[SVBVideoBackgroundView class]]) return;
+    @try {
+        if ([v isKindOfClass:[UIVisualEffectView class]]) {
+            UIVisualEffectView *ev = (UIVisualEffectView *)v;
+            if (ev.effect) {
+                if (!SVBBlurredViews) SVBBlurredViews = [NSMutableArray new];
+                if (!objc_getAssociatedObject(ev, &SVBOrigEffectKey)) {
+                    objc_setAssociatedObject(ev, &SVBOrigEffectKey, ev.effect,
+                                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                    [SVBBlurredViews addObject:ev];
+                }
+                ev.effect = nil;
+            }
+        } else {
+            if (v.backgroundColor && ![v.backgroundColor isEqual:[UIColor clearColor]])
+                v.backgroundColor = [UIColor clearColor];
+            if (v.layer.backgroundColor &&
+                !CGColorEqualToColor(v.layer.backgroundColor, [UIColor clearColor].CGColor))
+                v.layer.backgroundColor = NULL;
+        }
+    } @catch (NSException *e) {}
+    for (UIView *s in v.subviews) SVBClearChatBubbleBGs(s, depth + 1);
+}
+
+static void SVBRestoreChatBlur(void) {
+    if (!SVBBlurredViews.count) return;
+    for (UIVisualEffectView *ev in [SVBBlurredViews copy]) {
+        if (!ev.superview) continue;
+        UIVisualEffect *e = objc_getAssociatedObject(ev, &SVBOrigEffectKey);
+        if (e) { @try { ev.effect = e; } @catch (NSException *x) {} }
+        objc_setAssociatedObject(ev, &SVBOrigEffectKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    [SVBBlurredViews removeAllObjects];
+}
+
+// 只在消息列表 (UICollectionView = transcript) 里清, 不碰输入栏/导航栏 ——
+// 输入框的胶囊底色保留, 保证打字区域可读。
+static void SVBSweepChatCollections(UIView *root) {
+    if (!root) return;
+    if ([root isKindOfClass:[UICollectionView class]]) {
+        SVBClearChatBubbleBGs(root, 0);
+        return;
+    }
+    for (UIView *s in root.subviews) SVBSweepChatCollections(s);
+}
+
+// 进对话时清一轮 + 延迟补扫 (滚动复用/系统重设底色后再清)
+static void SVBApplyChatBubbles(UIViewController *vc) {
+    if (!vc.view) return;
+    if (!SVBBubbleSweepActive()) { SVBRestoreChatBlur(); return; }
+    SVBSweepChatCollections(vc.view);
+    __weak UIViewController *wvc = vc;
+    NSTimeInterval delays[4] = {0.35, 0.9, 2.0, 3.5};
+    for (int i = 0; i < 4; i++) {
+        NSTimeInterval t = delays[i];
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(t * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            @try {
+                UIViewController *s = wvc;
+                if (!s || !s.isViewLoaded || !s.view.window) return;
+                if (!SVBBubbleSweepActive()) { SVBRestoreChatBlur(); return; }
+                SVBSweepChatCollections(s.view);
+            } @catch (NSException *e) {}
+        });
+    }
+}
+
 // Darwin 通知回调: 控制App/设置面板改了配置 -> 实时刷新
 static void SVBPrefsChanged(CFNotificationCenterRef center, void *observer,
                             CFStringRef name, const void *object, CFDictionaryRef userInfo) {
@@ -520,11 +603,13 @@ static char SVBDetectedCtxKey;
     %orig;
     SVB_SMS_GUARD()
     SVB_SAFE_APPLY(SVBContextChat)
+    SVBApplyChatBubbles(self);   // v10.5.0: 隐藏气泡只留文字
 }
 - (void)viewDidDisappear:(BOOL)animated {
     %orig;
     SVB_SMS_GUARD()
     @try { [[SVBManager shared] setContextActive:NO context:SVBContextChat]; } @catch (NSException *e) {}
+    SVBRestoreChatBlur();
 }
 %end
 
@@ -585,11 +670,32 @@ static char SVBDetectedCtxKey;
     %orig;
     SVB_SMS_GUARD()
     SVB_SAFE_APPLY(SVBContextChat)
+    SVBApplyChatBubbles(self);   // v10.5.0: 隐藏气泡只留文字
 }
 - (void)viewDidDisappear:(BOOL)animated {
     %orig;
     SVB_SMS_GUARD()
     @try { [[SVBManager shared] setContextActive:NO context:SVBContextChat]; } @catch (NSException *e) {}
+    SVBRestoreChatBlur();
+}
+%end
+
+// 消息气泡本体: 系统每次给气泡上色都改成透明 (滚动复用/新消息即时生效)
+%hook CKBalloonView
+- (void)setBackgroundColor:(UIColor *)color {
+    if (SVBBubbleSweepActive()) { %orig([UIColor clearColor]); return; }
+    %orig;
+}
+- (void)didMoveToSuperview {
+    %orig;
+    if (!SVBBubbleSweepActive()) return;
+    @try {
+        if (self.backgroundColor && ![self.backgroundColor isEqual:[UIColor clearColor]])
+            self.backgroundColor = [UIColor clearColor];
+        if (self.layer.backgroundColor &&
+            !CGColorEqualToColor(self.layer.backgroundColor, [UIColor clearColor].CGColor))
+            self.layer.backgroundColor = NULL;
+    } @catch (NSException *e) {}
 }
 %end
 
