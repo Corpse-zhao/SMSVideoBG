@@ -1031,33 +1031,45 @@ BOOL SVBDirWritablePath(NSString *dir) {
         NSInteger copied = 0;
         for (NSString *root in srcRoots) {
             if ([root isEqualToString:primary]) continue;
-            // v10.4.0: 全部进主根「根部」—— 不再保留按界面的子目录结构
+            // v10.4.0b: 搬移而不是复制 —— 旧根副本必须搬空, 否则每次启动又复制回来
+            // (表现为「素材删掉了, 切后台再打开又回来了」)
             for (NSArray<NSString *> *def in SVBContextDefinitions()) {
                 NSString *srcDir = [root stringByAppendingPathComponent:def[0]];
                 if (![fm fileExistsAtPath:srcDir]) continue;
                 for (NSString *f in [self listFilesInDir:srcDir]) {
                     if (![self isMovieFile:f]) continue;
+                    NSString *src = [srcDir stringByAppendingPathComponent:f];
                     NSString *dst = [primary stringByAppendingPathComponent:f];
-                    if ([fm fileExistsAtPath:dst]) continue;
-                    NSError *err = nil;
-                    if ([fm copyItemAtPath:[srcDir stringByAppendingPathComponent:f]
-                                    toPath:dst error:&err]) {
+                    if ([fm fileExistsAtPath:dst]) {
+                        [fm removeItemAtPath:src error:nil];   // 主根已有同名: 旧副本直接清掉, 保证搬空
+                    } else if ([fm moveItemAtPath:src toPath:dst error:nil]) {
                         copied++;
                         [self log:@"迁移素材 -> 主根: %@", dst];
-                    } else if (err) {
-                        [self log:@"迁移失败 %@: %@", f, err.localizedDescription];
+                    } else {
+                        [self log:@"迁移失败(保留原样) %@: %@", f, primary];
                     }
                 }
             }
             // 旧根根目录里散落的视频也搬
             for (NSString *f in [self listFilesInDir:root]) {
                 if (![self isMovieFile:f]) continue;
+                NSString *src = [root stringByAppendingPathComponent:f];
                 NSString *dst = [primary stringByAppendingPathComponent:f];
-                if ([fm fileExistsAtPath:dst]) continue;
-                if ([fm copyItemAtPath:[root stringByAppendingPathComponent:f] toPath:dst error:nil]) {
+                if ([fm fileExistsAtPath:dst]) {
+                    [fm removeItemAtPath:src error:nil];
+                } else if ([fm moveItemAtPath:src toPath:dst error:nil]) {
                     copied++;
                     [self log:@"迁移素材 -> 主根: %@", dst];
                 }
+            }
+        }
+        // 搬空后顺手清掉遗留根里的空子目录 (旧版按界面子目录)
+        for (NSString *root in srcRoots) {
+            if ([root isEqualToString:primary]) continue;
+            for (NSArray<NSString *> *def in SVBContextDefinitions()) {
+                NSString *d = [root stringByAppendingPathComponent:def[0]];
+                NSArray *left = [fm contentsOfDirectoryAtPath:d error:nil];
+                if (left && left.count == 0) [fm removeItemAtPath:d error:nil];
             }
         }
         if (copied) {
@@ -1138,13 +1150,14 @@ static BOOL SVBCopyInto(NSString *srcPath, NSString *dir, NSString *name, NSErro
         [self log:@"导入开始: %@ (%.1f MB) -> %@", srcPath, (double)srcSize / 1048576.0, ctx];
 
         // 1. 目标根 = 全部可写根 (多根齐写: 信息App 容器 + 共享根)
+        //    v10.4.0 修正: 直接写素材根「根部」—— 不再建按界面的子目录 (与摊平设计一致)
         NSMutableArray<NSString *> *targets = [NSMutableArray array];
         NSMutableArray<NSString *> *failedRoots = [NSMutableArray array];
         for (NSString *root in SVBRootCandidates()) {
-            if (!SVBDirWritable(root)) { [failedRoots addObject:root]; continue; }
-            NSString *dir = [root stringByAppendingPathComponent:ctx];
-            if (SVBDirWritable(dir)) [targets addObject:dir];
-            else [failedRoots addObject:dir];
+            if (![fm fileExistsAtPath:root])
+                [fm createDirectoryAtPath:root withIntermediateDirectories:YES attributes:nil error:nil];
+            if (SVBDirWritable(root)) [targets addObject:root];
+            else [failedRoots addObject:root];
         }
         [self log:@"导入目标根 %lu 个, 不可写 %lu 个", (unsigned long)targets.count,
               (unsigned long)failedRoots.count];
@@ -1221,12 +1234,21 @@ static BOOL SVBCopyInto(NSString *srcPath, NSString *dir, NSString *name, NSErro
     NSFileManager *fm = [NSFileManager defaultManager];
     // v10.4.0: 旧版遗留根 (jbroot/Documents/家目录) 里的同名副本也要一并删 ——
     // 否则每次启动的自愈迁移会把旧根副本再复制回主根, 表现为「删了马上又出来」
-    NSMutableArray *dirs = [[self directoriesForContext:ctx includeRootFallback:YES] mutableCopy];
-    for (NSString *root in SVBLegacyRoots()) {
+    // v10.4.0b: 扫得更全 —— 所有根的「根部 + 全部按界面旧子目录」都删
+    // (旧版本可能把同名文件留在 main/all 等其它界面的子目录里, 只删当前界面子目录漏网);
+    // 「信息视频背景素材」父目录下的旧真目录备份 (板栗仁_旧目录备份_*) 也一并扫
+    NSMutableArray<NSString *> *dirs = [NSMutableArray array];
+    void (^addRoot)(NSString *) = ^(NSString *root) {
+        if (!root.length) return;
         [dirs addObject:root];
-        NSString *sub = [root stringByAppendingPathComponent:ctx];
-        if ([fm fileExistsAtPath:sub]) [dirs addObject:sub];
-    }
+        for (NSArray<NSString *> *def in SVBContextDefinitions())
+            [dirs addObject:[root stringByAppendingPathComponent:def[0]]];
+    };
+    for (NSString *root in [self mediaRoots]) addRoot(root);
+    for (NSString *root in SVBLegacyRoots()) addRoot(root);
+    for (NSString *sib in [fm contentsOfDirectoryAtPath:SVB_MEDIA_FRIENDLY_PARENT error:nil])
+        if ([sib hasPrefix:SVB_AUTHOR_NAME])
+            addRoot([SVB_MEDIA_FRIENDLY_PARENT stringByAppendingPathComponent:sib]);
     for (NSString *dir in dirs) {
         NSString *p = [dir stringByAppendingPathComponent:name];
         if ([fm fileExistsAtPath:p]) [fm removeItemAtPath:p error:nil];
