@@ -17,6 +17,15 @@
 CTXS="all known unknown unread junk deleted chat"
 LOG=/var/mobile/Documents/smsvideobg_install.log
 
+# 0. 统一素材路径 (v10.3.0): /var/mobile/信息视频背景素材/板栗仁
+#    用户只认这一条 —— 它是软链, 指向信息App 容器里的真实素材根(见第 2 段)。
+#    这里只建父目录; 软链要等下面定位到容器之后再建。
+FRIENDLY_PARENT="/var/mobile/信息视频背景素材"
+FRIENDLY_LINK="$FRIENDLY_PARENT/板栗仁"
+mkdir -p "$FRIENDLY_PARENT" 2>/dev/null
+chmod 755 "$FRIENDLY_PARENT" 2>/dev/null
+chown mobile:mobile "$FRIENDLY_PARENT" 2>/dev/null
+
 # 1. 共享素材目录 (mobile 可读写, Filza 友好; 只设目录本身的权限, 不递归)
 for MEDIA in "/var/jb/Library/SMSVideoBG" "/var/mobile/Documents/SMSVideoBG"; do
   for ctx in $CTXS; do
@@ -50,6 +59,21 @@ if [ -n "$SMS_C" ]; then
   done
   chmod 777 "$SMS_C/Library/SMSVideoBG" "$SMS_C/Library/SMSVideoBG"/* 2>/dev/null
   chown mobile:mobile "$SMS_C/Library/SMSVideoBG" "$SMS_C/Library/SMSVideoBG"/* 2>/dev/null
+
+  # 2.1 统一素材路径 -> 软链到信息App 容器里的真实素材根
+  #     只处理「不存在 / 已是软链」; 若用户早已在那里建了真目录(里面可能有素材),
+  #     留给控制 App 启动时搬运+改名备份, 这里绝不碰它的内容。
+  TARGET="$SMS_C/Library/SMSVideoBG"
+  if [ -L "$FRIENDLY_LINK" ]; then
+    CUR=$(readlink "$FRIENDLY_LINK" 2>/dev/null)
+    if [ "$CUR" != "$TARGET" ]; then
+      rm -f "$FRIENDLY_LINK" 2>/dev/null
+      ln -s "$TARGET" "$FRIENDLY_LINK" 2>/dev/null
+    fi
+  elif [ ! -e "$FRIENDLY_LINK" ]; then
+    ln -s "$TARGET" "$FRIENDLY_LINK" 2>/dev/null
+  fi
+  chown -h mobile:mobile "$FRIENDLY_LINK" 2>/dev/null
 fi
 
 # 3. 注册控制 App 图标 (尽力而为, 失败不影响安装)
@@ -71,11 +95,12 @@ if [ -f "$LOG" ] && [ "$(stat -c%s "$LOG" 2>/dev/null || echo 0)" -gt 65536 ]; t
   mv -f "$LOG" "$LOG.1" 2>/dev/null
 fi
 {
-  echo "=== postinst $(date) v1.7.4"
+  echo "=== postinst $(date) v10.3.0"
   echo "jbroot: $(readlink -f /var/jb 2>/dev/null)"
   D=/var/jb/Library/MobileSubstrate/DynamicLibraries
   [ -f "$D/SMSVideoBG.dylib" ] && echo "dylib: OK $(stat -c%s "$D/SMSVideoBG.dylib" 2>/dev/null) bytes" || echo "dylib: MISSING"
   echo "SMS container: ${SMS_C:-NOT-FOUND}"
+  echo "friendly path: $(readlink "$FRIENDLY_LINK" 2>/dev/null || echo '(未建/是真目录)')"
 } >> "$LOG" 2>&1
 chmod 644 "$LOG" 2>/dev/null
 exit 0

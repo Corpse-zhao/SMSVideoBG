@@ -120,6 +120,7 @@ NSString *SVBFindAppDataContainer(NSString *bundleId) {
 
 NSString *SVBRootLabel(NSString *root) {
     if (!root.length) return @"?";
+    if ([root hasPrefix:SVB_MEDIA_FRIENDLY_PARENT]) return SVB_AUTHOR_NAME;
     if ([root containsString:@"/Containers/Data/Application"]) return @"信息App容器";
     if ([root hasPrefix:@"/var/jb"] || [root containsString:@"/var/jb/"]) return @"jbroot";
     if ([root hasPrefix:@"/var/mobile/Documents"]) return @"共享文档";
@@ -136,6 +137,7 @@ void SVBRefreshMediaRoots(void) {
 // 旧版遗留根 (只用于启动时把旧素材搬进主根, 不参与日常读取)
 static NSArray<NSString *> *SVBLegacyRoots(void) {
     NSMutableArray<NSString *> *a = [NSMutableArray array];
+    [a addObject:SVBJBMediaDirectory()];   // v1.5~10.2 的兜底根, 里面可能还有用户放的素材
     [a addObject:[@"/var/mobile/Documents/" stringByAppendingString:SVB_MEDIA_DIR_NAME]];
     NSString *home = NSHomeDirectory();
     if (home.length)
@@ -144,12 +146,13 @@ static NSArray<NSString *> *SVBLegacyRoots(void) {
     return a;
 }
 
+// v10.3.0: 单一素材根 —— 信息App 数据容器(mobile 侧定位容器, tweak 侧=自身家目录,
+// 两者指向同一物理目录)。导入/读取/删除全部只看这里, 路径精确唯一。
+// jbroot 不再作为日常读取根 (沙盒宿主读不到), 只当"定位不到容器"时的应急落点。
 NSArray<NSString *> *SVBRootCandidates(void) {
     if (sSVBRoots) return sSVBRoots;
     NSMutableArray<NSString *> *a = [NSMutableArray array];
 
-    // 主根 (v1.5 单一根): 信息App 数据容器 —— App 侧定位容器, tweak 侧=自身家目录,
-    // 两者指向同一物理目录, 导入/读取/删除全部只看这里, 路径精确唯一。
     NSString *primary = nil;
     if (SVBIsControlApp()) {
         NSString *c = SVBFindAppDataContainer(SVB_SMS_BUNDLE_ID);
@@ -160,12 +163,189 @@ NSArray<NSString *> *SVBRootCandidates(void) {
         primary = SVBAppContainerMediaDirectory();
     }
     if (primary.length) [a addObject:primary];
-
-    // 唯一辅根: jbroot (Filza 放素材的兜底入口, 读取时聚合)
-    [a addObject:SVBJBMediaDirectory()];
+    if (!a.count) [a addObject:SVBJBMediaDirectory()];   // 应急兜底(仅定位不到容器时)
 
     sSVBRoots = [a copy];
     return sSVBRoots;
+}
+
+#pragma mark - 统一素材路径 (v10.3.0)
+
+NSString *SVBMediaFriendlyRoot(void) {
+    return [SVB_MEDIA_FRIENDLY_PARENT stringByAppendingPathComponent:SVB_AUTHOR_NAME];
+}
+
+NSString *SVBMediaFriendlyPathForContext(NSString *ctx) {
+    NSString *root = SVBMediaFriendlyRoot();
+    return ctx.length ? [root stringByAppendingPathComponent:ctx] : root;
+}
+
+// 把「统一路径」做成指向真实素材根的软链。
+//   ① 不存在 -> 建父目录 + 建软链;
+//   ② 已是软链 -> 指向不对就重建 (指向对了就什么都不做);
+//   ③ 是个真目录(用户早就往这里丢过素材) -> 先把视频搬进真实根, 原目录改名备份, 再建软链。
+//      (改名而不是删除 —— 用户的东西一个字节都不丢)
+static NSInteger SVBAdoptFriendlyDirIfReal(NSString *link, NSString *target) {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSInteger copied = 0;
+    BOOL (^isMovie)(NSString *) = ^BOOL (NSString *f) {
+        if ([f hasPrefix:@"."] || [f hasPrefix:@"_"]) return NO;
+        return [@[@"mp4", @"mov", @"m4v", @"3gp", @"mkv", @"webm"]
+                containsObject:f.pathExtension.lowercaseString];
+    };
+
+    // 各界面子目录里的视频 -> 真实根同名子目录
+    for (NSArray<NSString *> *def in SVBContextDefinitions()) {
+        NSString *ctx = def[0];
+        NSString *srcDir = [link stringByAppendingPathComponent:ctx];
+        if (![fm fileExistsAtPath:srcDir]) continue;
+        NSString *dstDir = [target stringByAppendingPathComponent:ctx];
+        for (NSString *f in [fm contentsOfDirectoryAtPath:srcDir error:nil]) {
+            if (!isMovie(f)) continue;
+            NSString *dst = [dstDir stringByAppendingPathComponent:f];
+            if ([fm fileExistsAtPath:dst]) continue;      // 同名保留真实根里已有的
+            if (![fm fileExistsAtPath:dstDir])
+                [fm createDirectoryAtPath:dstDir withIntermediateDirectories:YES attributes:nil error:nil];
+            if ([fm copyItemAtPath:[srcDir stringByAppendingPathComponent:f] toPath:dst error:nil]) copied++;
+        }
+    }
+    // 直接丢在根目录里的视频 -> 真实根根部 (插件对"根目录里的文件"有兜底识别)
+    for (NSString *f in [fm contentsOfDirectoryAtPath:link error:nil]) {
+        if (!isMovie(f)) continue;
+        NSDictionary *attr = [fm attributesOfItemAtPath:[link stringByAppendingPathComponent:f] error:nil];
+        if (![attr[NSFileType] isEqualToString:NSFileTypeRegular]) continue;
+        NSString *dst = [target stringByAppendingPathComponent:f];
+        if ([fm fileExistsAtPath:dst]) continue;
+        if ([fm copyItemAtPath:[link stringByAppendingPathComponent:f] toPath:dst error:nil]) copied++;
+    }
+    // 顺手把界面子目录也补齐, 让 Filza 里进来就能看到结构
+    for (NSArray<NSString *> *def in SVBContextDefinitions()) {
+        NSString *d = [target stringByAppendingPathComponent:def[0]];
+        if (![fm fileExistsAtPath:d])
+            [fm createDirectoryAtPath:d withIntermediateDirectories:YES attributes:nil error:nil];
+    }
+    return copied;
+}
+
+static NSString *SVBFriendlyBackupStamp(void) {
+    NSDateFormatter *df = [[NSDateFormatter alloc] init];
+    df.dateFormat = @"yyyyMMdd-HHmmss";
+    return [df stringFromDate:[NSDate date]] ?: @"bak";
+}
+
+BOOL SVBEnsureFriendlyMediaPath(NSString **detail) {
+    NSString *msg = nil;
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *parent = SVB_MEDIA_FRIENDLY_PARENT;
+    NSString *link   = SVBMediaFriendlyRoot();
+
+    @try {
+        // 真实素材根 (容器) —— mediaDirectory 会顺便把它建好
+        NSString *target = [[SVBManager shared] mediaDirectory];
+        if (!target.length) { msg = @"定位不到信息App 素材目录"; return NO; }
+        // 只有定位到信息App 容器时才做软链: 万一退到应急根(jbroot), 软链会指向错地方
+        if (![target containsString:@"/Containers/Data/Application"]) {
+            msg = @"定位不到信息App 数据容器（先打开一次「信息」App，再回到这里点一次）";
+            return NO;
+        }
+        [[SVBManager shared] contextDirectory:SVBContextAll];   // 至少保证 all/ 存在
+
+        if (![fm fileExistsAtPath:parent]) {
+            [fm createDirectoryAtPath:parent withIntermediateDirectories:YES attributes:nil error:nil];
+            [fm setAttributes:@{NSFileOwnerAccountName: @"mobile",
+                                NSFileGroupOwnerAccountName: @"mobile",
+                                NSFilePosixPermissions: @(0755)}
+                 ofItemAtPath:parent error:nil];
+        }
+        if (![fm fileExistsAtPath:parent]) { msg = @"建不了 /var/mobile/信息视频背景素材"; return NO; }
+
+        NSDictionary *attr = [fm attributesOfItemAtPath:link error:nil];
+        NSString *type = attr[NSFileType];
+        NSString *note = nil;
+
+        if (!attr) {
+            // ① 还没有: 直接建软链
+        } else if ([type isEqualToString:NSFileTypeSymbolicLink]) {
+            NSString *dest = [fm destinationOfSymbolicLinkAtPath:link error:nil];
+            if ([dest isEqualToString:target]) {
+                if (detail) *detail = [NSString stringWithFormat:@"%@\n(软链 -> 信息App 素材目录, 已就绪)", link];
+                return YES;
+            }
+            if (![fm removeItemAtPath:link error:nil]) {   // 指向别处(旧容器 UUID) -> 重建
+                msg = @"旧软链删不掉：请用 Filza 删掉这个软链后重开本App";
+                return NO;
+            }
+        } else if ([type isEqualToString:NSFileTypeDirectory]) {
+            // ③ 用户已经在这条路径上放过素材: 先搬进来, 原目录改名备份(不删)
+            NSInteger n = SVBAdoptFriendlyDirIfReal(link, target);
+            NSString *bak = [NSString stringWithFormat:@"%@_旧目录备份_%@", link, SVBFriendlyBackupStamp()];
+            if ([fm moveItemAtPath:link toPath:bak error:nil]) {
+                note = [NSString stringWithFormat:
+                        @"已把这里原有的 %ld 个视频搬进素材目录，原文件夹改名备份为「%@」——没删任何东西。",
+                        (long)n, bak.lastPathComponent];
+            } else if ([fm fileExistsAtPath:link]) {
+                msg = [NSString stringWithFormat:@"%@ 是个真文件夹且改名失败：先用 Filza 把它改个名, 再重开本App", link];
+                return NO;
+            }
+        } else {
+            // 普通文件占位 -> 挪走
+            NSString *bak = [NSString stringWithFormat:@"%@_旧文件_%@", link, SVBFriendlyBackupStamp()];
+            if ([fm moveItemAtPath:link toPath:bak error:nil])
+                note = [NSString stringWithFormat:@"原位置的同名文件已改名备份为「%@」。", bak.lastPathComponent];
+        }
+
+        NSError *lerr = nil;
+        if (![fm createSymbolicLinkAtPath:link withDestinationPath:target error:&lerr]) {
+            msg = [NSString stringWithFormat:@"软链建不了：%@", lerr.localizedDescription ?: @"未知原因"];
+            return NO;
+        }
+        [fm setAttributes:@{NSFileOwnerAccountName: @"mobile",
+                            NSFileGroupOwnerAccountName: @"mobile"}
+             ofItemAtPath:parent error:nil];
+
+        if (detail) {
+            NSString *base = [NSString stringWithFormat:@"%@\n(软链 -> 信息App 素材目录, 已就绪)", link];
+            *detail = note.length ? [NSString stringWithFormat:@"%@\n\n%@", base, note] : base;
+        }
+        return YES;
+    } @catch (NSException *e) {
+        msg = [NSString stringWithFormat:@"异常：%@", e.reason];
+    }
+    if (detail) *detail = msg ?: @"未知错误";
+    return NO;
+}
+
+// 在 Filza 中打开路径; 没装 Filza 就把路径复制到剪贴板并说明。
+BOOL SVBOpenPathInFilza(NSString *path, NSString **message) {
+    if (!path.length) path = SVBMediaFriendlyRoot();
+    if (![NSThread isMainThread]) {
+        __block BOOL ok = NO;
+        __block NSString *m = nil;
+        dispatch_sync(dispatch_get_main_queue(), ^{ ok = SVBOpenPathInFilza(path, &m); });
+        if (message) *message = m;
+        return ok;
+    }
+    UIApplication *app = [UIApplication sharedApplication];
+    NSString *enc = [path stringByAddingPercentEncodingWithAllowedCharacters:
+                     [NSCharacterSet URLPathAllowedCharacterSet]] ?: path;
+    // Filza 支持的两种写法都试一遍
+    NSArray<NSString *> *cands = @[[NSString stringWithFormat:@"filza://view%@", enc],
+                                   [NSString stringWithFormat:@"filza://%@", enc]];
+    for (NSString *s in cands) {
+        NSURL *u = [NSURL URLWithString:s];
+        if (u && [app canOpenURL:u]) {
+            [app openURL:u options:@{} completionHandler:nil];
+            if (message) *message = [NSString stringWithFormat:@"已在 Filza 中打开：\n%@", path];
+            return YES;
+        }
+    }
+    // 兜底: 有些越狱环境 canOpenURL 判定不准 -> 盲开一次, 同时把路径放进剪贴板
+    NSURL *u0 = [NSURL URLWithString:cands.firstObject];
+    if (u0) [app openURL:u0 options:@{} completionHandler:nil];
+    [UIPasteboard generalPasteboard].string = path;
+    if (message) *message = [NSString stringWithFormat:
+        @"没检测到 Filza（或未装 Filza File Manager）。\n\n路径已复制到剪贴板：\n%@", path];
+    return NO;
 }
 
 // 目录可写性探测 (创建目录 + 写探针文件)
@@ -533,17 +713,15 @@ BOOL SVBDirWritablePath(NSString *dir) {
 
 // 注入横幅文案: 一眼看清「插件有没有进信息App」+「素材到底读没读到」
 - (NSString *)bannerTextForContext:(NSString *)ctx {
-    // v10.0.0: 未授权/未联网校验时横幅只报授权状态 —— 用户得知道视频背景为什么不生效
+    // v10.0.0: 未授权时横幅只报授权状态 —— 用户得知道视频背景为什么不生效
     NSString *licDetail = nil;
     SVBAuthState lic = SVBAuthCurrentState(&licDetail);
     if (lic != SVBAuthStateAuthorized) {
         NSString *udid = SVBAuthUDID() ?: @"(读不到)";
         NSString *appName = [self appDisplayName];
         if (!appName.length) appName = @"信息视频背景";
-        // v10.2.0: 默认纯离线模式 -> 不提示"去联网校验", 改提示导入授权串
-        NSString *how = SVBAuthOfflineOnlyMode()
-            ? @"把上面这串 UDID 发给作者；作者会回一段授权串，在控制 App 点「粘贴离线授权」导入即可（不用联网、不需要梯子）"
-            : @"把 UDID 发给作者授权，然后在控制 App 点「立即联网校验」";
+        // v10.3.0: 只有离线授权一条路 -> 提示客户把 UDID 发给作者换授权串
+        NSString *how = @"把上面这串 UDID 发给作者；作者会回一段授权串，在控制 App 点「粘贴离线授权」导入即可（不用联网、不需要梯子）";
         return [NSString stringWithFormat:
             @"⚠️ %@ v%@ 未生效\n授权状态：%@\n本机 UDID %@\n%@\n（点本横幅可隐藏）",
             appName, SVB_VERSION, SVBAuthStateText(lic, licDetail), udid, how];

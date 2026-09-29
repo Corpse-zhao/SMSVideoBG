@@ -28,6 +28,6 @@
 @interface SVBAppIdentityController : UITableViewController
 @end
 
-// v10.0.0 授权页: 直接读取本机 UDID, 复制发给作者; 状态由远端白名单决定
+// v10.3.0 授权页: 读本机 UDID 发给作者 -> 粘贴作者回的离线授权串导入 (全程不联网)
 @interface SVBAuthController : UITableViewController
 @end

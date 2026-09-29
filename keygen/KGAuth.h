@@ -1,16 +1,12 @@
 #import <Foundation/Foundation.h>
 
 // ============================================================
-// 授权核心 (签发端 v2.0.0) —— UDID 白名单制
+// 授权核心 (签发端 v2.3.0) —— 纯离线授权串
 //
 //   与插件端 SVBAuth.m 严格一致:
-//     名单键 H32 = SHA256("SMSVideoBG-AUTH/v1|<归一化UDID>") 前 16 字节 -> 32 位大写 HEX
-//     归一化     = 大写 + 只留 A-Z0-9
-//   白名单文件 auth.json (revoke 分支):
-//     {"v":1,"ts":<unix秒>,"devices":{"<H32>":<到期dayIndex>},"sig":"<64位hex>"}
-//     到期 dayIndex = 自 2020-01-01 UTC 起的天数; 4294967295 = 永久
-//     签名原文 = "SVBAUTH/v1|<ts>|<H32=dayIndex 升序逗号连接>"
-//     签名算法 = HMAC-SHA256(secret, 原文) 全 32 字节小写十六进制
+//     设备指纹 H32 = SHA256("SMSVideoBG-AUTH/v1|<归一化UDID>") 前 16 字节 -> 32 位大写 HEX
+//     归一化       = 大写 + 只留 A-Z0-9
+//   v2.3.0 起只有一个产物: 离线授权串 (见文件末尾), 不再生成/推送远端名单。
 // ============================================================
 
 #define KG_AUTH_FOREVER 4294967295u
@@ -34,11 +30,6 @@ NSString *KGAuthShortUDID(NSString *udid);
 // 日期
 uint32_t KGDayIndexFromNow(NSInteger daysFromNow);
 NSString *KGDateTextForDayIndex(uint32_t idx);
-
-// 生成白名单文件内容 (devices = {H32: @(dayIndex)})
-NSData *KGAuthBuildJSON(NSString *secret, NSInteger ts, NSDictionary<NSString *, NSNumber *> *devices);
-// 解析并验签; 通过返回 {H32: @(dayIndex)}, 否则 nil
-NSDictionary<NSString *, NSNumber *> *KGAuthParseJSON(NSData *json, NSString *secret);
 
 // ---- 离线授权串 (v2.1.0, v2.2.0 支持自定义期限) ----
 // 客户端默认「纯离线模式」下的唯一授权通道: 生成一段文本发给客户,

@@ -91,6 +91,10 @@ static UIImage *SVBIconForKey(NSString *key) {
     if ([key isEqualToString:@"__import"])       return SVBBadgeIcon(@"plus.circle.fill",
                                             [UIColor colorWithRed:0.98 green:0.27 blue:0.51 alpha:1],
                                             [UIColor colorWithRed:0.63 green:0.32 blue:0.98 alpha:1]);
+    // v10.3.0: 跳转素材文件夹
+    if ([key isEqualToString:@"__open"])         return SVBBadgeIcon(@"arrow.up.forward.app.fill",
+                                            [UIColor colorWithRed:0.20 green:0.62 blue:0.92 alpha:1],
+                                            [UIColor colorWithRed:0.35 green:0.80 blue:0.98 alpha:1]);
     if ([key isEqualToString:@"__video"])        return SVBBadgeIcon(@"video.fill",
                                             [UIColor colorWithRed:0.30 green:0.69 blue:0.45 alpha:1],
                                             [UIColor colorWithRed:0.45 green:0.82 blue:0.55 alpha:1]);
@@ -120,14 +124,42 @@ static void SVBApplyCardStyle(UITableViewCell *cell, NSInteger row, NSInteger ro
     cell.selectedBackgroundView = sel;
 }
 
+#pragma mark - v10.3.0 跳转素材路径
+
+// 跳转到统一素材路径 (/var/mobile/信息视频背景素材/板栗仁)。
+// 先用 SVBEnsureFriendlyMediaPath 把目录/软链自愈好, 再交给 Filza 打开;
+// 没装 Filza 时把路径复制到剪贴板并弹窗说明。
+static void SVBJumpToMediaPath(UIViewController *vc, NSString *path) {
+    NSString *ensureMsg = nil;
+    if (!SVBEnsureFriendlyMediaPath(&ensureMsg)) {
+        UIAlertController *ac = [UIAlertController
+            alertControllerWithTitle:@"素材路径不可用"
+                             message:ensureMsg ?: @"未知错误"
+                      preferredStyle:UIAlertControllerStyleAlert];
+        [ac addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
+        [vc presentViewController:ac animated:YES completion:nil];
+        return;
+    }
+    NSString *msg = nil;
+    if (SVBOpenPathInFilza(path, &msg)) return;    // 已经跳到 Filza
+    UIAlertController *ac = [UIAlertController
+        alertControllerWithTitle:@"素材路径"
+                         message:msg ?: path
+                  preferredStyle:UIAlertControllerStyleAlert];
+    [ac addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
+    [vc presentViewController:ac animated:YES completion:nil];
+}
+
 #pragma mark - AppDelegate
 
 @implementation SVBAppDelegate
 
 - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)launchOptions {
     [[SVBManager shared] log:@"=== 控制App 启动 ==="];
-    // 自愈迁移: 把 jbroot/Documents/家目录等旧根里的素材搬进主根 (信息App 容器)
+    // v10.3.0: 先把统一素材路径 /var/mobile/信息视频背景素材/板栗仁 建好(软链自愈),
+    // 再把 jbroot/Documents/家目录等旧根里的素材搬进真实素材根 (信息App 容器)
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        SVBEnsureFriendlyMediaPath(NULL);
         [[SVBManager shared] migrateMediaIntoPrimaryRoot];
     });
     self.window = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
@@ -506,7 +538,7 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
 
 @implementation SVBHomeViewController {
     NSArray<NSArray<NSString *> *> *_defs;
-    // v10.0.1: 未授权时首页只留「授权」一栏 (开关全部隐藏), 且无需再点进授权页
+    // v10.3.0: 未授权时首页只留「授权」一栏 (开关全部隐藏), 且无需再点进授权页
     SVBAuthState _authState;
     NSString *_authDetail;
     BOOL _authSyncing;
@@ -525,20 +557,18 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
 // 已授权 -> 完整设置页; 未授权/过期 -> 只显示授权栏
 - (BOOL)authOK { return SVBIsLicensed(); }
 
-// v10.2.0: 纯离线模式 (默认开启) —— 插件不发任何网络请求, 客户国内网络零依赖
-- (BOOL)authOfflineOnly { return SVBAuthOfflineOnlyMode(); }
-- (NSInteger)authRowCount { return [self authOfflineOnly] ? 3 : 4; }
-// 行语义: 0=授权状态  1=本机 UDID  2=立即联网校验(仅在线模式)  3=粘贴离线授权
+// v10.3.0: 授权 = 纯离线授权串 (插件零网络请求)
+- (NSInteger)authRowCount { return 3; }
+// 行语义: 0=授权状态  1=本机 UDID  2=粘贴离线授权
 - (NSInteger)authRowKindAt:(NSInteger)row {
     if (row == 0) return 0;
     if (row == 1) return 1;
-    if ([self authOfflineOnly]) return (row == 2) ? 3 : -1;
-    return (row == 2) ? 2 : 3;
+    return (row == 2) ? 2 : -1;
 }
 
 - (void)svbReloadAuthState {
     NSString *det = nil;
-    SVBAuthRefreshIfNeeded(NO);          // 内部 30 分钟节流
+    SVBAuthInvalidateCache();           // v10.3.0: 纯本地复算, 无任何联网
     _authState = SVBAuthCurrentState(&det);
     _authDetail = det;
 }
@@ -552,43 +582,31 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
         return;
     }
     [UIPasteboard generalPasteboard].string = udid;
-    NSString *tail = [self authOfflineOnly]
-        ? @"作者会回你一段以 SVBOFFLINE1: 开头的授权串 —— 回到这里点「粘贴离线授权」导入即可，不用连网。"
-        : @"作者签发后点「立即联网校验」即可生效；作者删除这条记录后，本机最多 30 分钟掉授权。";
     [self svbAlert:@"UDID 已复制"
                msg:[NSString stringWithFormat:
-        @"%@\n\n识别方式：%@\n把它发给作者，让作者为你签发授权。\n\n%@",
-        udid, SVBAuthUDIDSource(), tail]];
+        @"%@\n\n识别方式：%@\n把它发给作者，作者会回你一段以 SVBOFFLINE1: 开头的授权串。\n\n"
+        @"拿到后回到本页点「粘贴离线授权」导入即可 —— 不用联网、不需要梯子。",
+        udid, SVBAuthUDIDSource()]];
 }
 
-- (void)svbAuthSync {
-    if (_authSyncing) return;
-    _authSyncing = YES;
-    SVBAuthRefreshIfNeeded(YES);
-    [self svbReloadAuthState];
-    [self.tableView reloadData];
-    // 拉取在后台串行跑多源, 耗时不定 -> 分几次回看结果 (每次都会顺手重算授权态)
-    for (NSNumber *delay in @[@1.2, @3.0, @6.0]) {
-        __weak typeof(self) w = self;
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
-                                     (int64_t)(delay.doubleValue * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{
-            typeof(self) s = w;             // ARC: 先拿强引用才能碰 ivar
-            if (!s) return;
-            SVBAuthInvalidateCache();       // 强制按最新缓存重判一次
-            [s svbReloadAuthState];
-            [s.tableView reloadData];
-        });
-    }
-    __weak typeof(self) w2 = self;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(6.5 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        typeof(self) s = w2;
-        if (!s) return;
-        s->_authSyncing = NO;
-        [s svbReloadAuthState];
-        [s.tableView reloadData];
-    });
+- (void)svbClearLicense {
+    UIAlertController *ac = [UIAlertController
+        alertControllerWithTitle:@"清除本机授权？"
+                         message:@"清除后本机变回未授权（视频背景开关会被隐藏），"
+                                 @"把之前作者发的授权串重新粘回来即可恢复。"
+                  preferredStyle:UIAlertControllerStyleActionSheet];
+    __weak typeof(self) w = self;
+    [ac addAction:[UIAlertAction actionWithTitle:@"清除" style:UIAlertActionStyleDestructive
+                                        handler:^(UIAlertAction *a) {
+        SVBAuthClearTicket();
+        [w svbReloadAuthState];
+        [w.tableView reloadData];
+    }]];
+    [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    ac.popoverPresentationController.sourceView = self.tableView;
+    ac.popoverPresentationController.sourceRect =
+        CGRectMake(self.tableView.bounds.size.width / 2, 80, 1, 1);
+    [self presentViewController:ac animated:YES completion:nil];
 }
 
 - (void)svbAlert:(NSString *)title msg:(NSString *)msg {
@@ -683,7 +701,7 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
     self.tableView.backgroundColor = [UIColor systemGroupedBackgroundColor];
     self.tableView.separatorStyle = UITableViewCellSeparatorStyleNone;
     self.tableView.tableHeaderView = [self makeHeroHeader];
-    // v10.0.2: 长按「立即联网校验」行可改自定义授权服务地址 (GitHub 全不通时的兜底)
+    // v10.3.0: 未授权首页只有「授权」一栏, 长按各行的快捷动作
     UILongPressGestureRecognizer *lp = [[UILongPressGestureRecognizer alloc]
         initWithTarget:self action:@selector(tableLongPressed:)];
     [self.tableView addGestureRecognizer:lp];
@@ -696,47 +714,32 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
     if (!ip) return;
     if (![self authOK]) {
         NSInteger kind = [self authRowKindAt:ip.row];
-        if (kind == 0)      [self svbAuthMenu];        // 授权状态行 -> 诊断 / 切换授权模式
-        else if (kind == 1) [self editGiteeSource];    // 本机 UDID 行 -> Gitee 名单地址
-        else if (kind == 2) [self editAuthSource];     // 立即联网校验行 -> 自定义源
+        if (kind == 0)      [self svbAuthMenu];        // 授权状态行 -> 诊断 / 清除授权
+        else if (kind == 1) [self svbCopyUDID];        // 本机 UDID 行 -> 复制
         else                [self svbImportTicket];    // 粘贴离线授权行 -> 直接导入
         return;
     }
-    if (ip.section == 3 && ip.row == 0) [self editAuthSource];   // 说明 -> 授权状态
+    if (ip.section == 3 && ip.row == 0) [self svbAuthMenu];   // 授权状态 -> 诊断 / 清除授权
+    if (ip.section == 3 && ip.row == 1) {                     // 素材路径 -> 复制路径
+        UIPasteboard.generalPasteboard.string = SVBMediaFriendlyRoot();
+        [self svbAlert:@"素材路径已复制" msg:SVBMediaFriendlyRoot()];
+    }
 }
 
-// v10.2.0: 长按「授权状态」-> 授权诊断 / 切换在线·离线模式
+// v10.3.0: 长按「授权状态」-> 授权诊断 / 清除本机授权
 - (void)svbAuthMenu {
-    BOOL offline = [self authOfflineOnly];
     UIAlertController *ac = [UIAlertController
-        alertControllerWithTitle:@"授权设置"
-                         message:(offline
-            ? @"当前是「纯离线模式」：插件不发起任何网络请求，靠作者发来的授权串授权，"
-              @"不需要代理 / 梯子。作者删除某条 UDID 不会影响本机。"
-            : @"当前是「在线模式」：插件会从托管地址拉取作者名单，"
-              @"作者删掉你这条 UDID 后最多 30 分钟掉授权。")
+        alertControllerWithTitle:@"授权"
+                         message:@"本插件只认「离线授权串」：作者按你的 UDID 生成一段文本发你，"
+                                 @"在这里粘贴导入即可。全程不联网，不需要代理 / 梯子。"
                   preferredStyle:UIAlertControllerStyleActionSheet];
     [ac addAction:[UIAlertAction actionWithTitle:@"授权诊断" style:UIAlertActionStyleDefault
                                           handler:^(UIAlertAction *a) { [self svbShowDiagnose]; }]];
-    [ac addAction:[UIAlertAction actionWithTitle:(offline ? @"切换到在线模式（需要能联网）"
-                                                          : @"切换到纯离线模式（不需要网络）")
-                                          style:UIAlertActionStyleDefault
-                                          handler:^(UIAlertAction *a) {
-        SVBAuthSetOfflineOnlyMode(!offline);
-        [self svbReloadAuthState];
-        [self.tableView reloadData];
-        [self svbAlert:(offline ? @"已切到在线模式" : @"已切到纯离线模式")
-                   msg:(offline
-            ? @"插件会开始联网拉取作者名单。作者删掉你这条 UDID 后，本机最多 30 分钟掉授权。\n\n"
-              @"注意：这条通道要求本机能连上托管地址，国内网络可能需要代理。"
-            : @"插件已停止一切联网请求，只认已导入的授权串。\n\n"
-              @"客户不需要任何代理 / 梯子；作者删除 UDID 不再影响本机，授权只得到期为止。")];
-    }]];
-    if (!offline) {
-        [ac addAction:[UIAlertAction actionWithTitle:@"自定义授权服务地址" style:UIAlertActionStyleDefault
-                                              handler:^(UIAlertAction *a) { [self editAuthSource]; }]];
-        [ac addAction:[UIAlertAction actionWithTitle:@"Gitee 名单地址" style:UIAlertActionStyleDefault
-                                              handler:^(UIAlertAction *a) { [self editGiteeSource]; }]];
+    [ac addAction:[UIAlertAction actionWithTitle:@"粘贴离线授权" style:UIAlertActionStyleDefault
+                                          handler:^(UIAlertAction *a) { [self svbImportTicket]; }]];
+    if (SVBAuthHasOfflineTicket(NULL)) {
+        [ac addAction:[UIAlertAction actionWithTitle:@"清除本机授权" style:UIAlertActionStyleDestructive
+                                              handler:^(UIAlertAction *a) { [self svbClearLicense]; }]];
     }
     [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
     ac.popoverPresentationController.sourceView = self.tableView;
@@ -773,92 +776,13 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
     [self presentViewController:ac animated:YES completion:nil];
 }
 
-// v10.1.0: Gitee(码云) 名单地址 —— 国内网络直连首选
-- (void)editGiteeSource {
-    NSString *cur = SVBAuthGiteeURL();
-    UIAlertController *ac = [UIAlertController
-        alertControllerWithTitle:@"Gitee 名单地址"
-                         message:@"填作者提供的 Gitee raw 地址（形如 …/raw/main/auth.json）。\n"
-                                 @"Gitee 是国内站点，不挂代理也能拉通。留空＝不用 Gitee。"
-                  preferredStyle:UIAlertControllerStyleAlert];
-    [ac addTextFieldWithConfigurationHandler:^(UITextField *tf) {
-        tf.text = cur ?: @"";
-        tf.placeholder = @"https://gitee.com/用户名/仓库/raw/main/auth.json";
-        tf.keyboardType = UIKeyboardTypeURL;
-        tf.autocapitalizationType = UITextAutocapitalizationTypeNone;
-        tf.autocorrectionType = UITextAutocorrectionTypeNo;
-        tf.clearButtonMode = UITextFieldViewModeAlways;
-    }];
-    [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
-    [ac addAction:[UIAlertAction actionWithTitle:@"保存并校验" style:UIAlertActionStyleDefault
-                                        handler:^(UIAlertAction *a) {
-        SVBAuthSetGiteeURL(ac.textFields.firstObject.text);
-        [self svbAuthSync];
-        UIAlertController *ok = [UIAlertController
-            alertControllerWithTitle:@"已保存"
-                             message:[SVBAuthGiteeURL() length]
-                                     ? @"已把 Gitee 地址加入拉取列表。"
-                                     : @"已清除 Gitee 地址。"
-                      preferredStyle:UIAlertControllerStyleAlert];
-        [ok addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
-        [self presentViewController:ok animated:YES completion:nil];
-    }]];
-    [self presentViewController:ac animated:YES completion:nil];
-}
-
-// v10.1.0: 授权诊断 —— 逐个源实测, 直接看清哪一环断了
+// v10.3.0: 授权诊断 —— 纯本地自检 (UDID / 指纹 / 授权串验签), 不联网所以瞬间出结果
 - (void)svbShowDiagnose {
-    UIAlertController *wait = [UIAlertController
-        alertControllerWithTitle:@"正在诊断…"
-                         message:@"正在逐个源实测连通性，约十几秒。"
-                  preferredStyle:UIAlertControllerStyleAlert];
-    [self presentViewController:wait animated:YES completion:nil];
-    __weak typeof(self) w = self;
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        NSString *rep = SVBAuthDiagnose();
-        dispatch_async(dispatch_get_main_queue(), ^{
-            typeof(self) s = w;
-            if (!s) return;
-            [s dismissViewControllerAnimated:YES completion:^{
-                SVBTextViewController *vc = [[SVBTextViewController alloc] init];
-                vc.headTitle = @"授权诊断";
-                vc.text = rep;
-                [s.navigationController pushViewController:vc animated:YES];
-            }];
-        });
-    });
-}
-
-- (void)editAuthSource {
-    NSString *cur = SVBAuthCustomSourceURL();
-    UIAlertController *ac = [UIAlertController
-        alertControllerWithTitle:@"授权服务地址"
-                         message:@"留空 = 用内置多源（国内加速镜像 + GitHub 官方），一般不用改。\n"
-                                 @"若你有自己的托管地址（如对象存储），把完整 URL 填在这里。"
-                  preferredStyle:UIAlertControllerStyleAlert];
-    [ac addTextFieldWithConfigurationHandler:^(UITextField *tf) {
-        tf.text = cur ?: @"";
-        tf.placeholder = @"https://example.com/auth.json";
-        tf.keyboardType = UIKeyboardTypeURL;
-        tf.autocapitalizationType = UITextAutocapitalizationTypeNone;
-        tf.autocorrectionType = UITextAutocorrectionTypeNo;
-        tf.clearButtonMode = UITextFieldViewModeAlways;
-    }];
-    [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
-    [ac addAction:[UIAlertAction actionWithTitle:@"保存并校验" style:UIAlertActionStyleDefault
-                                        handler:^(UIAlertAction *a) {
-        SVBAuthSetCustomSourceURL(ac.textFields.firstObject.text);
-        [self svbAuthSync];
-        UIAlertController *ok = [UIAlertController
-            alertControllerWithTitle:@"已保存"
-                             message:[SVBAuthCustomSourceURL() length]
-                                     ? @"已改用你填写的地址校验。"
-                                     : @"已恢复内置多源。"
-                      preferredStyle:UIAlertControllerStyleAlert];
-        [ok addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
-        [self presentViewController:ok animated:YES completion:nil];
-    }]];
-    [self presentViewController:ac animated:YES completion:nil];
+    NSString *rep = SVBAuthDiagnose();
+    SVBTextViewController *vc = [[SVBTextViewController alloc] init];
+    vc.headTitle = @"授权诊断";
+    vc.text = rep;
+    [self.navigationController pushViewController:vc animated:YES];
 }
 
 - (void)viewWillAppear:(BOOL)animated {
@@ -878,7 +802,7 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
     if (section == 0) return 1;
     if (section == 1) return (NSInteger)_defs.count;
     if (section == 2) return 2; // 切后台自动清理 / 注入诊断横幅 (v9.9.11)
-    return 4; // 授权状态 / 素材总目录 / 诊断报告 / App名称与图标 (v1.9.0 加授权)
+    return 4; // 授权状态 / 素材路径 / 诊断报告 / App名称与图标
 }
 
 - (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
@@ -891,32 +815,29 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
 
 - (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
     if (![self authOK]) {
-        if ([self authOfflineOnly])
-            return @"① 点「本机 UDID」那一行复制，发给作者；\n"
-                    "② 作者会回你一段以 SVBOFFLINE1: 开头的授权串；\n"
-                    "③ 点「粘贴离线授权」把它导入，立刻生效。\n\n"
-                    "本机已关闭全部联网请求，不需要任何代理 / 梯子。有效期按作者签发的内容计，"
-                    "到期找作者要一段新的即可。\n\n"
-                    "长按第一行可查看「授权诊断」，或切换到「在线模式」。";
-        return @"【方式一 · 联网】点「本机 UDID」复制发给作者；作者签发后点「立即联网校验」生效。\n"
-                "作者删除你这条 UDID 记录后，本机最多 30 分钟掉授权。\n\n"
-                "【方式二 · 不联网】点「粘贴离线授权」导入作者发来的授权串，不用连网立刻生效。\n\n"
-                "长按第一行可查看「授权诊断」，或切回「纯离线模式」（不需要梯子）。";
+        return @"① 点「本机 UDID」那一行复制，发给作者；\n"
+                "② 作者会回你一段以 SVBOFFLINE1: 开头的授权串；\n"
+                "③ 点「粘贴离线授权」把它导入，立刻生效。\n\n"
+                "本机不发起任何网络请求，不需要代理 / 梯子。有效期按作者签发的内容计，"
+                "到期找作者要一段新的即可。\n\n"
+                "长按第一行可查看「授权诊断」或清除本机授权。";
     }
     if (section == 1)
         return @"点按某一行可为该界面导入/选用素材并单独设置不透明度/模糊度/音量。每个界面对应素材目录下一个独立的文件夹，用 Filza 直接放入视频同样生效。\n\n「对话详情」= 点进某个对话后上下聊天的那个界面（不是列表）。「未导入素材」的界面不会显示视频背景，导入并打开开关后生效。";
     if (section == 2)
-        return @"「切后台自动清理」：信息App 划到后台超过设定时间就自动结束它的进程（从后台再进去等于重开），用来解决个别情况下回前台视频卡住的问题；设定时间内回来（复制粘贴、看眼别的 App）不会被清理。点这一行可以改时间。\n\n「显示注入诊断横幅」：打开信息App（或备忘录）时，窗口顶部会显示一条横幅：能看到它 = 插件注入成功。横幅里列出每个素材根是否可读、有几个素材，点一下可临时隐藏。";
+        return @"「切后台自动清理」：信息App 划到后台超过设定时间就自动结束它的进程（从后台再进去等于重开），用来解决个别情况下回前台视频卡住的问题；设定时间内回来（复制粘贴、看眼别的 App）不会被清理。点这一行可以改时间。\n\n「显示注入诊断横幅」：打开信息App（或备忘录）时，窗口顶部会显示一条横幅：能看到它 = 插件注入成功。横幅里列出素材目录是否可读、有几个素材，点一下可临时隐藏。";
     if (section == 3) {
-        NSString *primary = [[SVBManager shared] mediaDirectory];
         return [NSString stringWithFormat:
-                @"素材主目录（导入/删除/选用只作用于这里）：\n%@\n\n兜底目录（Filza 放这里也能读到）：\n%@\n各界面音量默认关闭。设置即时生效，无需注销。",
-                primary, SVBJBMediaDirectory()];
+                @"素材统一放在这一个文件夹里（点「素材路径」可直接跳到 Filza）：\n%@\n\n"
+                "下面每个界面一个子文件夹：main / all / known / unknown / unread / junk / deleted / chat。"
+                "用 Filza 把视频丢进对应子文件夹同样生效（丢在根目录也能被识别）。\n"
+                "各界面音量默认关闭。设置即时生效，无需注销。",
+                SVBMediaFriendlyRoot()];
     }
     return nil;
 }
 
-// v10.0.1: 未授权首页的唯一一栏 —— 授权状态 / 本机 UDID(点按复制) / 立即联网校验
+// v10.3.0: 未授权首页的唯一一栏 —— 授权状态 / 本机 UDID(点按复制) / 粘贴离线授权
 - (UITableViewCell *)authOnlyCell:(NSInteger)row tableView:(UITableView *)tableView {
     static NSString *authOnlyId = @"svb-home-authonly";
     UITableViewCell *c = [tableView dequeueReusableCellWithIdentifier:authOnlyId];
@@ -955,20 +876,7 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
             [UIColor colorWithRed:0.25 green:0.55 blue:1.00 alpha:1],
             [UIColor colorWithRed:0.40 green:0.80 blue:1.00 alpha:1]);
     } else if (kind == 2) {
-        NSTimeInterval ts = SVBAuthLastSyncTime();
-        NSDateFormatter *df = [[NSDateFormatter alloc] init];
-        df.dateFormat = @"MM-dd HH:mm";
-        c.textLabel.text = _authSyncing ? @"正在同步…" : @"立即联网校验";
-        c.detailTextLabel.text = [NSString stringWithFormat:@"名单 %ld 台 · %@",
-            (long)SVBAuthCachedCount(),
-            ts > 0 ? [df stringFromDate:[NSDate dateWithTimeIntervalSince1970:ts]] : @"未同步"];
-        c.detailTextLabel.font = [UIFont systemFontOfSize:13.5];
-        c.imageView.image = SVBBadgeIcon(@"arrow.triangle.2.circlepath",
-            [UIColor colorWithRed:0.30 green:0.62 blue:1.00 alpha:1],
-            [UIColor colorWithRed:0.55 green:0.45 blue:1.00 alpha:1]);
-    } else {
-        // v10.1.0: 完全不需要联网的兜底 —— 粘贴作者发的离线授权串
-        // v10.2.0: 纯离线模式下这就是唯一入口, 提到最显眼位置
+        // v10.3.0: 唯一的授权入口 —— 粘贴作者发的离线授权串
         c.textLabel.text = @"粘贴离线授权";
         c.detailTextLabel.text = SVBAuthOfflineTicketInfo();
         c.detailTextLabel.font = [UIFont systemFontOfSize:13.5];
@@ -1097,9 +1005,13 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
         return c;
     }
     if (indexPath.row == 1) {
-        c.textLabel.text = @"素材总目录";
-        c.detailTextLabel.text = @"查看/复制路径";
+        // v10.3.0: 统一素材路径 —— 点按跳 Filza, 长按复制路径
+        c.textLabel.text = @"素材路径";
+        c.detailTextLabel.text = [NSString stringWithFormat:@"%@  ›",
+                                  SVBMediaFriendlyRoot().lastPathComponent];
+        c.detailTextLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
         c.imageView.image = SVBIconForKey(@"__folder");
+        c.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
     } else if (indexPath.row == 2) {
         c.textLabel.text = @"诊断报告";
         c.detailTextLabel.text = @"排查问题";
@@ -1186,8 +1098,7 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
     if (![self authOK]) {
         NSInteger kind = [self authRowKindAt:indexPath.row];
         if (kind == 1)      [self svbCopyUDID];      // 本机 UDID -> 复制
-        else if (kind == 2) [self svbAuthSync];      // 立即联网校验 (仅在线模式)
-        else if (kind == 3) [self svbImportTicket];  // 粘贴离线授权
+        else if (kind == 2) [self svbImportTicket];  // 粘贴离线授权
         return;
     }
     if (indexPath.section == 2 && indexPath.row == 0) {
@@ -1205,6 +1116,11 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
             [self.navigationController pushViewController:[[SVBAuthController alloc] init] animated:YES];
             return;
         }
+        if (indexPath.row == 1) {
+            // v10.3.0: 素材路径 —— 直接跳到 Filza (没装 Filza 就把路径放剪贴板)
+            SVBJumpToMediaPath(self, SVBMediaFriendlyRoot());
+            return;
+        }
         if (indexPath.row == 2) {
             [self.navigationController pushViewController:[[SVBDiagnosticsController alloc] init] animated:YES];
             return;
@@ -1213,15 +1129,6 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
             [self.navigationController pushViewController:[[SVBAppIdentityController alloc] init] animated:YES];
             return;
         }
-        NSString *path = [NSString stringWithFormat:
-            @"素材主目录：\n%@\n\n兜底目录：\n%@", [[SVBManager shared] mediaDirectory], SVBJBMediaDirectory()];
-        UIPasteboard.generalPasteboard.string = path;
-        UIAlertController *ac = [UIAlertController
-            alertControllerWithTitle:@"素材目录（已复制到剪贴板）"
-                             message:path
-                      preferredStyle:UIAlertControllerStyleAlert];
-        [ac addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
-        [self presentViewController:ac animated:YES completion:nil];
     }
 }
 
@@ -1266,7 +1173,8 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
     if (section == 0) return [self.contextKey isEqualToString:SVBContextChat] ? 4 : 3; // 不透明度/模糊度/音量 (对话详情另加气泡不透明度)
-    return MAX(1, (NSInteger)[[SVBManager shared] videosForContext:self.contextKey].count) + 1;
+    // 素材行 + 「从相册导入视频素材」+ 「在 Filza 中打开素材文件夹」
+    return MAX(1, (NSInteger)[[SVBManager shared] videosForContext:self.contextKey].count) + 2;
 }
 
 - (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
@@ -1275,13 +1183,11 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
 
 - (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
     if (section != 1) return nil;
-    // v1.5: 主根精确唯一 (导入/删除/选用都在这里), jbroot 仅作 Filza 兜底
-    NSString *primary = [[SVBManager shared] mediaDirectory];
+    // v10.3.0: 素材只有一个统一文件夹 (其余界面共用同一个父目录下的不同子文件夹)
     return [NSString stringWithFormat:
-        @"素材主目录（导入/删除/选用只作用于这里，Filza 放文件也请放这）：\n%@\n\n"
-        "兜底目录（放在这里的视频也会被读取，导入时会自动搬进主目录）：\n%@\n\n"
-        "左滑素材行可删除；放入新文件后下拉刷新。",
-        primary, SVBJBMediaDirectory()];
+        @"素材统一放在这一个文件夹里（点下方「在 Filza 中打开素材文件夹」直达）：\n%@\n\n"
+        "本界面用的是其中的「%@」子文件夹；放新文件后下拉刷新即可。左滑素材行可删除。",
+        SVBMediaFriendlyRoot(), self.contextKey];
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
@@ -1339,7 +1245,7 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
 
     NSArray<NSString *> *videos = [mgr videosForContext:self.contextKey];
     NSString *active = [mgr activeVideoNameForContext:self.contextKey];
-    NSInteger rows = (NSInteger)MAX(1, (NSInteger)videos.count) + 1;
+    NSInteger rows = (NSInteger)MAX(1, (NSInteger)videos.count) + 2;
 
     if (videos.count == 0 && indexPath.row == 0) {
         c.textLabel.text = @"素材文件夹为空，点下方「从相册导入视频素材」";
@@ -1348,7 +1254,7 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
         c.imageView.image = nil;
         c.detailTextLabel.text = nil;
         c.accessoryType = UITableViewCellAccessoryNone;
-        SVBApplyCardStyle(c, 0, 1);
+        SVBApplyCardStyle(c, 0, rows);
         return c;
     }
     if (indexPath.row < (NSInteger)videos.count) {
@@ -1367,11 +1273,24 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
         SVBApplyCardStyle(c, indexPath.row, rows);
         return c;
     }
-    c.textLabel.text = @"从相册导入视频素材";
+    if (indexPath.row == (NSInteger)videos.count) {
+        c.textLabel.text = @"从相册导入视频素材";
+        c.textLabel.textColor = SVBAccent();
+        c.textLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightMedium];
+        c.imageView.image = SVBIconForKey(@"__import");
+        c.detailTextLabel.text = nil;
+        c.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+        SVBApplyCardStyle(c, indexPath.row, rows);
+        return c;
+    }
+    // v10.3.0: 跳转到统一素材路径 (本界面的子文件夹)
+    c.textLabel.text = @"在 Filza 中打开素材文件夹";
     c.textLabel.textColor = SVBAccent();
     c.textLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightMedium];
-    c.imageView.image = SVBIconForKey(@"__import");
-    c.detailTextLabel.text = nil;
+    c.imageView.image = SVBIconForKey(@"__open");
+    c.detailTextLabel.text = @"跳转";
+    c.detailTextLabel.textColor = [UIColor secondaryLabelColor];
+    c.detailTextLabel.font = [UIFont systemFontOfSize:13.5];
     c.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
     SVBApplyCardStyle(c, indexPath.row, rows);
     return c;
@@ -1381,7 +1300,10 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
     if (indexPath.section != 1) return;
     NSArray<NSString *> *videos = [[SVBManager shared] videosForContext:self.contextKey];
-    if (videos.count == 0 || indexPath.row >= (NSInteger)videos.count) {
+    NSInteger n = (NSInteger)videos.count;
+    // v10.3.0: 最后一行 = 跳转素材路径 (Filza)
+    if (indexPath.row > n) { [self openFolderInFilza]; return; }
+    if (videos.count == 0 || indexPath.row >= n) {
         [self importFromLibrary];
         return;
     }
@@ -1405,6 +1327,12 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
     }]];
     [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
     [self presentViewController:ac animated:YES completion:nil];
+}
+
+// v10.3.0: 跳到本界面的素材文件夹 (Filza)
+- (void)openFolderInFilza {
+    [[SVBManager shared] contextDirectory:self.contextKey];   // 保证该子文件夹存在
+    SVBJumpToMediaPath(self, SVBMediaFriendlyPathForContext(self.contextKey));
 }
 
 // v1.8.2: 素材预览 —— AVPlayerViewController 全屏播放, 关闭即停
@@ -1740,86 +1668,22 @@ static void SVBAppPickImage(UIViewController *host, void (^done)(UIImage *image)
 
 @end
 
-#pragma mark - 授权页 (v10.0.0: UDID 白名单)
+#pragma mark - 授权页 (v10.3.0: 纯离线授权串)
 
-// 流程: 本机 UDID 复制给作者 -> 作者在签发 App 里签发 -> 写进远端白名单
-//       -> 本机自动拉取验签 -> 命中且未过期 = 已授权。
-// 作者删除该 UDID 后, 本机最多 30 分钟掉授权 (需联网; 离线超过 30 天也会要求重新校验)。
+// 流程: 本机 UDID 复制给作者 -> 作者在签发 App 里生成一段离线授权串 -> 客户在这里导入。
+// 全程不联网, 客户国内网络直连即可, 不需要代理 / 梯子。
+// 代价: 授权串发出后无法远程收回, 只能等到期 (想控制节奏就让作者签短一点)。
 @implementation SVBAuthController {
     SVBAuthState _state;
     NSString *_detail;
-    BOOL _syncing;
 }
-
-// v10.2.0: 纯离线模式 (默认) —— 插件不发起任何网络请求
-- (BOOL)authOfflineOnly { return SVBAuthOfflineOnlyMode(); }
 
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.title = @"授权";
     self.tableView.backgroundColor = [UIColor systemGroupedBackgroundColor];
     self.tableView.separatorStyle = UITableViewCellSeparatorStyleNone;
-    // v10.0.2: 长按「立即联网校验」可改自定义授权服务地址
-    UILongPressGestureRecognizer *lp = [[UILongPressGestureRecognizer alloc]
-        initWithTarget:self action:@selector(tableLongPressed:)];
-    [self.tableView addGestureRecognizer:lp];
     [self reloadAuth];
-}
-
-- (void)tableLongPressed:(UILongPressGestureRecognizer *)gr {
-    if (gr.state != UIGestureRecognizerStateBegan) return;
-    NSIndexPath *ip = [self.tableView indexPathForRowAtPoint:[gr locationInView:self.tableView]];
-    if (!ip) return;
-    if (ip.section == 1) [self editAuthSource];        // 同步区 -> 自定义授权服务地址
-    else if (ip.section == 2) [self editGiteeSource];  // 排查区 -> Gitee 名单地址
-}
-
-// v10.1.0: Gitee(码云) 名单地址 —— 国内网络直连首选
-- (void)editGiteeSource {
-    NSString *cur = SVBAuthGiteeURL();
-    UIAlertController *ac = [UIAlertController
-        alertControllerWithTitle:@"Gitee 名单地址"
-                         message:@"填作者提供的 Gitee raw 地址（形如 …/raw/main/auth.json）。\n"
-                                 @"Gitee 是国内站点，不挂代理也能拉通。留空＝不用 Gitee。"
-                  preferredStyle:UIAlertControllerStyleAlert];
-    [ac addTextFieldWithConfigurationHandler:^(UITextField *tf) {
-        tf.text = cur ?: @"";
-        tf.placeholder = @"https://gitee.com/用户名/仓库/raw/main/auth.json";
-        tf.keyboardType = UIKeyboardTypeURL;
-        tf.autocapitalizationType = UITextAutocapitalizationTypeNone;
-        tf.autocorrectionType = UITextAutocorrectionTypeNo;
-        tf.clearButtonMode = UITextFieldViewModeAlways;
-    }];
-    [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
-    [ac addAction:[UIAlertAction actionWithTitle:@"保存并校验" style:UIAlertActionStyleDefault
-                                        handler:^(UIAlertAction *a) {
-        SVBAuthSetGiteeURL(ac.textFields.firstObject.text);
-        [self syncNow];
-    }]];
-    [self presentViewController:ac animated:YES completion:nil];
-}
-
-- (void)editAuthSource {
-    NSString *cur = SVBAuthCustomSourceURL();
-    UIAlertController *ac = [UIAlertController
-        alertControllerWithTitle:@"授权服务地址"
-                         message:@"留空 = 用内置多源（国内加速镜像 + GitHub 官方），一般不用改。"
-                  preferredStyle:UIAlertControllerStyleAlert];
-    [ac addTextFieldWithConfigurationHandler:^(UITextField *tf) {
-        tf.text = cur ?: @"";
-        tf.placeholder = @"https://example.com/auth.json";
-        tf.keyboardType = UIKeyboardTypeURL;
-        tf.autocapitalizationType = UITextAutocapitalizationTypeNone;
-        tf.autocorrectionType = UITextAutocorrectionTypeNo;
-        tf.clearButtonMode = UITextFieldViewModeAlways;
-    }];
-    [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
-    [ac addAction:[UIAlertAction actionWithTitle:@"保存并校验" style:UIAlertActionStyleDefault
-                                        handler:^(UIAlertAction *a) {
-        SVBAuthSetCustomSourceURL(ac.textFields.firstObject.text);
-        [self syncNow];
-    }]];
-    [self presentViewController:ac animated:YES completion:nil];
 }
 
 - (void)viewWillAppear:(BOOL)animated {
@@ -1829,64 +1693,33 @@ static void SVBAppPickImage(UIViewController *host, void (^done)(UIImage *image)
 
 - (void)reloadAuth {
     NSString *det = nil;
-    SVBAuthRefreshIfNeeded(NO);              // 内部 30 分钟节流
+    SVBAuthInvalidateCache();        // 纯本地复算, 不联网
     _state = SVBAuthCurrentState(&det);
     _detail = det;
     [self.tableView reloadData];
-}
-
-- (void)syncNow {
-    if ([self authOfflineOnly]) {   // v10.2.0: 纯离线模式不联网
-        [self alert:@"当前是纯离线模式"
-                msg:@"本机已关闭全部联网请求，所以不会去拉取作者名单。\n\n"
-                    @"把作者发来的授权串（以 SVBOFFLINE1: 开头）用「粘贴离线授权」导入即可。\n"
-                    @"想改成联网校验，请点「授权模式」切换。"];
-        return;
-    }
-    SVBAuthRefreshIfNeeded(YES);
-    _syncing = YES;
-    [self reloadAuth];
-    __weak typeof(self) w = self;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4.0 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        typeof(self) s = w;                 // ARC: 先拿强引用, 才能碰 ivar
-        if (!s) return;
-        s->_syncing = NO;
-        [s reloadAuth];
-    });
 }
 
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView { return 3; }
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
     if (section == 0) return 2;   // 本机 UDID / 授权状态
-    // 授权模式 / [在线] 立即联网校验 / 粘贴离线授权
-    if (section == 1) return [self authOfflineOnly] ? 2 : 3;
+    if (section == 1) return 2;   // 粘贴离线授权 / 清除本机授权
     return 1;                     // 授权诊断
 }
 
 - (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
     if (section == 0) return @"设备";
-    if (section == 1) return @"授权方式";
+    if (section == 1) return @"离线授权";
     return @"排查";
 }
 
 - (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
     if (section == 0) return nil;
-    if (section == 1) {
-        if ([self authOfflineOnly])
-            return @"当前为「纯离线模式」：本机不发起任何网络请求，不需要代理 / 梯子。\n\n"
-                    "把作者发来的授权串（以 SVBOFFLINE1: 开头）点「粘贴离线授权」导入即可，立刻生效。\n"
-                    "有效期按作者签发的天数计，到期找作者要一段新的。\n\n"
-                    "想恢复「作者删掉 UDID 即掉授权」，点「授权模式」切到在线。";
-        return @"【联网】点「立即联网校验」从作者名单拉取授权；作者删掉你这条 UDID 后，本机最多 30 分钟掉授权。\n\n"
-                "【不联网】点「粘贴离线授权」导入作者发来的授权串，不用任何网络立即生效。\n\n"
-                "两条路可以同时用：平时走联网，网络不通时用离线串顶着。\n"
-                "若本机网络连不上托管地址，点「授权模式」切回纯离线即可（不需要梯子）。";
-    }
-    return @"「授权诊断」会逐个源实测连通性，直接告诉你是网络拉不通、UDID 不在作者名单里，还是名单被改坏了。\n\n"
-            "长按「授权模式」可填写 Gitee 名单地址（国内直连首选）；长按「立即联网校验」可填自定义授权服务地址。\n\n"
-            "（纯离线模式下这些联网入口都不生效，因为插件不会联网。）";
+    if (section == 1)
+        return @"把作者发来的授权串（以 SVBOFFLINE1: 开头）点「粘贴离线授权」导入即可，立刻生效。\n"
+                "授权串只对一台设备有效（已绑定本机指纹），有效期按作者签发的天数计，到期找作者要一段新的。\n\n"
+                "本机不发起任何网络请求 —— 不需要代理 / 梯子。";
+    return @"「授权诊断」是纯本机自检（UDID / 指纹 / 授权串验签），不联网，秒出结果。";
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
@@ -1922,51 +1755,12 @@ static void SVBAppPickImage(UIViewController *host, void (^done)(UIImage *image)
             ok ? [UIColor colorWithRed:0.35 green:0.85 blue:0.65 alpha:1]
                : [UIColor colorWithRed:1.00 green:0.42 blue:0.30 alpha:1]);
         c.detailTextLabel.font = [UIFont systemFontOfSize:14];
-        c.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
         SVBApplyCardStyle(c, 1, 2);
         return c;
     }
 
-    // section 1: 授权方式
-    if (indexPath.section == 1) {
-        BOOL offline = [self authOfflineOnly];
-        NSInteger total = offline ? 2 : 3;
-
-        if (indexPath.row == 0) {
-            // v10.2.0: 授权模式 —— 纯离线(默认, 客户不需要梯子) / 在线(可远程撤销)
-            c.textLabel.text = @"授权模式";
-            c.detailTextLabel.text = offline ? @"纯离线（不联网）" : @"在线（联网校验）";
-            c.detailTextLabel.font = [UIFont systemFontOfSize:13.5];
-            c.detailTextLabel.textColor = offline ? SVBAccent() : [UIColor systemOrangeColor];
-            c.imageView.image = SVBBadgeIcon(offline ? @"wifi.slash" : @"wifi",
-                offline ? [UIColor colorWithRed:0.35 green:0.72 blue:0.45 alpha:1]
-                        : [UIColor colorWithRed:0.30 green:0.62 blue:1.00 alpha:1],
-                offline ? [UIColor colorWithRed:0.60 green:0.85 blue:0.50 alpha:1]
-                        : [UIColor colorWithRed:0.55 green:0.45 blue:1.00 alpha:1]);
-            c.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
-            SVBApplyCardStyle(c, 0, total);
-            return c;
-        }
-
-        if (!offline && indexPath.row == 1) {
-            NSTimeInterval ts = SVBAuthLastSyncTime();
-            NSDateFormatter *df = [[NSDateFormatter alloc] init];
-            df.dateFormat = @"MM-dd HH:mm";
-            c.textLabel.text = _syncing ? @"正在同步…" : @"立即联网校验";
-            c.detailTextLabel.text = [NSString stringWithFormat:@"名单 %ld 台 · %@",
-                (long)SVBAuthCachedCount(),
-                ts > 0 ? [df stringFromDate:[NSDate dateWithTimeIntervalSince1970:ts]] : @"未同步"];
-            c.detailTextLabel.font = [UIFont systemFontOfSize:13.5];
-            c.detailTextLabel.textColor = [UIColor secondaryLabelColor];
-            c.imageView.image = SVBBadgeIcon(@"arrow.triangle.2.circlepath",
-                [UIColor colorWithRed:0.30 green:0.62 blue:1.00 alpha:1],
-                [UIColor colorWithRed:0.55 green:0.45 blue:1.00 alpha:1]);
-            c.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
-            SVBApplyCardStyle(c, 1, total);
-            return c;
-        }
-
-        // v10.1.0: 不需要联网的兜底 —— 粘贴作者发的离线授权串
+    // section 1: 离线授权
+    if (indexPath.section == 1 && indexPath.row == 0) {
         c.textLabel.text = @"粘贴离线授权";
         c.detailTextLabel.text = SVBAuthOfflineTicketInfo();
         c.detailTextLabel.font = [UIFont systemFontOfSize:13.5];
@@ -1976,13 +1770,25 @@ static void SVBAppPickImage(UIViewController *host, void (^done)(UIImage *image)
             [UIColor colorWithRed:0.45 green:0.75 blue:0.35 alpha:1],
             [UIColor colorWithRed:0.70 green:0.85 blue:0.40 alpha:1]);
         c.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
-        SVBApplyCardStyle(c, total - 1, total);
+        SVBApplyCardStyle(c, 0, 2);
+        return c;
+    }
+    if (indexPath.section == 1) {
+        c.textLabel.text = @"清除本机授权";
+        c.textLabel.textColor = [UIColor systemRedColor];
+        c.detailTextLabel.text = SVBAuthHasOfflineTicket(NULL) ? @"可重新导入" : @"当前没有授权";
+        c.detailTextLabel.font = [UIFont systemFontOfSize:13.5];
+        c.detailTextLabel.textColor = [UIColor secondaryLabelColor];
+        c.imageView.image = SVBBadgeIcon(@"trash.fill",
+            [UIColor colorWithRed:0.85 green:0.30 blue:0.30 alpha:1],
+            [UIColor colorWithRed:1.00 green:0.45 blue:0.40 alpha:1]);
+        SVBApplyCardStyle(c, 1, 2);
         return c;
     }
 
-    // section 2: 排查 —— 逐个源实测
+    // section 2: 排查
     c.textLabel.text = @"授权诊断";
-    c.detailTextLabel.text = @"逐个源实测连通性";
+    c.detailTextLabel.text = @"本机自检";
     c.detailTextLabel.font = [UIFont systemFontOfSize:13.5];
     c.detailTextLabel.textColor = [UIColor secondaryLabelColor];
     c.imageView.image = SVBBadgeIcon(@"stethoscope",
@@ -1995,74 +1801,37 @@ static void SVBAppPickImage(UIViewController *host, void (^done)(UIImage *image)
 
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
-    if (indexPath.section == 0 && indexPath.row == 0) {
-        NSString *udid = SVBAuthUDID();
-        if (!udid.length) {
-            [self alert:@"读不到 UDID"
-                     msg:@"本机读不到硬件 UDID / 序列号，没法走 UDID 授权。\n"
-                          @"请联系作者说明情况。"];
-            return;
-        }
-        [UIPasteboard generalPasteboard].string = udid;
-        [self alert:@"UDID 已复制"
-                 msg:[NSString stringWithFormat:
-            @"%@\n\n识别方式：%@\n把它发给作者，让作者为你签发授权。\n\n"
-            @"（作者删除这条记录后，本机最多 30 分钟掉授权）",
-            udid, SVBAuthUDIDSource()]];
-        return;
-    }
+    if (indexPath.section == 0 && indexPath.row == 0) { [self copyUDID]; return; }
     if (indexPath.section == 1) {
-        BOOL offline = [self authOfflineOnly];
-        if (indexPath.row == 0) { [self toggleAuthMode]; return; }         // 授权模式
-        if (!offline && indexPath.row == 1) { [self syncNow]; return; }    // 立即联网校验
-        [self importTicket];                                               // 粘贴离线授权
+        if (indexPath.row == 0) [self importTicket];
+        else                    [self clearTicket];
         return;
     }
     [self showDiagnose];
 }
 
-// v10.2.0: 切换「纯离线 / 在线」授权模式
-- (void)toggleAuthMode {
-    BOOL offline = [self authOfflineOnly];
-    UIAlertController *ac = [UIAlertController
-        alertControllerWithTitle:@"授权模式"
-                         message:(offline
-            ? @"当前：纯离线 —— 本机不联网，靠作者发来的授权串授权，不需要代理 / 梯子。\n\n"
-              @"代价：作者删除某条 UDID 不会影响本机，授权只得到期为止。"
-            : @"当前：在线 —— 本机从托管地址拉取作者名单，作者删掉 UDID 最多 30 分钟掉授权。\n\n"
-              @"注意：这条通道要求能连上托管地址，国内网络可能需要代理。")
-                  preferredStyle:UIAlertControllerStyleActionSheet];
-    [ac addAction:[UIAlertAction actionWithTitle:(offline ? @"切换到在线模式（需要能联网）"
-                                                          : @"切换到纯离线模式（不需要网络）")
-                                          style:UIAlertActionStyleDefault
-                                          handler:^(UIAlertAction *a) {
-        SVBAuthSetOfflineOnlyMode(!offline);
-        [self reloadAuth];
-        [self alert:(offline ? @"已切到在线模式" : @"已切到纯离线模式")
-                msg:(offline
-            ? @"插件会开始联网拉取作者名单；作者删掉你这条 UDID 后最多 30 分钟掉授权。"
-            : @"插件已停止一切联网请求，只认已导入的授权串。\n\n"
-              @"客户不需要任何代理 / 梯子；作者删除 UDID 不再影响本机，授权只得到期为止。")];
-    }]];
-    if (!offline) {
-        [ac addAction:[UIAlertAction actionWithTitle:@"自定义授权服务地址" style:UIAlertActionStyleDefault
-                                              handler:^(UIAlertAction *a) { [self editAuthSource]; }]];
-        [ac addAction:[UIAlertAction actionWithTitle:@"Gitee 名单地址" style:UIAlertActionStyleDefault
-                                              handler:^(UIAlertAction *a) { [self editGiteeSource]; }]];
+// 复制本机 UDID (发给作者换授权串)
+- (void)copyUDID {
+    NSString *udid = SVBAuthUDID();
+    if (!udid.length) {
+        [self alert:@"读不到 UDID"
+                 msg:@"本机读不到硬件 UDID / 序列号，没法走 UDID 授权。\n请联系作者说明情况。"];
+        return;
     }
-    [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
-    ac.popoverPresentationController.sourceView = self.tableView;
-    ac.popoverPresentationController.sourceRect =
-        CGRectMake(self.tableView.bounds.size.width / 2, 80, 1, 1);
-    [self presentViewController:ac animated:YES completion:nil];
+    [UIPasteboard generalPasteboard].string = udid;
+    [self alert:@"UDID 已复制"
+             msg:[NSString stringWithFormat:
+        @"%@\n\n识别方式：%@\n把这一整串发给作者，作者会回你一段以 SVBOFFLINE1: 开头的授权串。\n\n"
+        @"拿到后回到本页点「粘贴离线授权」导入即可（不用联网）。",
+        udid, SVBAuthUDIDSource()]];
 }
 
-// v10.1.0: 粘贴离线授权串
+// 粘贴离线授权串
 - (void)importTicket {
     NSString *clip = [UIPasteboard generalPasteboard].string ?: @"";
     UIAlertController *ac = [UIAlertController
         alertControllerWithTitle:@"粘贴离线授权串"
-                         message:@"把作者发给你的一整段文本（以 SVBOFFLINE1: 开头）粘进来。\n"
+                         message:@"把作者发来的一整段文本（以 SVBOFFLINE1: 开头）粘进来。\n"
                                  @"不用联网立即生效，有效期按作者签发的天数计。"
                   preferredStyle:UIAlertControllerStyleAlert];
     [ac addTextFieldWithConfigurationHandler:^(UITextField *tf) {
@@ -2073,38 +1842,48 @@ static void SVBAppPickImage(UIViewController *host, void (^done)(UIImage *image)
         tf.clearButtonMode = UITextFieldViewModeAlways;
     }];
     [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    __weak typeof(self) w = self;
     [ac addAction:[UIAlertAction actionWithTitle:@"导入" style:UIAlertActionStyleDefault
                                         handler:^(UIAlertAction *a) {
         NSString *msg = nil;
         BOOL ok = SVBAuthImportTicket(ac.textFields.firstObject.text, &msg);
         SVBAuthInvalidateCache();
-        [self reloadAuth];
-        [self alert:ok ? @"导入成功" : @"导入失败" msg:msg ?: @""];
+        [w reloadAuth];
+        [w alert:(ok ? @"导入成功" : @"导入失败") msg:msg ?: @""];
     }]];
     [self presentViewController:ac animated:YES completion:nil];
 }
 
-// v10.1.0: 逐源实测诊断
-- (void)showDiagnose {
-    UIAlertController *wait = [UIAlertController
-        alertControllerWithTitle:@"正在诊断…"
-                         message:@"正在逐个源实测连通性，约十几秒。"
-                  preferredStyle:UIAlertControllerStyleAlert];
-    [self presentViewController:wait animated:YES completion:nil];
+// 清除本机授权 (视频背景开关随之隐藏)
+- (void)clearTicket {
+    if (!SVBAuthHasOfflineTicket(NULL)) {
+        [self alert:@"当前没有授权" msg:@"本机没有已导入的授权串，不用清除。"];
+        return;
+    }
+    UIAlertController *ac = [UIAlertController
+        alertControllerWithTitle:@"清除本机授权？"
+                         message:@"清除后本机变回未授权（视频背景开关会被隐藏）。\n"
+                                 @"把作者发来的授权串重新粘回来即可恢复。"
+                  preferredStyle:UIAlertControllerStyleActionSheet];
     __weak typeof(self) w = self;
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        NSString *rep = SVBAuthDiagnose();
-        dispatch_async(dispatch_get_main_queue(), ^{
-            typeof(self) s = w;
-            if (!s) return;
-            [s dismissViewControllerAnimated:YES completion:^{
-                SVBTextViewController *vc = [[SVBTextViewController alloc] init];
-                vc.headTitle = @"授权诊断";
-                vc.text = rep;
-                [s.navigationController pushViewController:vc animated:YES];
-            }];
-        });
-    });
+    [ac addAction:[UIAlertAction actionWithTitle:@"清除" style:UIAlertActionStyleDestructive
+                                        handler:^(UIAlertAction *a) {
+        SVBAuthClearTicket();
+        [w reloadAuth];
+    }]];
+    [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    ac.popoverPresentationController.sourceView = self.tableView;
+    ac.popoverPresentationController.sourceRect =
+        CGRectMake(self.tableView.bounds.size.width / 2, 120, 1, 1);
+    [self presentViewController:ac animated:YES completion:nil];
+}
+
+// 纯本地自检报告 (不联网)
+- (void)showDiagnose {
+    SVBTextViewController *vc = [[SVBTextViewController alloc] init];
+    vc.headTitle = @"授权诊断";
+    vc.text = SVBAuthDiagnose();
+    [self.navigationController pushViewController:vc animated:YES];
 }
 
 - (void)alert:(NSString *)title msg:(NSString *)msg {

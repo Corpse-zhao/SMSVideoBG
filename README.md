@@ -7,9 +7,16 @@
 - 七类界面独立视频背景（每界面独立开关）：
   - 所有信息 / 已知发件人 / 未知发件人 / 未读信息 / 垃圾信息 / 最近删除 / 对话详情
 - 总开关 + 全局效果：透明度（默认 65%）/ 模糊度（默认 8）/ 音量（默认关闭）
-- 素材管理，两种方式（每个界面一个独立文件夹：all/known/unknown/unread/junk/deleted/chat）：
-  - 相册导入：控制 App 内点「＋ 从相册导入视频素材」，可一次多选（最多 20 个），导入结束会逐个报出成功/失败原因
-  - Filza 直放：主目录 = 信息 App 数据容器 `.../Data/Application/<MobileSMS 容器>/Library/SMSVideoBG/<界面名>/`（控制 App 素材页底部会显示精确路径，直接照着放即可）；兜底目录 `/var/jb/Library/SMSVideoBG/<界面名>/`
+- 素材管理（v10.3.0：**只认一个统一文件夹**，每个界面一个子文件夹 `all/known/unknown/unread/junk/deleted/chat`）：
+  - 统一路径：`/var/mobile/信息视频背景素材/板栗仁/`（控制 App 主页「说明 → 素材路径」点一下直接在 Filza 里打开；长按复制路径）
+  - 相册导入：控制 App 内点「从相册导入视频素材」，可一次多选（最多 20 个），导入结束会逐个报出成功/失败原因
+  - Filza 直放：把视频丢进对应界面子文件夹即可（丢在根目录也能被识别）
+  - 说明：统一路径是个软链，真实文件在信息 App 数据容器 `<容器>/Library/SMSVideoBG/` 里 —— 因为沙盒宿主进程只能读容器，读不到 `/var/mobile` 下的普通目录。软链让两边指向同一份文件，放哪都生效。
+- 授权（v10.3.0：**纯离线**，插件零网络请求，国内网络直连即可，不需要代理 / 梯子）：
+  1. 控制 App「授权」页点「本机 UDID」复制，发给作者；
+  2. 作者在「授权签发」App 里粘贴 UDID、选有效天数，点「生成授权串」；
+  3. 客户在控制 App 点「粘贴离线授权」导入即生效，有效期按作者签发的内容计。
+  - 代价：授权串一旦发出，到期前无法远程收回 —— 想控制节奏就让作者签短一点。
 
 ### 导入失败怎么排查（v1.7 起）
 
@@ -19,9 +26,7 @@
 - 视频还在 iCloud 云端 → 先在「照片」里下载到本机再导入
 - 视频过大 / 存储空间不足 → 清理空间后重试
 - 单个都失败且日志显示「没有任何可写素材目录」 → 控制 App 没找到信息 App 容器，重启手机后重试
-- 控制入口：
-  - 独立控制 App「信息视频背景」（SMSVideoBGApp）
-  - 系统「设置」/ OneSettings 收纳 面板（SMSPrefs.bundle），面板内可一键打开控制 App（smsvideobg://）
+- 控制入口：独立控制 App「信息视频背景」（SMSVideoBGApp）
 
 ## 构建
 
@@ -31,13 +36,13 @@
 gmake package THEOS_PACKAGE_SCHEME=rootless FINALPACKAGE=1
 ```
 
-产物：`packages/com.nvb.smsvideobg_*_iphoneos-arm64.deb`
+产物：`packages/com.nvb.smsvideobg_*_iphoneos-arm64.deb`（签发 App 同仓库 `keygen/`，产物 `com.nvb.svbkeygen_*`）
 
 ## 架构
 
 | 组件 | 说明 |
 |---|---|
-| Tweak.x + SVBCommon.m | 主插件，注入 MobileSMS |
-| PrefsController.m + SVBCommon.m | SMSPrefs.bundle 设置面板 |
-| app/*.m + SVBCommon.m | 独立控制 App |
+| Tweak.x + SVBCommon.m + SVBAuth.m | 主插件，注入 MobileSMS（视频背景 + 素材根 + 离线授权判定） |
+| app/*.m + SVBCommon.m + SVBAuth.m | 独立控制 App（开关 / 素材 / 授权 / 诊断） |
+| keygen/*（独立 deb） | 授权签发 App：输 UDID + 选天数 → 生成离线授权串 |
 | 共享配置 | NSUserDefaults suite `com.nvb.smsvideobg` + Darwin 通知实时刷新 |

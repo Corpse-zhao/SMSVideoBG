@@ -6,36 +6,29 @@
 #import <string.h>
 #import <math.h>
 
+// ============================================================
+// 授权核心 v10.3.0 —— 纯离线授权串 (零网络)
+//   与签发 App (keygen/KGAuth.m) 共用同一把密钥:
+//   CI 从 GitHub Secret SVB_LICENSE_SECRET 注入。
+// ============================================================
+
 // 与签发 App 共用同一把密钥 (CI 从 GitHub Secret SVB_LICENSE_SECRET 注入)
 #ifndef SVB_LICENSE_SECRET
 #define SVB_LICENSE_SECRET "SVBG-LICENSE-FALLBACK-INSECURE-SET-CI-SECRET"
 #endif
 static const char *const kAuthSecret = SVB_LICENSE_SECRET;
 
-#define SVB_AUTH_KEY_MAP @"auth_map"        // 缓存: {H32: 到期dayIndex}
-#define SVB_AUTH_KEY_TS  @"auth_ts"         // 缓存: 上次成功同步时间
-#define SVB_AUTH_KEY_TRY @"auth_try_ts"     // 缓存: 上次尝试时间 (节流)
-#define SVB_AUTH_KEY_VTS @"auth_ver_ts"     // 缓存: 已采用名单自带的 ts (防旧名单回滚)
-#define SVB_AUTH_KEY_URL @"auth_url"        // 自定义授权服务地址 (空 = 用内置多源)
-#define SVB_AUTH_KEY_GITEE @"auth_gitee"    // Gitee(码云) 名单地址 (国内直连)
-#define SVB_AUTH_KEY_MODE @"auth_offline_only" // 纯离线模式开关 (默认 YES, v10.2.0)
-#define SVB_AUTH_KEY_OFFLINE @"auth_offline" // 离线授权串: {"h","e","t","s","at"}
-#define SVB_AUTH_INTERVAL (30 * 60.0)       // 30 分钟拉一次
-#define SVB_AUTH_TIMEOUT  9.0               // 单源超时 (并发拉, 不必留太长)
-#define SVB_AUTH_BODY_WINDOW 3.0            // 拿到首个可用响应后再等这么久, 取最新的一份
+#define SVB_AUTH_KEY_OFFLINE @"auth_offline"  // 离线授权串: {"h","e","t","s","at"}
+// 只读遗留: v10.2 及更早版本走在线名单时缓存的 {H32: dayIndex}。
+// 本机若曾在线授权过, 这里命中就继续认 (升级不踢人); 之后不再更新,
+// 因为 v10.3.0 起插件一个网络请求都不发。
+#define SVB_AUTH_KEY_LEGACY_MAP @"auth_map"
 
-// --- 离线授权串 (v10.1.0, v10.2.0 支持自定义期限) ---
+// --- 离线授权串 ---
 #define SVB_AUTH_TICKET_TAG @"SVBOFFLINE1:"
 // 仅用于兼容 v10.1.x 的旧记录 (那种记录没存签名, 本地可被手改, 只能硬截断保平安);
-// v10.2.0 起新记录会把整串字段存下来并在每次读取时复验签名, 因此期限由作者自由指定,
-// 不再有上限 —— 篡改任何字段都会导致验签失败, 记录作废。
+// v10.2.0 起新记录会把整串字段存下来并在每次读取时复验签名, 因此期限由作者自由指定。
 #define SVB_AUTH_TICKET_LEGACY_MAX_DAYS 90
-
-// 编译期内置的 Gitee 名单地址 (CI 用 GitHub Secret SVB_GITEE_URL 注入;
-// 也可在控制 App 里填, 写入配置键 auth_gitee 后优先级更高)
-#ifndef SVB_GITEE_URL
-#define SVB_GITEE_URL ""
-#endif
 
 // UDID 哈希前缀 (与签发 App 严格一致)
 static NSString * const kAuthHashPrefix = @"SMSVideoBG-AUTH/v1|";
@@ -69,7 +62,7 @@ NSString *SVBAuthDateTextForDayIndex(uint32_t idx) {
     return [df stringFromDate:[NSDate dateWithTimeIntervalSince1970:ts]];
 }
 
-#pragma mark - UDID / 哈希
+#pragma mark - UDID / 指纹
 
 NSString *SVBAuthNormalizeUDID(NSString *raw) {
     if (!raw.length) return nil;
@@ -130,7 +123,7 @@ NSString *SVBAuthDeviceHash(void) {
     return SVBAuthHashForUDID(udid);
 }
 
-#pragma mark - 白名单解析
+#pragma mark - 签名
 
 static NSString *SVBAuthHexLower(const unsigned char *bytes, int n) {
     NSMutableString *s = [NSMutableString stringWithCapacity:n * 2];
@@ -138,23 +131,7 @@ static NSString *SVBAuthHexLower(const unsigned char *bytes, int n) {
     return s;
 }
 
-// 签名原文: "SVBAUTH/v1|<ts>|<H32=dayIndex 升序逗号连接>"
-static NSString *SVBAuthPayloadString(NSInteger ts, NSDictionary<NSString *, NSNumber *> *devices) {
-    NSMutableArray *pairs = [NSMutableArray array];
-    for (NSString *h in devices) {
-        if (![h isKindOfClass:[NSString class]]) continue;
-        id v = [devices objectForKey:h];
-        if (![v respondsToSelector:@selector(longLongValue)]) continue;
-        long long n = [v longLongValue];
-        NSString *hu = [(NSString *)h uppercaseString];
-        if (hu.length != 32 || n < 0 || n > 0xFFFFFFFFLL) continue;
-        [pairs addObject:[NSString stringWithFormat:@"%@=%llu", hu, n]];
-    }
-    [pairs sortUsingSelector:@selector(compare:)];
-    return [NSString stringWithFormat:@"SVBAUTH/v1|%ld|%@", (long)ts,
-            [pairs componentsJoinedByString:@","]];
-}
-
+// HMAC-SHA256(secret, payload) -> 全 32 字节小写十六进制
 static NSString *SVBAuthSignatureHex(NSString *payload) {
     if (!payload.length) return @"";
     const char *utf8 = payload.UTF8String;
@@ -163,91 +140,24 @@ static NSString *SVBAuthSignatureHex(NSString *payload) {
     return SVBAuthHexLower(mac, CC_SHA256_DIGEST_LENGTH);
 }
 
-// 解析并验签; 通过返回 {H32: @(dayIndex)}, 否则 nil
-// outTs (可空) 回传名单自带的 ts —— 多源竞速时用它挑最新的一份
-static NSDictionary<NSString *, NSNumber *> *SVBAuthMapFromJSON(NSData *json, NSInteger *outTs) {
-    if (outTs) *outTs = 0;
-    if (!json.length) return nil;
-    id obj = [NSJSONSerialization JSONObjectWithData:json options:0 error:NULL];
-    if (![obj isKindOfClass:[NSDictionary class]]) return nil;
-    NSDictionary *d = (NSDictionary *)obj;
-    NSNumber *ver = d[@"v"], *ts = d[@"ts"];
-    NSDictionary *dev = d[@"devices"];
-    NSString *sig = d[@"sig"];
-    if (![ver isKindOfClass:[NSNumber class]] || ver.integerValue != 1) return nil;
-    if (![ts isKindOfClass:[NSNumber class]]) return nil;
-    if (![dev isKindOfClass:[NSDictionary class]]) return nil;
-    if (![sig isKindOfClass:[NSString class]] || sig.length != 64) return nil;
+#pragma mark - 判定 (纯本地)
 
-    NSMutableDictionary *clean = [NSMutableDictionary dictionary];
-    for (NSString *h in dev) {
-        if (![h isKindOfClass:[NSString class]] || h.length != 32) return nil;
-        id v = [dev objectForKey:h];
-        if (![v isKindOfClass:[NSNumber class]]) return nil;
-        long long n = [v longLongValue];
-        if (n < 0 || n > 0xFFFFFFFFLL) return nil;
-        [clean setObject:@(n) forKey:[h uppercaseString]];
-    }
-    NSString *expect = SVBAuthSignatureHex(SVBAuthPayloadString(ts.integerValue, clean));
-    if (![[sig lowercaseString] isEqualToString:expect]) return nil;
-    if (outTs) *outTs = ts.integerValue;
-    return clean;
-}
-
-#pragma mark - 缓存
-
-static NSDictionary<NSString *, NSNumber *> *SVBAuthCachedMap(void) {
-    id v = nil;
-    @try { v = [[SVBManager shared] configValueForKey:SVB_AUTH_KEY_MAP]; } @catch (NSException *e) {}
-    return [v isKindOfClass:[NSDictionary class]] ? v : nil;
-}
-
-NSInteger SVBAuthCachedCount(void) {
-    return (NSInteger)SVBAuthCachedMap().count;
-}
-
-NSTimeInterval SVBAuthLastSyncTime(void) {
-    id v = nil;
-    @try { v = [[SVBManager shared] configValueForKey:SVB_AUTH_KEY_TS]; } @catch (NSException *e) {}
-    return [v respondsToSelector:@selector(doubleValue)] ? [v doubleValue] : 0;
-}
-
-BOOL SVBAuthCachedHasSelf(NSString **expText) {
+// 只读遗留: 早期在线名单缓存里的本机条目 (升级不踢人, 不再更新)
+static BOOL SVBAuthLegacyGrant(uint32_t *outExp) {
+    id raw = nil;
+    @try { raw = [[SVBManager shared] configValueForKey:SVB_AUTH_KEY_LEGACY_MAP]; } @catch (NSException *e) {}
+    if (![raw isKindOfClass:[NSDictionary class]]) return NO;
     NSString *hash = SVBAuthDeviceHash();
     if (!hash.length) return NO;
-    NSNumber *n = [SVBAuthCachedMap() objectForKey:hash];
+    NSNumber *n = [(NSDictionary *)raw objectForKey:hash];
     if (![n isKindOfClass:[NSNumber class]]) return NO;
-    if (expText) *expText = SVBAuthDateTextForDayIndex((uint32_t)[n unsignedIntValue]);
+    if (outExp) *outExp = (uint32_t)[n unsignedIntValue];
     return YES;
 }
 
-#pragma mark - 判定
-
-#pragma mark 纯离线模式 (v10.2.0, 默认开启)
-
-// 默认 YES: 插件一个网络请求都不发 —— 客户国内网络直连即可, 完全不需要梯子。
-// 授权靠作者发来的一段离线授权串(纯本地验签), 期限由作者签发时自由指定。
-// 关掉它 = 走在线名单(Gitee / GitHub 系源), 恢复"作者删掉 UDID 即掉授权"的能力,
-// 但那条路要求客户手机能连上托管地址。
-BOOL SVBAuthOfflineOnlyMode(void) {
-    @try {
-        id v = [[SVBManager shared] configValueForKey:SVB_AUTH_KEY_MODE];
-        if ([v respondsToSelector:@selector(boolValue)]) return [v boolValue];
-    } @catch (NSException *e) {}
-    return YES;   // 默认纯离线 (新装即为离线, 不需要任何联网)
-}
-
-void SVBAuthSetOfflineOnlyMode(BOOL only) {
-    @try {
-        [[SVBManager shared] setConfigValue:@(only) forKey:SVB_AUTH_KEY_MODE];
-        SVBAuthInvalidateCache();
-    } @catch (NSException *e) {}
-}
-
 // 离线授权串是否有效 (有效时回传到期 dayIndex)
-// v10.2.0: 记录里存了完整字段(h/e/t/s), 每次读取都复验一次签名 ——
-//   因此有效期由作者自由指定, 不再有 90 天上限; 客户手改 plist 里任何一位
-//   都会导致验签失败 -> 记录直接作废 (这是把上限让给作者的前提)。
+// 记录里存了完整字段(h/e/t/s), 每次读取都复验一次签名 ——
+// 因此有效期由作者自由指定, 没有上限; 客户手改 plist 里任何一位都会验签失败。
 static BOOL SVBAuthOfflineTicketExp(uint32_t *outExp) {
     id raw = nil;
     @try { raw = [[SVBManager shared] configValueForKey:SVB_AUTH_KEY_OFFLINE]; } @catch (NSException *e) {}
@@ -265,7 +175,7 @@ static BOOL SVBAuthOfflineTicketExp(uint32_t *outExp) {
     if ([h isKindOfClass:[NSString class]] && h.length &&
         [sig isKindOfClass:[NSString class]] && sig.length &&
         [t respondsToSelector:@selector(integerValue)]) {
-        // ---- v10.2.0 新格式: 有签名, 逐次复验 ----
+        // ---- 新格式: 有签名, 逐次复验 ----
         NSString *mine = SVBAuthDeviceHash();
         if (!mine.length || ![[h uppercaseString] isEqualToString:mine]) return NO;
         NSString *expect = SVBAuthSignatureHex(
@@ -296,102 +206,44 @@ SVBAuthState SVBAuthCurrentState(NSString **detail) {
         return SVBAuthStateNoUDID;
     }
 
-    BOOL offlineOnly = SVBAuthOfflineOnlyMode();
-
-    // 只有在线模式才发起网络请求。纯离线模式下这里一个请求都不发 ——
-    // 客户国内网络直连即可, 不需要梯子, 也不会有失败重试在后台耗电。
-    if (!offlineOnly) SVBAuthRefreshIfNeeded(NO);
-
+    // ① 离线授权串: 纯本地验签 —— v10.3.0 唯一的授权通道
     uint32_t offExp = 0;
-    BOOL offOK = SVBAuthOfflineTicketExp(&offExp);
-
-    // ① 离线授权串: 纯本地验签, 不看网络 —— 这是纯离线模式的主通道
-    if (offOK) {
+    if (SVBAuthOfflineTicketExp(&offExp)) {
         if (detail) *detail = (offExp == SVB_AUTH_FOREVER)
-            ? @"离线授权 · 永久有效"
-            : [NSString stringWithFormat:@"离线授权 · 有效期至 %@",
-               SVBAuthDateTextForDayIndex(offExp)];
+            ? @"永久有效"
+            : [NSString stringWithFormat:@"有效期至 %@", SVBAuthDateTextForDayIndex(offExp)];
         return SVBAuthStateAuthorized;
     }
 
-    // ---- 纯离线模式: 不再看「名单新鲜度」, 因为我们已经放弃了远程撤销 ----
-    if (offlineOnly) {
-        NSNumber *n0 = [SVBAuthCachedMap() objectForKey:hash];
-        if ([n0 isKindOfClass:[NSNumber class]]) {
-            uint32_t exp0 = (uint32_t)[n0 unsignedIntValue];
-            if (exp0 == SVB_AUTH_FOREVER) {
-                if (detail) *detail = @"永久授权";
-                return SVBAuthStateAuthorized;
-            }
-            if (SVBAuthDayIndexNow() <= exp0) {
-                if (detail) *detail = [NSString stringWithFormat:@"有效期至 %@",
-                                       SVBAuthDateTextForDayIndex(exp0)];
-                return SVBAuthStateAuthorized;
-            }
-            if (detail) *detail = [NSString stringWithFormat:@"已于 %@ 到期",
-                                   SVBAuthDateTextForDayIndex(exp0)];
-            return SVBAuthStateExpired;
-        }
-        if (detail) *detail = @"尚未导入授权";
-        return SVBAuthStateUnauthorized;
-    }
-
-    // ================= 以下为在线模式 (需要能连上托管地址) =================
-    NSDictionary<NSString *, NSNumber *> *map = SVBAuthCachedMap();
-    NSTimeInterval ts = SVBAuthLastSyncTime();
-    NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
-
-    // "在线名单新鲜" = 最近 30 天内成功联网校验过 (含确认名单为空)
-    BOOL onlineFresh = (ts > 0 &&
-                        (now - ts) <= SVB_AUTH_MAX_OFFLINE_DAYS * 86400.0 &&
-                        now + 86400.0 >= ts);
-
-    NSNumber *n = [map objectForKey:hash];
-
-    if ([n isKindOfClass:[NSNumber class]]) {
-        uint32_t exp = (uint32_t)[n unsignedIntValue];
-
-        if (onlineFresh) {
-            if (exp != SVB_AUTH_FOREVER) {
-                uint32_t today = SVBAuthDayIndexNow();
-                if (today > exp) {
-                    if (detail) *detail = [NSString stringWithFormat:@"已于 %@ 到期",
-                                           SVBAuthDateTextForDayIndex(exp)];
-                    return SVBAuthStateExpired;
-                }
-                if (detail) *detail = [NSString stringWithFormat:@"有效期至 %@",
-                                       SVBAuthDateTextForDayIndex(exp)];
-            } else {
-                if (detail) *detail = @"永久授权";
-            }
+    // ② 只读遗留: 老版本在线名单缓存里如果本来就有本机, 继续认 (不改不写)
+    uint32_t legacyExp = 0;
+    if (SVBAuthLegacyGrant(&legacyExp)) {
+        if (legacyExp == SVB_AUTH_FOREVER) {
+            if (detail) *detail = @"永久有效";
             return SVBAuthStateAuthorized;
         }
-
-        if (detail) *detail = @"离线过久，需要联网校验授权";
-        return SVBAuthStateOffline;
+        if (SVBAuthDayIndexNow() <= legacyExp) {
+            if (detail) *detail = [NSString stringWithFormat:@"有效期至 %@",
+                                   SVBAuthDateTextForDayIndex(legacyExp)];
+            return SVBAuthStateAuthorized;
+        }
+        if (detail) *detail = [NSString stringWithFormat:@"已于 %@ 到期",
+                               SVBAuthDateTextForDayIndex(legacyExp)];
+        return SVBAuthStateExpired;
     }
 
-    // 名单里没有本机 + 刚联网确认过 -> 以在线为准(作者删掉 UDID 即掉授权)
-    if (onlineFresh && map.count > 0) {
-        if (detail) *detail = @"本机不在授权名单里";
-        return SVBAuthStateUnauthorized;
-    }
-
-    if (ts <= 0) {
-        if (detail) *detail = @"尚未联网校验";
-        return SVBAuthStateOffline;
-    }
-    if (detail) *detail = @"本机不在授权名单里";
+    // ③ 没有有效授权串
+    if (detail) *detail = @"尚未导入授权串";
     return SVBAuthStateUnauthorized;
 }
 
-// v10.0.1: 缓存挪到文件作用域, 让「强制校验完成」可以立即作废它
-// (否则验证成功后最长 60 秒内 SVBIsLicensed() 还是旧结论, 用户会以为没生效)
-static SVBAuthState gAuthCachedState = SVBAuthStateOffline;
+// v10.0.1: 缓存挪到文件作用域, 让「导入授权串」可以立即作废它
+// (否则导入成功后最长 60 秒内 SVBIsLicensed() 还是旧结论, 用户会以为没生效)
+static SVBAuthState gAuthCachedState = SVBAuthStateUnauthorized;
 static NSTimeInterval gAuthCachedAt = 0;
 
 void SVBAuthInvalidateCache(void) {
-    gAuthCachedState = SVBAuthStateOffline;
+    gAuthCachedState = SVBAuthStateUnauthorized;
     gAuthCachedAt = 0;
 }
 
@@ -417,15 +269,12 @@ NSString *SVBAuthStateText(SVBAuthState st, NSString *detail) {
         case SVBAuthStateUnauthorized: core = @"未授权"; break;
         case SVBAuthStateNoUDID:       core = @"无法读取 UDID"; break;
         case SVBAuthStateOffline:
-        default:                       core = @"待联网校验"; break;
+        default:                       core = @"未授权"; break;
     }
     return detail.length ? [NSString stringWithFormat:@"%@ · %@", core, detail] : core;
 }
 
-#pragma mark - 离线授权串 (v10.1.0)
-
-// 前置声明 (定义在下面的「判定」区; C 里必须先声明再用)
-static BOOL SVBAuthOfflineTicketExp(uint32_t *outExp);
+#pragma mark - 离线授权串
 
 // 只留 base64 合法字符, 并补齐 padding (客户复制时常带空格/换行)
 static NSData *SVBAuthB64Decode(NSString *s) {
@@ -497,7 +346,7 @@ BOOL SVBAuthImportTicket(NSString *text, NSString **message) {
             break;
         }
 
-        // ③ 期限完全按作者签发的内容 (v10.2.0: 不再有 90 天上限)
+        // ③ 期限完全按作者签发的内容 (不再有 90 天上限)
         //    本条记录会把 h/e/t/s 一起存下来, 每次判定都复验签名 ——
         //    客户手改 plist 里任何一位都会验签失败, 记录直接作废。
         uint32_t today = SVBAuthDayIndexNow();
@@ -548,271 +397,7 @@ NSString *SVBAuthOfflineTicketInfo(void) {
     return [NSString stringWithFormat:@"有效 · 至 %@", txt];
 }
 
-#pragma mark - 拉取
-
-// v10.0.2: 多源「并发竞速」—— 国内网络不挂代理也能激活
-//   · 国内直连 raw.githubusercontent / api.github.com 基本不通, 靠公共加速镜像兜底;
-//   · 名单是 HMAC 签名的, 走任何第三方镜像都无法伪造 (改一个字节就验签失败 -> 忽略),
-//     所以"并发拉多个不可信源"在安全上是成立的;
-//   · 不再使用 cdn.jsdelivr.net: 它对分支引用有最长 12 小时缓存, 作者删掉 UDID 后
-//     可能长时间还拉到旧名单, 与"删除即失效"的语义冲突, 故移除;
-//   · 并发而不是顺序: 顺序时每个死源都要把超时耗完才轮到下一个, 首次激活体验很差。
-// v10.1.0: 客户实测"公共加速镜像在国内手机上也基本拉不到", 故把 Gitee(码云)
-//          作为首选国内直连源 —— 它是国内站点, 手机直连稳定, 且 raw 每次 302
-//          到带签名的新地址, 不做长缓存, "删除即失效"不受影响。
-
-NSString *SVBAuthGiteeURL(void) {
-    id v = nil;
-    @try { v = [[SVBManager shared] configValueForKey:SVB_AUTH_KEY_GITEE]; } @catch (NSException *e) {}
-    if ([v isKindOfClass:[NSString class]] && [(NSString *)v length]) return (NSString *)v;
-    NSString *k = @SVB_GITEE_URL;
-    return k.length ? k : nil;
-}
-
-void SVBAuthSetGiteeURL(NSString *url) {
-    @try {
-        NSString *t = url ? [url stringByTrimmingCharactersInSet:
-                                 [NSCharacterSet whitespaceAndNewlineCharacterSet]] : @"";
-        SVBManager *mgr = [SVBManager shared];
-        [mgr setConfigValue:(t.length ? t : @"") forKey:SVB_AUTH_KEY_GITEE];
-        [mgr setConfigValue:@(0) forKey:SVB_AUTH_KEY_TRY];   // 清节流: 下次立即按新地址拉
-        SVBAuthInvalidateCache();
-    } @catch (NSException *e) {}
-}
-
-NSString *SVBAuthCustomSourceURL(void) {
-    id v = nil;
-    @try { v = [[SVBManager shared] configValueForKey:SVB_AUTH_KEY_URL]; } @catch (NSException *e) {}
-    return ([v isKindOfClass:[NSString class]] && [(NSString *)v length]) ? (NSString *)v : nil;
-}
-
-void SVBAuthSetCustomSourceURL(NSString *url) {
-    @try {
-        NSString *t = url ? [url stringByTrimmingCharactersInSet:
-                                 [NSCharacterSet whitespaceAndNewlineCharacterSet]] : @"";
-        SVBManager *mgr = [SVBManager shared];
-        [mgr setConfigValue:(t.length ? t : @"") forKey:SVB_AUTH_KEY_URL];
-        [mgr setConfigValue:@(0) forKey:SVB_AUTH_KEY_TRY];   // 清节流: 下次立即按新地址拉
-        SVBAuthInvalidateCache();
-    } @catch (NSException *e) {}
-}
-
-static NSArray<NSString *> *SVBAuthURLs(void) {
-    NSMutableArray *urls = [NSMutableArray array];
-    NSString *custom = SVBAuthCustomSourceURL();
-    if (custom) [urls addObject:custom];            // 自定义源 (最高优先)
-
-    NSString *gitee = SVBAuthGiteeURL();            // 国内直连首选
-    if (gitee.length) [urls addObject:gitee];
-
-    NSString *raw = @"https://raw.githubusercontent.com/Corpse-zhao/SMSVideoBG/revoke/auth.json";
-    // GitHub 公共加速镜像 (挂了代理时很快; 国内手机实测多数不稳, 仅作兜底)
-    [urls addObject:[@"https://ghfast.top/"   stringByAppendingString:raw]];
-    [urls addObject:[@"https://gh-proxy.com/" stringByAppendingString:raw]];
-    [urls addObject:[@"https://ghproxy.net/"  stringByAppendingString:raw]];
-    [urls addObject:[@"https://gh.xmly.dev/"  stringByAppendingString:raw]];
-    // 原生源 (海外网络 / 挂了代理时最快最可靠)
-    [urls addObject:@"https://api.github.com/repos/Corpse-zhao/SMSVideoBG/contents/auth.json?ref=revoke"];
-    [urls addObject:raw];
-    return urls;
-}
-
-static NSLock *SVBAuthLock(void) {
-    static NSLock *lock = nil;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{ lock = [[NSLock alloc] init]; });
-    return lock;
-}
-
-static BOOL gSVBAuthRunning = NO;
-
-static void SVBAuthFetchAll(NSArray<NSString *> *urls) {
-    if (!urls.count) return;
-
-    NSLock *lock = [[NSLock alloc] init];
-    __block NSMutableArray *bodies = [NSMutableArray array];   // 200 响应体
-    __block NSTimeInterval firstBodyAt = 0;                    // 首个响应体到达时间
-    __block NSInteger saw404 = 0;
-
-    dispatch_group_t grp = dispatch_group_create();
-    for (NSString *urlStr in urls) {
-        NSURL *url = [NSURL URLWithString:urlStr];
-        if (!url) continue;
-
-        NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url];
-        req.timeoutInterval = SVB_AUTH_TIMEOUT;
-        req.cachePolicy = NSURLRequestReloadIgnoringLocalCacheData;
-        req.HTTPShouldHandleCookies = NO;
-        if ([urlStr containsString:@"api.github.com"])
-            [req setValue:@"application/vnd.github.raw" forHTTPHeaderField:@"Accept"];
-
-        dispatch_group_enter(grp);
-        NSURLSessionDataTask *task = [[NSURLSession sharedSession]
-            dataTaskWithRequest:req
-              completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
-                @try {
-                    NSInteger status = 0;
-                    if ([resp isKindOfClass:[NSHTTPURLResponse class]])
-                        status = ((NSHTTPURLResponse *)resp).statusCode;
-                    [lock lock];
-                    if (status == 404) {
-                        saw404++;
-                    } else if (!err && status == 200 && data.length) {
-                        [bodies addObject:data];
-                        if (firstBodyAt <= 0)
-                            firstBodyAt = [[NSDate date] timeIntervalSince1970];
-                    }
-                    [lock unlock];
-                } @catch (NSException *e) {}
-                dispatch_group_leave(grp);
-            }];
-        [task resume];
-    }
-
-    // 收集窗口: 全部完成 / 拿到首个响应后再等一会 / 总超时, 三者先到为准
-    NSTimeInterval deadline = [[NSDate date] timeIntervalSince1970] + SVB_AUTH_TIMEOUT + 3.0;
-    while (1) {
-        NSTimeInterval tick = [[NSDate date] timeIntervalSince1970];
-        if (tick >= deadline) break;
-        [lock lock];
-        NSUInteger cnt = bodies.count;
-        NSTimeInterval fb = firstBodyAt;
-        [lock unlock];
-        if (cnt > 0 && fb > 0 && tick - fb >= SVB_AUTH_BODY_WINDOW) break;
-        if (dispatch_group_wait(grp, dispatch_time(DISPATCH_TIME_NOW,
-                                                   (int64_t)(0.25 * NSEC_PER_SEC))) == 0) break;
-    }
-
-    [lock lock];
-    NSArray *snapshot = [bodies copy];
-    NSInteger n404 = saw404;
-    [lock unlock];
-
-    // 取 ts 最大的那一份 (并发多源里可能有缓存住的旧名单)
-    NSDictionary *best = nil;
-    NSInteger bestTs = 0;
-    for (NSData *b in snapshot) {
-        NSInteger t = 0;
-        NSDictionary *m = SVBAuthMapFromJSON(b, &t);
-        if (!m) continue;
-        if (!best || t > bestTs) { best = m; bestTs = t; }
-    }
-
-    SVBManager *mgr = [SVBManager shared];
-    NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
-
-    if (best) {
-        id pv = [mgr configValueForKey:SVB_AUTH_KEY_VTS];
-        NSInteger prevTs = [pv respondsToSelector:@selector(integerValue)] ? [pv integerValue] : 0;
-        if (bestTs < prevTs) {   // 防"旧名单回滚"把已删除的设备复活
-            [mgr log:@"[auth] 拉到的名单更旧 (v=%ld < %ld), 忽略", (long)bestTs, (long)prevTs];
-            return;
-        }
-        [mgr setConfigValue:best forKey:SVB_AUTH_KEY_MAP];
-        [mgr setConfigValue:@(bestTs) forKey:SVB_AUTH_KEY_VTS];
-        [mgr setConfigValue:@(now) forKey:SVB_AUTH_KEY_TS];
-        SVBAuthInvalidateCache();   // v10.0.1: 结论可能变了, 立即作废 60 秒判定缓存
-        [mgr log:@"[auth] 授权名单已更新: %lu 台设备 (v=%ld)",
-                 (unsigned long)best.count, (long)bestTs];
-        return;
-    }
-
-    if (n404 > 0) {
-        // 各源都说"没有名单文件": 只有本地也没缓存时才认定为"确认未授权"
-        if (SVBAuthCachedCount() == 0) {
-            [mgr setConfigValue:@(now) forKey:SVB_AUTH_KEY_TS];
-            SVBAuthInvalidateCache();
-        }
-        [mgr log:@"[auth] 各源均无名单文件(404), 本地缓存 %ld 台",
-                 (long)SVBAuthCachedCount()];
-        return;
-    }
-    [mgr log:@"[auth] 全部源失败或验签不通过, 沿用旧缓存"];
-}
-
-static void SVBAuthRefreshForce(void) {
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-        @try {
-            SVBAuthFetchAll(SVBAuthURLs());
-        } @catch (NSException *e) {}
-        [SVBAuthLock() lock];
-        gSVBAuthRunning = NO;
-        [SVBAuthLock() unlock];
-    });
-}
-
-void SVBAuthRefreshIfNeeded(BOOL force) {
-    @try {
-        // v10.2.0: 纯离线模式下一个请求都不发 (含手动触发) ——
-        // 客户国内网络直连即可, 不需要梯子。要联网请先在控制 App 里切到在线模式。
-        if (SVBAuthOfflineOnlyMode()) return;
-
-        SVBManager *mgr = [SVBManager shared];
-        NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
-
-        id tryV = [mgr configValueForKey:SVB_AUTH_KEY_TRY];
-        NSTimeInterval lastTry = [tryV respondsToSelector:@selector(doubleValue)] ? [tryV doubleValue] : 0;
-        if (!force && lastTry > 0 && now - lastTry < SVB_AUTH_INTERVAL) return;
-        [mgr setConfigValue:@(now) forKey:SVB_AUTH_KEY_TRY];
-
-        [SVBAuthLock() lock];
-        if (gSVBAuthRunning) { [SVBAuthLock() unlock]; return; }
-        gSVBAuthRunning = YES;
-        [SVBAuthLock() unlock];
-
-        SVBAuthRefreshForce();
-    } @catch (NSException *e) {}
-}
-
-#pragma mark - 诊断 (v10.1.0)
-
-// 同步探测单个地址 (仅诊断用, 会阻塞; 超时 8 秒)
-static NSInteger SVBAuthProbeSync(NSString *urlStr, NSData **outData,
-                                  NSString **outErr, double *outSec) {
-    if (outData) *outData = nil;
-    if (outErr)  *outErr  = nil;
-    if (outSec)  *outSec  = 0;
-
-    NSURL *url = [NSURL URLWithString:urlStr];
-    if (!url) { if (outErr) *outErr = @"地址非法"; return -1; }
-
-    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url];
-    req.timeoutInterval = 8.0;
-    req.cachePolicy = NSURLRequestReloadIgnoringLocalCacheData;
-    req.HTTPShouldHandleCookies = NO;
-    if ([urlStr containsString:@"api.github.com"])
-        [req setValue:@"application/vnd.github.raw" forHTTPHeaderField:@"Accept"];
-
-    __block NSData *body = nil;
-    __block NSInteger status = 0;
-    __block NSString *errStr = nil;
-    NSTimeInterval t0 = [[NSDate date] timeIntervalSince1970];
-
-    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
-    NSURLSessionDataTask *task = [[NSURLSession sharedSession]
-        dataTaskWithRequest:req
-          completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
-            body = data;
-            if ([resp isKindOfClass:[NSHTTPURLResponse class]])
-                status = ((NSHTTPURLResponse *)resp).statusCode;
-            if (err) errStr = err.localizedDescription;
-            dispatch_semaphore_signal(sem);
-        }];
-    [task resume];
-    dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(14.0 * NSEC_PER_SEC)));
-
-    if (outSec)  *outSec  = [[NSDate date] timeIntervalSince1970] - t0;
-    if (outData) *outData = body;
-    if (outErr)  *outErr  = errStr;
-    return status;
-}
-
-static NSString *SVBAuthTimeText(NSTimeInterval ts) {
-    if (ts <= 0) return @"从未";
-    NSDateFormatter *df = [[NSDateFormatter alloc] init];
-    df.dateFormat = @"MM-dd HH:mm";
-    return [df stringFromDate:[NSDate dateWithTimeIntervalSince1970:ts]];
-}
+#pragma mark - 诊断 (纯本地, 绝不联网)
 
 NSString *SVBAuthDiagnose(void) {
     NSMutableString *o = [NSMutableString string];
@@ -823,67 +408,36 @@ NSString *SVBAuthDiagnose(void) {
         [o appendString:@"=== 设备 ===\n"];
         [o appendFormat:@"识别方式 : %@\n", SVBAuthUDIDSource()];
         [o appendFormat:@"UDID     : %@\n", udid.length ? udid : @"读不到"];
-        [o appendFormat:@"名单指纹 : %@\n", mine.length ? mine : @"算不出"];
-        [o appendString:@"(把上面这行 UDID 整串发给作者即可)\n\n"];
+        [o appendFormat:@"设备指纹 : %@\n", mine.length ? mine : @"算不出"];
+        [o appendString:@"(把 UDID 整串发给作者, 作者会回你一段授权串)\n\n"];
 
-        [o appendString:@"=== 本地 ===\n"];
+        [o appendString:@"=== 本机授权 ===\n"];
         [o appendFormat:@"授权状态 : %@\n", SVBAuthStateText(SVBAuthCurrentState(NULL), NULL)];
-        [o appendFormat:@"缓存名单 : %ld 台%@\n", (long)SVBAuthCachedCount(),
-                         SVBAuthCachedHasSelf(NULL) ? @"（含本机）" : @"（不含本机）"];
-        [o appendFormat:@"最后同步 : %@\n", SVBAuthTimeText(SVBAuthLastSyncTime())];
-        [o appendFormat:@"离线授权 : %@\n\n", SVBAuthOfflineTicketInfo()];
+        [o appendFormat:@"离线授权 : %@\n", SVBAuthOfflineTicketInfo()];
 
-        [o appendString:@"=== 逐个源实测 ===\n"];
-        NSArray<NSString *> *urls = SVBAuthURLs();
-        NSString *customU = SVBAuthCustomSourceURL();
-        NSString *giteeU  = SVBAuthGiteeURL();
-        NSUInteger i = 0;
-        for (NSString *u in urls) {
-            i++;
-            NSData *data = nil; NSString *err = nil; double sec = 0;
-            NSInteger st = SVBAuthProbeSync(u, &data, &err, &sec);
-
-            NSString *tag = u;
-            if (customU.length && [customU isEqualToString:u])
-                tag = [@"[自定义] " stringByAppendingString:u];
-            else if (giteeU.length && [giteeU isEqualToString:u])
-                tag = [@"[Gitee] " stringByAppendingString:u];
-            if (tag.length > 64)
-                tag = [@"…" stringByAppendingString:[tag substringFromIndex:tag.length - 62]];
-
-            [o appendFormat:@"%lu) %@\n", (unsigned long)i, tag];
-            if (st > 0) {
-                [o appendFormat:@"   HTTP %ld · %lu 字节 · %.1fs\n",
-                     (long)st, (unsigned long)data.length, sec];
-            } else {
-                [o appendFormat:@"   连不上：%@（%.1fs）\n", err.length ? err : @"无响应/超时/DNS 失败", sec];
-            }
-
-            if (st == 404) {
-                [o appendString:@"   → 文件不存在，按“空名单”处理\n"];
-            } else if (st == 200 && data.length) {
-                NSInteger rts = 0;
-                NSDictionary<NSString *, NSNumber *> *m = SVBAuthMapFromJSON(data, &rts);
-                if (!m) {
-                    [o appendString:@"   → 验签不通过（内容被改过，已忽略）\n"];
-                } else {
-                    BOOL has = mine.length && [m objectForKey:mine] != nil;
-                    [o appendFormat:@"   → 验签通过 · %lu 台 · 版本 %@ · %@\n",
-                         (unsigned long)m.count,
-                         SVBAuthTimeText((NSTimeInterval)rts),
-                         has ? @"✅ 含本机" : @"❌ 不含本机"];
-                }
-            } else if (st == 403) {
-                [o appendString:@"   → 被拒绝(403)，该源不可用\n"];
-            }
-            [o appendString:@"\n"];
+        id raw = nil;
+        @try { raw = [[SVBManager shared] configValueForKey:SVB_AUTH_KEY_OFFLINE]; } @catch (NSException *e) {}
+        if ([raw isKindOfClass:[NSDictionary class]]) {
+            NSDictionary *d = (NSDictionary *)raw;
+            [o appendFormat:@"记录内容 : e=%@ t=%@\n", d[@"e"] ?: @"?", d[@"t"] ?: @"?"];
+            [o appendFormat:@"验签结果 : %@\n", SVBAuthOfflineTicketExp(NULL)
+                ? @"通过 ✓" : @"不通过 ✗（记录被改过或不属于本机）"];
+        } else {
+            [o appendString:@"记录内容 : 还没有导入过授权串\n"];
         }
 
-        [o appendString:@"=== 怎么读 ===\n"];
-        [o appendString:@"· 全部“连不上” → 本机拉不到任何源：改用 Gitee 地址，或粘贴离线授权串\n"];
-        [o appendString:@"· “验签通过 ✅ 含本机”但仍未授权 → 用「立即联网校验」刷一次\n"];
-        [o appendString:@"· “验签通过 ❌ 不含本机” → 你的 UDID 不在作者名单里，把 UDID 发给作者\n"];
-        [o appendString:@"· “验签不通过” → 名单被改坏了，让作者重新签发一次\n"];
+        uint32_t legacy = 0;
+        [o appendFormat:@"旧版名单 : %@\n", SVBAuthLegacyGrant(&legacy)
+            ? [NSString stringWithFormat:@"本机在旧版在线名单缓存里（至 %@，只读兼容）",
+               SVBAuthDateTextForDayIndex(legacy)]
+            : @"无"];
+
+        [o appendString:@"\n=== 说明 ===\n"];
+        [o appendString:@"· v10.3.0 起插件**不发起任何网络请求**，授权只用离线授权串，"
+                    "国内网络直连即可，不需要代理 / 梯子。\n"];
+        [o appendString:@"· 未授权 → 点「本机 UDID」复制发给作者，拿到授权串后点「粘贴离线授权」导入。\n"];
+        [o appendString:@"· 已过期 → 找作者要一段新的授权串（作者可以自由指定天数）。\n"];
+        [o appendString:@"· 导入了仍显示未授权 → 仔细核对 UDID 是否本机的（串只对一台设备有效）。\n"];
         [o appendFormat:@"\n%@  %@", SVB_VERSION, SVBAuthUDIDSource()];
     } @catch (NSException *e) {
         [o appendFormat:@"诊断异常：%@", e.reason];
