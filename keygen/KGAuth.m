@@ -95,6 +95,17 @@ static NSString *KGAuthOfflinePayload(NSString *h32, uint32_t exp, NSInteger ts)
             h32, (unsigned)exp, (long)ts];
 }
 
+// HMAC-SHA256(secret, payload) -> 全 32 字节小写十六进制
+// 与插件端 SVBAuth.m 的 SVBAuthSignatureHex 严格一致: 插件端验签用的就是这条原文
+static NSString *KGAuthSignatureHex(NSString *payload, NSString *secret) {
+    if (!payload.length || !secret.length) return @"";
+    const char *key = secret.UTF8String;
+    const char *utf8 = payload.UTF8String;
+    unsigned char mac[CC_SHA256_DIGEST_LENGTH] = {0};
+    CCHmac(kCCHmacAlgSHA256, key, strlen(key), utf8, strlen(utf8), mac);
+    return KGHexLower(mac, CC_SHA256_DIGEST_LENGTH);
+}
+
 NSString *KGAuthBuildOfflineTicket(NSString *secret, NSString *udid, uint32_t dayIndex) {
     if (!secret.length) return nil;
     NSString *h32 = KGAuthHashForUDID(udid);
