@@ -2278,6 +2278,24 @@ static NSMutableDictionary<NSString *, NSDate *> *sSVBPlayerMtimes = nil;
     return out;
 }
 
+// v11.0.1: 本进程是否有「挂载且未隐藏」的背景视图 (0.5s 缓存 —— cell/decoration
+// 赋色钩子会高频调用, 缓存挡住全树遍历开销)。备忘录清扫 gate 专用。
+static CFAbsoluteTime sSVBSweepCheckLast = 0;
+static BOOL sSVBSweepCheckResult = NO;
+- (BOOL)hasVisibleBackgroundViews {
+    @try {
+        CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+        if (now - sSVBSweepCheckLast < 0.5) return sSVBSweepCheckResult;
+        BOOL found = NO;
+        for (SVBVideoBackgroundView *v in [self allVideoBackgroundViews]) {
+            if (!v.hidden) { found = YES; break; }
+        }
+        sSVBSweepCheckLast = now;
+        sSVBSweepCheckResult = found;
+        return found;
+    } @catch (NSException *e) { return NO; }
+}
+
 - (void)pauseAllPlayers {
     for (NSString *k in self.players.allKeys) {
         @try { [self.players[k] pause]; } @catch (NSException *e) {}
@@ -2491,7 +2509,10 @@ static NSMutableDictionary<NSString *, NSDate *> *sSVBPlayerMtimes = nil;
 - (void)configure {
     @try {
         SVBManager *mgr = [SVBManager shared];
-        BOOL on = [mgr masterEnabled] && [mgr isEnabledForContext:self.contextKey] &&
+        // v11.0.1: 总闸按宿主分流 —— 与 applyToViewController 同规则, 否则
+        // 信息总开关关闭时备忘录的背景视图会在这里被整体 hidden (真机实锤路径)
+        BOOL master = SVBIsNotesHostProcess() ? [mgr notesMasterEnabled] : [mgr masterEnabled];
+        BOOL on = master && [mgr isEnabledForContext:self.contextKey] &&
                   [mgr activeVideoPathForContext:self.contextKey].length > 0;
         self.hidden = !on;
         if (!on) {

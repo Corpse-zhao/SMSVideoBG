@@ -26,7 +26,7 @@
 //   - 备忘录(com.apple.mobilenotes)的 7 类界面语境见下方 NVB 常量;
 //   - 控制App 首页可切「信息 / 备忘录」两个管理页, 各自独立开关;
 //   - 备忘录素材根 = 备忘录App 数据容器 (控制App 双容器齐写)。
-#define SVB_VERSION @"11.0.0"
+#define SVB_VERSION @"11.0.1"
 #define SVB_SUITE @"com.nvb.smsvideobg"
 #define SVB_DARWIN_NOTE "com.nvb.smsvideobg/prefs.changed"
 #define SVB_MEDIA_DIR_NAME @"SMSVideoBG"
@@ -146,6 +146,9 @@ NSString *SVBNotesFriendlyRoot(void);
 - (BOOL)masterEnabled;
 // v11.0.0: 备忘录总开关 (与信息总开关独立, 默认关 —— 需在控制App 备忘录页打开)
 - (BOOL)notesMasterEnabled;
+// v11.0.1: 本进程当前是否有「挂载且未隐藏」的视频背景视图 (0.5s 缓存) ——
+// 备忘录清扫 gate: 没有可见背景时绝不清白卡, 避免页面露黑底
+- (BOOL)hasVisibleBackgroundViews;
 // 全局效果 (0~1)
 - (CGFloat)globalAlpha;
 - (CGFloat)globalBlur;

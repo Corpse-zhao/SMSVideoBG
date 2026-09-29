@@ -1,6 +1,6 @@
 Package: com.nvb.smsvideobg
 Name: 信息视频背景
-Version: 11.0.0
+Version: 11.0.1
 Architecture: iphoneos-arm64
 Description: 信息 + 备忘录视频背景 (双宿主版)
 Maintainer: 板栗仁

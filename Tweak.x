@@ -295,10 +295,24 @@ static BOOL SVBMainSweepActive(void) {
     return m.masterEnabled && [m isEnabledForContext:SVBContextMain];
 }
 
+// v11.0.1: 备忘录清扫 gate —— 备忘录总开关开 && 本进程有挂载且可见的背景视图。
+// (没有可见背景时绝不清白卡, 否则页面露黑底; hasVisibleBackgroundViews 带 0.5s 缓存)
+static BOOL SVBNotesSweepActive(void) {
+    if (!SVBIsLicensed()) return NO;
+    SVBManager *m = [SVBManager shared];
+    if (!m.notesMasterEnabled) return NO;
+    return [m hasVisibleBackgroundViews];
+}
+
 static void SVBClearContainerBGs(UIView *v, NSInteger depth) {
     if (!v || depth > 14) return;
     if ([v isKindOfClass:[SVBVideoBackgroundView class]]) return;
-    if (!SVBMainSweepActive()) { SVBRestoreHiddenCards(); return; }
+    // v11.0.1: 双宿主 gate —— 信息进程看主页面 sweep, 备忘录进程看备忘录 sweep
+    if (SVBIsSMSProcess()) {
+        if (!SVBMainSweepActive()) { SVBRestoreHiddenCards(); return; }
+    } else {
+        if (!SVBNotesSweepActive()) { SVBRestoreHiddenCards(); return; }
+    }
     // v1.7.21: cell 的系统托管背景子树整体跳过 (不藏不清)。v1.7.20 曾藏
     // backgroundView/selectedBackgroundView + layoutSubviews 持续重扫, 与系统的
     // backgroundConfiguration 重应用撞车 —— 点选单元格时 SIGABRT (崩溃日志实锤:
@@ -363,6 +377,28 @@ static void SVBScheduleMainPageCheck(UIViewController *vc) {
             }
         } @catch (NSException *e) {}
     });
+}
+
+// v11.0.1: 备忘录页面通用挂载 (对齐信息主页面机制):
+// apply + 主动清白卡 + 三次延迟补扫。备忘录列表/正文/搜索全是 iOS16 分组
+// 白卡样式, 系统铺白发生在我们挂背景之后 (或滚动复用时), 没有补扫就是白底。
+static void SVBApplyNotesPage(UIViewController *vc, NSString *ctx) {
+    [[SVBManager shared] applyToViewController:vc context:ctx];
+    SVBRefreshBanner(ctx);
+    SVBClearContainerBGs(vc.view, 0);
+    __weak UIViewController *wvc = vc;
+    NSTimeInterval delays[3] = {0.45, 1.2, 2.5};
+    for (int i = 0; i < 3; i++) {
+        NSTimeInterval t = delays[i];
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(t * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            @try {
+                UIViewController *s = wvc;
+                if (!s || !s.isViewLoaded || !s.view.window) return;
+                SVBClearContainerBGs(s.view, 0);
+            } @catch (NSException *e) {}
+        });
+    }
 }
 
 
@@ -591,7 +627,10 @@ static void SVBMapBalloonText(UIView *balloon) {
 %hook UICollectionViewListCell
 - (void)setBackgroundConfiguration:(UIBackgroundConfiguration *)cfg {
     @try {
-        if (cfg && SVBIsSMSProcess() && SVBShouldProcess())
+        // v11.0.1: 双宿主 —— 备忘录分组列表的 cell 白底同样在源头拦
+        BOOL go = (SVBIsSMSProcess() && SVBShouldProcess()) ||
+                  (SVBIsNotesProcess() && SVBNotesSweepActive());
+        if (cfg && go)
             cfg.backgroundColor = [UIColor clearColor];
     } @catch (NSException *e) {}
     %orig(cfg);
@@ -605,8 +644,10 @@ static void SVBMapBalloonText(UIView *balloon) {
 - (void)_updateDefaultBackgroundAppearance {
     %orig;
     @try {
-        if (!SVBIsSMSProcess()) return;
-        if (!SVBShouldProcess()) return;
+        // v11.0.1: 双宿主 —— 信息进程按信息闸, 备忘录进程按备忘录闸
+        if (SVBIsSMSProcess()) { if (!SVBShouldProcess()) return; }
+        else if (SVBIsNotesProcess()) { if (!SVBNotesSweepActive()) return; }
+        else return;
         if (self.backgroundConfiguration) return;
         __weak UICollectionViewListCell *wcell = self;
         dispatch_async(dispatch_get_main_queue(), ^{
@@ -620,8 +661,10 @@ static void SVBMapBalloonText(UIView *balloon) {
 - (void)layoutSubviews {
     %orig;
     @try {
-        if (!SVBIsSMSProcess()) return;
-        if (!SVBShouldProcess()) return;
+        // v11.0.1: 双宿主 —— 信息进程按信息闸, 备忘录进程按备忘录闸
+        if (SVBIsSMSProcess()) { if (!SVBShouldProcess()) return; }
+        else if (SVBIsNotesProcess()) { if (!SVBNotesSweepActive()) return; }
+        else return;
         // 只清 UIView 层底色 (UIView.backgroundColor 不触发集合布局失效, 安全)
         if (self.backgroundColor && ![self.backgroundColor isEqual:[UIColor clearColor]])
             self.backgroundColor = [UIColor clearColor];
@@ -637,8 +680,10 @@ static void SVBMapBalloonText(UIView *balloon) {
 - (void)layoutSubviews {
     %orig;
     @try {
-        if (!SVBIsSMSProcess()) return;
-        if (!SVBShouldProcess()) return;
+        // v11.0.1: 双宿主 —— 信息进程按信息闸, 备忘录进程按备忘录闸
+        if (SVBIsSMSProcess()) { if (!SVBShouldProcess()) return; }
+        else if (SVBIsNotesProcess()) { if (!SVBNotesSweepActive()) return; }
+        else return;
         if (self.backgroundColor && ![self.backgroundColor isEqual:[UIColor clearColor]])
             self.backgroundColor = [UIColor clearColor];
     } @catch (NSException *e) {}
@@ -649,8 +694,10 @@ static void SVBMapBalloonText(UIView *balloon) {
 - (void)layoutSubviews {
     %orig;
     @try {
-        if (!SVBIsSMSProcess()) return;
-        if (!SVBShouldProcess()) return;
+        // v11.0.1: 双宿主 —— 信息进程按信息闸, 备忘录进程按备忘录闸
+        if (SVBIsSMSProcess()) { if (!SVBShouldProcess()) return; }
+        else if (SVBIsNotesProcess()) { if (!SVBNotesSweepActive()) return; }
+        else return;
         if (self.backgroundView) self.backgroundView = nil;
         if (self.backgroundColor && ![self.backgroundColor isEqual:[UIColor clearColor]])
             self.backgroundColor = [UIColor clearColor];
@@ -884,10 +931,8 @@ static char SVBDetectedCtxKey;
 @interface ICFolderViewController : UIViewController @end
 
 #define SVB_NOTES_GUARD() if (!SVBIsNotesProcess()) return;
-#define SVB_NOTES_APPLY(ctx) @try { \
-    [[SVBManager shared] applyToViewController:self context:(ctx)]; \
-    SVBRefreshBanner(ctx); \
-} @catch (NSException *e) {}
+// v11.0.1: 走 SVBApplyNotesPage (apply + 清白卡 + 延迟补扫), 不再裸 apply
+#define SVB_NOTES_APPLY(ctx) @try { SVBApplyNotesPage(self, ctx); } @catch (NSException *e) {}
 
 // 备忘录正文 / 编辑页
 %hook ICNoteBodyViewController
@@ -948,6 +993,9 @@ static char SVBDetectedCtxKey;
             if (!SVBNotesShouldProcess()) return;
             NSString *name = NSStringFromClass([self class]);
             NSString *ctx = SVBNotesContextForClassName(name);
+            // v11.0.1: 未匹配的类名也记进诊断 —— 搜索页等页面类名没实锤过,
+            // 装机后抓诊断报告即可定位真实类名 (logClassOnce 自带去重)
+            [[SVBManager shared] logClassOnce:name context:ctx ?: @"(未匹配)"];
             if (!ctx) return;   // 精确类名由上方专用 Hook 处理
             if ([name containsString:@"Keyboard"] || [name containsString:@"Picker"]) return;
             CGSize vs = self.view.bounds.size;
@@ -955,8 +1003,7 @@ static char SVBDetectedCtxKey;
             BOOL fit = (fabs(vs.width - ss.width) < 32 && fabs(vs.height - ss.height) < 32) ||
                        (fabs(vs.width - ss.height) < 32 && fabs(vs.height - ss.width) < 32);
             if (!fit) return;
-            [[SVBManager shared] applyToViewController:self context:ctx];
-            SVBRefreshBanner(ctx);
+            SVBApplyNotesPage(self, ctx);
             return;
         }
         // ---- 信息App 兜底 (原有逻辑照旧) ----
@@ -1017,8 +1064,13 @@ static char SVBDetectedCtxKey;
 - (void)setBackgroundColor:(UIColor *)color {
     %orig;
     @try {
-        if (!SVBIsSMSProcess()) return;
-        if (!SVBMainSweepActive()) return;
+        if (SVBIsSMSProcess()) {
+            if (!SVBMainSweepActive()) return;
+        } else if (SVBIsNotesProcess()) {
+            if (!SVBNotesSweepActive()) return;
+        } else {
+            return;
+        }
         if (color && ![color isEqual:[UIColor clearColor]])
             %orig([UIColor clearColor]);
     } @catch (NSException *e) {}
