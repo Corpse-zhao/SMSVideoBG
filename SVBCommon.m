@@ -375,12 +375,6 @@ NSInteger SVBSyncMediaAcrossRoots(void) {
     return copied;
 }
 
-// v10.4.0: 不再按界面分子目录 —— 所有界面共用这一个文件夹。
-// ctx 参数保留只为兼容旧调用点, 一律返回素材根本身。
-NSString *SVBMediaFriendlyPathForContext(NSString *ctx) {
-    return SVBMediaFriendlyRoot();
-}
-
 // 把「统一路径」做成指向真实素材根的软链。
 //   ① 不存在 -> 建父目录 + 建软链;
 //   ② 已是软链 -> 指向不对就重建 (指向对了就什么都不做);
@@ -1571,7 +1565,9 @@ static void SVBCollectToolbars(UIView *view, NSMutableArray<UIToolbar *> *out_, 
 
         // v1.9.0: 授权门禁 —— 所有挂背景的路径都汇聚到这里, 未激活/过期一律不挂
         // (这样无论从哪个钩子进来都拦得住, 不需要在 Tweak.x 各处补判断)
-        BOOL on = SVBIsLicensed() && [self masterEnabled] && [self isEnabledForContext:ctx] &&
+        // v11.0.0: 总闸按宿主分流 —— 备忘录进程认 notes_master_enabled, 其余认 master_enabled
+        BOOL master = SVBIsNotesHostProcess() ? [self notesMasterEnabled] : [self masterEnabled];
+        BOOL on = SVBIsLicensed() && master && [self isEnabledForContext:ctx] &&
                   [self activeVideoPathForContext:ctx].length > 0;
 
         SVBVideoBackgroundView *bg = objc_getAssociatedObject(vc, &SVBBGKey);

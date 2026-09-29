@@ -841,7 +841,7 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
         initWithItems:@[@"📱 信息", @"📝 备忘录"]];
     seg.frame = CGRectMake(12, 8 + h + 8, w, segH);
     seg.selectedSegmentIndex = [self svbIsNotesMode] ? 1 : 0;
-    seg.appearance.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor];
+    seg.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor];
     [seg addTarget:self action:@selector(targetModeChanged:)
               forControlEvents:UIControlEventValueChanged];
     [wrap addSubview:seg];
