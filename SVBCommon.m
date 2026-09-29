@@ -36,10 +36,12 @@ NSString * const SVBContextChat     = @"chat";
 
 // v11.0.0 备忘录语境 (IC* 私有类, com.apple.mobilenotes)
 NSString * const SVBContextNBody     = @"n_body";
+NSString * const SVBContextNEdit     = @"n_edit";    // v11.0.4
 NSString * const SVBContextNList     = @"n_list";
 NSString * const SVBContextNFolder   = @"n_folder";
 NSString * const SVBContextNGallery  = @"n_gallery";
 NSString * const SVBContextNSearch   = @"n_search";
+NSString * const SVBContextNPopup    = @"n_popup";   // v11.0.4
 NSString * const SVBContextNRecent   = @"n_recent";
 NSString * const SVBContextNInternal = @"n_internal";
 
@@ -85,13 +87,16 @@ NSArray<NSArray<NSString *> *> *SVBContextDefinitions(void) {
 }
 
 NSArray<NSArray<NSString *> *> *SVBNotesContextDefinitions(void) {
-    return @[ @[SVBContextNBody,     @"备忘录正文",  @"打开某条备忘录后的浏览/编辑界面"],
-              @[SVBContextNList,     @"笔记列表",    @"所有iCloud/某文件夹里的备忘录列表"],
-              @[SVBContextNFolder,   @"文件夹首页",  @"打开备忘录看到的第一屏(文件夹列表), 文件夹内列表也算"],
-              @[SVBContextNGallery,  @"画廊",        @"备忘录缩略图画廊视图"],
-              @[SVBContextNSearch,   @"搜索",        @"备忘录搜索结果页"],
-              @[SVBContextNRecent,   @"最近删除",    @"最近删除列表"],
-              @[SVBContextNInternal, @"其它内部页",  @"其余近似全屏的备忘录页面(兜底)"] ];
+    // v11.0.4: 全部按用户真机页面重命名 (控制App 列表按名称字数排序显示)
+    return @[ @[SVBContextNFolder,   @"首页",       @"打开备忘录看到的第一屏(文件夹列表)"],
+              @[SVBContextNEdit,     @"笔记",       @"右下角新建笔记按钮进入的编辑界面"],
+              @[SVBContextNList,     @"文件夹",     @"点进 所有iCloud/备忘录/各文件夹 后的备忘录列表"],
+              @[SVBContextNBody,     @"内部页",     @"点开某条备忘录后的浏览界面"],
+              @[SVBContextNSearch,   @"搜索一下",   @"顶部搜索框点进去的搜索页"],
+              @[SVBContextNRecent,   @"最近删除",   @"最近删除列表"],
+              @[SVBContextNPopup,    @"多多创新",   @"左下角新建文件夹等弹出的面板(面板多大背景就铺多大)"],
+              @[SVBContextNGallery,  @"画廊",       @"备忘录缩略图画廊视图"],
+              @[SVBContextNInternal, @"其它内部页", @"其余近似全屏的备忘录页面(兜底)"] ];
 }
 
 NSArray<NSArray<NSString *> *> *SVBAllContextDefinitions(void) {
@@ -158,29 +163,36 @@ NSString *SVBFindAppDataContainer(NSString *bundleId) {
     return nil;
 }
 
+// v11.0.4: 容器识别修复 —— 信息App 进程里 FindAppDataContainer 可能因沙盒枚举
+// 失败 (真机实锤: 横幅显示「宿主App容器」且只有一根)。宿主进程改按自身容器推断:
+// 等于自己容器根 = 自己; 其它 Containers 路径 = 对方。控制 App 保持定位对比。
 NSString *SVBRootLabel(NSString *root) {
     if (!root.length) return @"?";
     if ([root hasPrefix:SVB_MEDIA_FRIENDLY_PARENT]) {
         return [root.lastPathComponent isEqualToString:@"备忘录"] ? @"备忘录App容器" : SVB_AUTHOR_NAME;
     }
     if ([root containsString:@"/Containers/Data/Application"]) {
-        // v11.0.0: 双容器 —— 按路径对应关系区分是信息还是备忘录
-        // v11.0.3: 各自独立重算 —— 原写法 (!smsC && !notesC) 下若信息容器定位成功
-        // 而备忘录容器偶发失败, notesC 永不再算 -> 备忘录自己容器显示「宿主App容器」
-        static NSString *smsC = nil, *notesC = nil;
-        if (!smsC) {
-            NSString *c = SVBFindAppDataContainer(SVB_SMS_BUNDLE_ID);
-            if (c.length) smsC = [[c stringByAppendingPathComponent:@"Library"]
-                                   stringByAppendingPathComponent:SVB_MEDIA_DIR_NAME];
+        if (SVBIsControlApp()) {
+            static NSString *smsC = nil, *notesC = nil;
+            if (!smsC) {
+                NSString *c = SVBFindAppDataContainer(SVB_SMS_BUNDLE_ID);
+                if (c.length) smsC = [[c stringByAppendingPathComponent:@"Library"]
+                                       stringByAppendingPathComponent:SVB_MEDIA_DIR_NAME];
+            }
+            if (!notesC) {
+                NSString *nc = SVBFindAppDataContainer(SVB_NOTES_BUNDLE_ID);
+                if (nc.length) notesC = [[nc stringByAppendingPathComponent:@"Library"]
+                                          stringByAppendingPathComponent:SVB_MEDIA_DIR_NAME];
+            }
+            if (smsC && [root isEqualToString:smsC]) return @"信息App容器";
+            if (notesC && [root isEqualToString:notesC]) return @"备忘录App容器";
+            return @"宿主App容器";
         }
-        if (!notesC) {
-            NSString *nc = SVBFindAppDataContainer(SVB_NOTES_BUNDLE_ID);
-            if (nc.length) notesC = [[nc stringByAppendingPathComponent:@"Library"]
-                                      stringByAppendingPathComponent:SVB_MEDIA_DIR_NAME];
-        }
-        if (smsC && [root isEqualToString:smsC]) return @"信息App容器";
-        if (notesC && [root isEqualToString:notesC]) return @"备忘录App容器";
-        return @"宿主App容器";
+        // 宿主进程: 自身容器根 = 自己, 其余 = 对方
+        NSString *selfRoot = SVBAppContainerMediaDirectory();
+        if (selfRoot.length && [root isEqualToString:selfRoot])
+            return SVBIsNotesHostProcess() ? @"备忘录App容器" : @"信息App容器";
+        return SVBIsNotesHostProcess() ? @"信息App容器" : @"备忘录App容器";
     }
     if ([root hasPrefix:@"/var/jb"] || [root containsString:@"/var/jb/"]) return @"jbroot";
     if ([root hasPrefix:@"/var/mobile/Documents"]) return @"共享文档";
@@ -215,7 +227,13 @@ static NSArray<NSString *> *SVBLegacyRoots(void) {
 //   此前备忘录进程只有自己容器一根, 素材全在信息容器里 -> 备忘录「素材=0 全不生效」
 //   (真机实锤), 且完全依赖控制 App 的跨容器同步跑没跑过。现在直接聚合读双容器。
 NSArray<NSString *> *SVBRootCandidates(void) {
-    if (sSVBRoots) return sSVBRoots;
+    // v11.0.4: 双根缓存永久有效; 单根 (定位对方容器失败) 10 秒后允许重算 ——
+    // 启动早期枚举失败不至于永久单根
+    static double sSVBSingleRootAt = 0;
+    if (sSVBRoots) {
+        if (sSVBRoots.count >= 2) return sSVBRoots;
+        if ([NSDate date].timeIntervalSince1970 - sSVBSingleRootAt < 10.0) return sSVBRoots;
+    }
     NSMutableArray<NSString *> *a = [NSMutableArray array];
     NSString *primary = nil;
 
@@ -235,9 +253,10 @@ NSArray<NSString *> *SVBRootCandidates(void) {
         primary = SVBAppContainerMediaDirectory();
         if (primary.length) [a addObject:primary];
         // v11.0.2: 另一个宿主的数据容器 (备忘录进程->信息容器, 信息进程->备忘录容器)
+        // v11.0.4: 运行时枚举失败时回退配置记录 (信息App 沙盒枚举不到对方容器, 实锤)
         NSString *otherBid = SVBIsNotesHostProcess() ? SVB_SMS_BUNDLE_ID : SVB_NOTES_BUNDLE_ID;
         if (![SVBHostBundleIdentifier() isEqualToString:SVB_APP_BUNDLE_ID]) {
-            NSString *oc = SVBFindAppDataContainer(otherBid);
+            NSString *oc = SVBOtherHostContainer(otherBid);
             if (oc.length) {
                 NSString *oroot = [[oc stringByAppendingPathComponent:@"Library"]
                                     stringByAppendingPathComponent:SVB_MEDIA_DIR_NAME];
@@ -249,7 +268,35 @@ NSArray<NSString *> *SVBRootCandidates(void) {
     if (!a.count) [a addObject:SVBJBMediaDirectory()];   // 应急兜底(仅定位不到容器时)
 
     sSVBRoots = [a copy];
+    if (sSVBRoots.count < 2) sSVBSingleRootAt = [NSDate date].timeIntervalSince1970;
+    else                     sSVBSingleRootAt = 0;
     return sSVBRoots;
+}
+
+// v11.0.4: 控制 App 把双容器路径写进配置 —— 宿主进程沙盒枚举失败时 (真机实锤:
+// 信息App 枚举不到备忘录容器, 横幅只有一根) 的后备定位来源
+void SVBRecordContainerPaths(void) {
+    @try {
+        if (!SVBIsControlApp()) return;
+        SVBManager *m = [SVBManager shared];
+        NSString *sms = SVBFindAppDataContainer(SVB_SMS_BUNDLE_ID);
+        NSString *notes = SVBFindAppDataContainer(SVB_NOTES_BUNDLE_ID);
+        if (sms.length) [m setConfigValue:sms forKey:@"svb_sms_container"];
+        if (notes.length) [m setConfigValue:notes forKey:@"svb_notes_container"];
+    } @catch (NSException *e) {}
+}
+
+// 宿主进程读对方容器路径 (先运行时枚举, 失败回退配置记录)
+static NSString *SVBOtherHostContainer(NSString *otherBid) {
+    NSString *oc = SVBFindAppDataContainer(otherBid);
+    if (oc.length) return oc;
+    @try {
+        NSString *key = [otherBid isEqualToString:SVB_SMS_BUNDLE_ID] ? @"svb_sms_container"
+                                                                     : @"svb_notes_container";
+        id v = [[SVBManager shared] configValueForKey:key];
+        if ([v isKindOfClass:[NSString class]] && v.length) return v;
+    } @catch (NSException *e) {}
+    return nil;
 }
 
 // ---- v10.4.0 运维文件治理 (在插件 %ctor 与控制App 启动时各跑一次) ----
@@ -1679,8 +1726,48 @@ static void SVBCollectToolbars(UIView *view, NSMutableArray<UIToolbar *> *out_, 
     }
 }
 
-// 页面离开时摘除背景 (防止列表页跳转后残留 / 串扰)
-// v1.5.2: pop/转场期间绝不触碰 UICollectionView 的 backgroundView ——
+// v11.0.4: 弹窗面板背景 (备忘录「多多创新」) —— 把视频铺进 UIAlertController
+// 的内容容器 (面板多大铺多大, 圆角/遮罩随面板走)。hook 侧传 self (UIAlertController)。
+- (void)applyPopupBackgroundToAlertController:(UIAlertController *)vc context:(NSString *)ctx {
+    @try {
+        if (!vc.isViewLoaded || !vc.view) return;
+        objc_setAssociatedObject(vc, &SVBAppliedCtxKey, ctx, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+        BOOL on = SVBIsLicensed() && [self notesMasterEnabled] && [self isEnabledForContext:ctx] &&
+                  [self activeVideoPathForContext:ctx].length > 0;
+        SVBVideoBackgroundView *bg = objc_getAssociatedObject(vc, &SVBBGKey);
+        if (!on) {
+            if (bg) { [bg removeFromSuperview]; objc_setAssociatedObject(vc, &SVBBGKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC); }
+            return;
+        }
+
+        // 定位面板容器 (alert 样式 = 居中小框; sheet 样式 = 底部大板)
+        UIView *host = nil;
+        for (UIView *v in vc.view.subviews) {
+            NSString *cls = NSStringFromClass([v class]);
+            if ([cls hasPrefix:@"_UIAlertController"]) { host = v; break; }
+        }
+        if (!host) host = vc.view;
+
+        if (!bg || ![bg.contextKey isEqualToString:ctx]) {
+            [bg removeFromSuperview];
+            bg = [[SVBVideoBackgroundView alloc] initWithFrame:host.bounds contextKey:ctx];
+            objc_setAssociatedObject(vc, &SVBBGKey, bg, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+        bg.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        if (bg.superview != host) {
+            [bg removeFromSuperview];
+            [host insertSubview:bg atIndex:0];   // 面板容器圆角/masksToBounds 自动裁剪
+        }
+        [bg configure];
+        host.backgroundColor = [UIColor clearColor];
+        [self clearBackgroundsOfView:host depth:0];
+
+        [self writeHeartbeat:[NSString stringWithFormat:@"apply popup ctx=%@ cls=%@", ctx, NSStringFromClass([vc class])]];
+    } @catch (NSException *e) {}
+}
+
+// 页面离开时摘除背景 (防止列表页跳转后残留 / 串扰)// v1.5.2: pop/转场期间绝不触碰 UICollectionView 的 backgroundView ——
 // 运行时置空/移除私有子类在转场中持有的视图, 与「过滤条件」闪退时机完全吻合, 判定为主嫌。
 // 转场中保留挂载无害: 同一 VC 换 ctx 时 apply 会整体替换; VC pop 时随视图树一起释放。
 - (void)detachFromViewController:(UIViewController *)vc {
@@ -2525,12 +2612,15 @@ static BOOL sSVBSweepCheckResult = NO;
         UIViewController *host = SVBViewControllerForView(self);
         NSString *ctx = self.contextKey;
         if (host.isViewLoaded && host.view && ctx.length) {
-            [[SVBManager shared] deepChromePass:host.view depth:0 ctx:ctx];
-            if ([ctx isEqualToString:SVBContextChat])
-                [[SVBManager shared] bubblePass:host.view depth:0 inCell:NO ctx:ctx sysBg:NO];
-            for (UIWindow *w in UIApplication.sharedApplication.windows) {
-                if (w == host.view.window) continue;
-                [[SVBManager shared] deepChromePass:w depth:0 ctx:ctx];
+            // v11.0.4: 弹窗面板跳过深度透明化 (拆 alert 毛玻璃会渲染成黑块, v1.7.13 同因)
+            if (![ctx isEqualToString:SVBContextNPopup]) {
+                [[SVBManager shared] deepChromePass:host.view depth:0 ctx:ctx];
+                if ([ctx isEqualToString:SVBContextChat])
+                    [[SVBManager shared] bubblePass:host.view depth:0 inCell:NO ctx:ctx sysBg:NO];
+                for (UIWindow *w in UIApplication.sharedApplication.windows) {
+                    if (w == host.view.window) continue;
+                    [[SVBManager shared] deepChromePass:w depth:0 ctx:ctx];
+                }
             }
         }
     } @catch (NSException *e) {}

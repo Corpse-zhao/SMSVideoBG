@@ -78,14 +78,17 @@ static NSString *SVBContextForClassName(NSString *name) {
 }
 
 // v11.0.0: 备忘录语境映射 (IC* 私有类前缀; 精确类名由专用 Hook 处理)
+// v11.0.4: 按用户命名归位 —— 首页=第一屏; 文件夹=点进文件夹后的列表; 笔记=编辑页
 static NSString *SVBNotesContextForClassName(NSString *name) {
     if (!name || ![name hasPrefix:@"IC"]) return nil;
-    // v11.0.3: 备忘录主界面(第一屏的文件夹列表) —— 诊断实锤此前落到「内部页」,
-    // 用户给「文件夹」配的视频到不了主界面。归入 n_folder, 与 ICFolderViewController 同语境。
+    // 首页 (第一屏的文件夹列表) —— 诊断实锤此前落到「内部页」
     if ([name isEqualToString:@"ICFolderListViewController"]) return SVBContextNFolder;
+    // 文件夹 (点进文件夹后的备忘录列表) —— 与「所有 iCloud」列表同类
+    if ([name isEqualToString:@"ICFolderViewController"]) return SVBContextNList;
+    // 笔记 (右下角新建笔记进入的编辑页) —— 从内部页拆出
+    if ([name isEqualToString:@"ICNoteEditViewController"]) return SVBContextNEdit;
+    // 内部页 (浏览页) 由专用 Hook 处理; 设置页不铺
     if ([name isEqualToString:@"ICNoteBodyViewController"] ||
-        [name isEqualToString:@"ICNoteEditViewController"] ||
-        [name isEqualToString:@"ICFolderViewController"] ||
         [name isEqualToString:@"ICSettingsViewController"]) return nil;
     if ([name containsString:@"Gallery"])  return SVBContextNGallery;
     if ([name containsString:@"Search"])   return SVBContextNSearch;
@@ -806,7 +809,11 @@ static char SVBDetectedCtxKey;
 - (void)viewWillAppear:(BOOL)animated {
     %orig;
     SVB_SMS_GUARD()
-    NSString *ctx = SVBDetectListContext(self, SVBListFallback(self));
+    // v11.0.4: 内容判定优先 —— 主页面与「所有信息」同类同名, split 布局下
+    // nav 根判别失效、标题可能迟设, 唯一可靠区分 = 内容命中 ≥2 行过滤器标题。
+    // (用户实锤: 主页面失效/被当成所有信息)
+    NSString *ctx = SVBIsFilterPickerScreen(self) ? SVBContextMain
+                  : SVBDetectListContext(self, SVBListFallback(self));
     objc_setAssociatedObject(self, &SVBDetectedCtxKey, ctx, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     [[SVBManager shared] logClassOnce:NSStringFromClass([self class]) context:ctx];
     SVB_APPLY_CTX(self, ctx)
@@ -815,7 +822,8 @@ static char SVBDetectedCtxKey;
 - (void)viewDidAppear:(BOOL)animated {
     %orig;
     SVB_SMS_GUARD()
-    NSString *ctx = SVBDetectListContext(self,
+    NSString *ctx = SVBIsFilterPickerScreen(self) ? SVBContextMain
+                  : SVBDetectListContext(self,
         objc_getAssociatedObject(self, &SVBDetectedCtxKey) ?: SVBListFallback(self));
     objc_setAssociatedObject(self, &SVBDetectedCtxKey, ctx, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     SVB_APPLY_CTX(self, ctx)
@@ -826,7 +834,8 @@ static char SVBDetectedCtxKey;
         @try {
             __strong typeof(wself) sself = wself;
             if (!sself || !sself.isViewLoaded || !sself.view.window) return;
-            NSString *ctx2 = SVBDetectListContext(sself,
+            NSString *ctx2 = SVBIsFilterPickerScreen(sself) ? SVBContextMain
+                           : SVBDetectListContext(sself,
                 objc_getAssociatedObject(sself, &SVBDetectedCtxKey) ?: SVBListFallback(sself));
             if (![ctx2 isEqualToString:ctx]) {
                 objc_setAssociatedObject(sself, &SVBDetectedCtxKey, ctx2, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -946,6 +955,7 @@ static char SVBDetectedCtxKey;
 #define SVB_NOTES_APPLY(ctx) @try { SVBApplyNotesPage(self, ctx); } @catch (NSException *e) {}
 
 // 备忘录正文 / 编辑页
+// v11.0.4: 编辑页拆成独立语境「笔记」(右下角新建笔记进入的编辑界面)
 %hook ICNoteBodyViewController
 - (void)viewWillAppear:(BOOL)animated {
     %orig;
@@ -969,26 +979,53 @@ static char SVBDetectedCtxKey;
 - (void)viewWillAppear:(BOOL)animated {
     %orig;
     SVB_NOTES_GUARD()
-    SVB_NOTES_APPLY(SVBContextNBody)
+    SVB_NOTES_APPLY(SVBContextNEdit)
 }
 - (void)viewDidDisappear:(BOOL)animated {
     %orig;
     SVB_NOTES_GUARD()
-    @try { [[SVBManager shared] setContextActive:NO context:SVBContextNBody]; } @catch (NSException *e) {}
+    @try { [[SVBManager shared] setContextActive:NO context:SVBContextNEdit]; } @catch (NSException *e) {}
 }
 %end
 
-// 文件夹 (备忘录首页)
+// 文件夹内列表 (点进 所有iCloud/各文件夹 后的页面) —— v11.0.4 归「文件夹」语境
 %hook ICFolderViewController
 - (void)viewWillAppear:(BOOL)animated {
     %orig;
     SVB_NOTES_GUARD()
-    SVB_NOTES_APPLY(SVBContextNFolder)
+    SVB_NOTES_APPLY(SVBContextNList)
 }
 - (void)viewDidDisappear:(BOOL)animated {
     %orig;
     SVB_NOTES_GUARD()
-    @try { [[SVBManager shared] setContextActive:NO context:SVBContextNFolder]; } @catch (NSException *e) {}
+    @try { [[SVBManager shared] setContextActive:NO context:SVBContextNList]; } @catch (NSException *e) {}
+}
+%end
+
+// v11.0.4: 弹窗面板 (备忘录「多多创新」) —— 左下角新建文件夹等弹出的 alert/sheet,
+// 面板多大视频铺多大。仅备忘录进程生效。
+%hook UIAlertController
+- (void)viewWillAppear:(BOOL)animated {
+    %orig;
+    SVB_NOTES_GUARD()
+    @try {
+        if (!SVBNotesShouldProcess()) return;
+        [[SVBManager shared] applyPopupBackgroundToAlertController:self context:SVBContextNPopup];
+    } @catch (NSException *e) {}
+}
+- (void)viewDidAppear:(BOOL)animated {
+    %orig;
+    SVB_NOTES_GUARD()
+    @try {
+        if (!SVBNotesShouldProcess()) return;
+        // viewDidAppear 再补一次 (首触发时面板容器可能还没进视图树)
+        [[SVBManager shared] applyPopupBackgroundToAlertController:self context:SVBContextNPopup];
+    } @catch (NSException *e) {}
+}
+- (void)viewDidDisappear:(BOOL)animated {
+    %orig;
+    SVB_NOTES_GUARD()
+    @try { [[SVBManager shared] setContextActive:NO context:SVBContextNPopup]; } @catch (NSException *e) {}
 }
 %end
 
@@ -1150,6 +1187,7 @@ static char SVBDetectedCtxKey;
                         [[SVBManager shared] preloadPlayerForContext:SVBContextNFolder];
                         [[SVBManager shared] preloadPlayerForContext:SVBContextNList];
                         [[SVBManager shared] preloadPlayerForContext:SVBContextNBody];
+                        [[SVBManager shared] preloadPlayerForContext:SVBContextNEdit];
                     }
                 });
 

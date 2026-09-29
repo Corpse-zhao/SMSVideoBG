@@ -26,7 +26,7 @@
 //   - 备忘录(com.apple.mobilenotes)的 7 类界面语境见下方 NVB 常量;
 //   - 控制App 首页可切「信息 / 备忘录」两个管理页, 各自独立开关;
 //   - 备忘录素材根 = 备忘录App 数据容器 (控制App 双容器齐写)。
-#define SVB_VERSION @"11.0.3"
+#define SVB_VERSION @"11.0.4"
 #define SVB_SUITE @"com.nvb.smsvideobg"
 #define SVB_DARWIN_NOTE "com.nvb.smsvideobg/prefs.changed"
 #define SVB_MEDIA_DIR_NAME @"SMSVideoBG"
@@ -114,13 +114,16 @@ extern NSString * const SVBContextChat;     // 对话详情
 NSArray<NSArray<NSString *> *> *SVBContextDefinitions(void);
 
 // ---- v11.0.0 备忘录语境 (com.apple.mobilenotes, IC* 私有类) ----
-extern NSString * const SVBContextNBody;      // 备忘录正文/编辑页
-extern NSString * const SVBContextNList;      // 笔记列表
-extern NSString * const SVBContextNFolder;    // 文件夹
-extern NSString * const SVBContextNGallery;   // 画廊
-extern NSString * const SVBContextNSearch;    // 搜索
-extern NSString * const SVBContextNRecent;    // 最近删除
-extern NSString * const SVBContextNInternal;  // 内部页兜底 (近似全屏的 IC* 页)
+// v11.0.4: 按用户真机页面重命名 —— 首页/文件夹/内部页/笔记/搜索一下/多多创新
+extern NSString * const SVBContextNBody;      // 「内部页」点开某条备忘录后的浏览界面
+extern NSString * const SVBContextNEdit;      // 「笔记」右下角新建笔记进入的编辑界面 (v11.0.4 新增)
+extern NSString * const SVBContextNList;      // 「文件夹」点进 所有iCloud/各文件夹 后的列表页
+extern NSString * const SVBContextNFolder;    // 「首页」打开备忘录看到的第一屏
+extern NSString * const SVBContextNGallery;   // 「画廊」缩略图视图
+extern NSString * const SVBContextNSearch;    // 「搜索一下」搜索页
+extern NSString * const SVBContextNPopup;     // 「多多创新」左下角新建文件夹等弹出的面板 (v11.0.4 新增)
+extern NSString * const SVBContextNRecent;    // 「最近删除」
+extern NSString * const SVBContextNInternal;  // 「其它内部页」兜底 (近似全屏的 IC* 页)
 
 // 备忘录 7 类界面定义: @[key, 标题, 说明]
 NSArray<NSArray<NSString *> *> *SVBNotesContextDefinitions(void);
@@ -153,6 +156,8 @@ NSString *SVBNotesFriendlyRoot(void);
 - (void)pauseAllPlayersExcept:(NSString *)ctx;
 // v11.0.3: 预载播放器 (后台建好即暂停, 进页面零等待)
 - (void)preloadPlayerForContext:(NSString *)ctx;
+// v11.0.4: 弹窗面板背景 (备忘录「多多创新」, 铺进 UIAlertController 内容容器)
+- (void)applyPopupBackgroundToAlertController:(UIAlertController *)vc context:(NSString *)ctx;
 // 全局效果 (0~1)
 - (CGFloat)globalAlpha;
 - (CGFloat)globalBlur;

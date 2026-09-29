@@ -82,6 +82,12 @@ static UIImage *SVBIconForKey(NSString *key) {
     if ([key isEqualToString:SVBContextNBody])     return SVBBadgeIcon(@"note.text",
                                             [UIColor colorWithRed:1.00 green:0.76 blue:0.00 alpha:1],
                                             [UIColor colorWithRed:1.00 green:0.58 blue:0.20 alpha:1]);
+    if ([key isEqualToString:SVBContextNEdit])     return SVBBadgeIcon(@"square.and.pencil",
+                                            [UIColor colorWithRed:1.00 green:0.70 blue:0.10 alpha:1],
+                                            [UIColor colorWithRed:1.00 green:0.50 blue:0.28 alpha:1]);
+    if ([key isEqualToString:SVBContextNPopup])    return SVBBadgeIcon(@"rectangle.bottomthird.inset.filled",
+                                            [UIColor colorWithRed:0.98 green:0.60 blue:0.12 alpha:1],
+                                            [UIColor colorWithRed:0.95 green:0.42 blue:0.38 alpha:1]);
     if ([key isEqualToString:SVBContextNList])     return SVBBadgeIcon(@"list.bullet.rectangle.fill",
                                             [UIColor colorWithRed:0.95 green:0.62 blue:0.15 alpha:1],
                                             [UIColor colorWithRed:1.00 green:0.45 blue:0.35 alpha:1]);
@@ -296,6 +302,7 @@ static void SVBDiagnoseReportResume(void) {
     // v10.3.0: 先把统一素材路径 /var/mobile/信息视频背景素材/板栗仁 建好(软链自愈),
     // 再把 jbroot/Documents/家目录等旧根里的素材搬进真实素材根 (信息App 容器)
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        SVBRecordContainerPaths();   // v11.0.4: 双容器路径写进配置 (宿主沙盒枚举失败的后备定位)
         SVBEnsureFriendlyMediaPath(NULL);
         [[SVBManager shared] migrateMediaIntoPrimaryRoot];
         // v10.4.0: 旧名杂项改名 / 过期诊断日志删除 / 界面子目录摊平
@@ -692,10 +699,22 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
 - (instancetype)initWithStyle:(UITableViewStyle)style {
     if ((self = [super initWithStyle:style])) {
         _targetMode = [[SVBManager shared] configValueForKey:@"ui_target"] ? 1 : 0;
-        _defs = (_targetMode == 1) ? SVBNotesContextDefinitions() : SVBContextDefinitions();
+        _defs = [self svbSortedDefsForMode:_targetMode];
         self.title = @"信息视频背景";
     }
     return self;
+}
+
+// v11.0.4: 界面列表按名称字数升序排列 (用户要求「按字数多少来排列」)
+- (NSArray<NSArray<NSString *> *> *)svbSortedDefsForMode:(NSInteger)mode {
+    NSArray<NSArray<NSString *> *> *defs = (mode == 1) ? SVBNotesContextDefinitions()
+                                                       : SVBContextDefinitions();
+    return [defs sortedArrayUsingComparator:^NSComparisonResult(NSArray<NSString *> *a,
+                                                                NSArray<NSString *> *b) {
+        NSUInteger la = a[1].length, lb = b[1].length;
+        if (la != lb) return la < lb ? NSOrderedAscending : NSOrderedDescending;
+        return [a[1] compare:b[1]];
+    }];
 }
 
 #pragma mark - v11.0.0 信息 / 备忘录 双管理模式
@@ -705,7 +724,7 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
 - (void)svbSetTargetMode:(NSInteger)m {
     _targetMode = (m == 1) ? 1 : 0;
     [[SVBManager shared] setConfigValue:@(_targetMode) forKey:@"ui_target"];
-    _defs = [self svbIsNotesMode] ? SVBNotesContextDefinitions() : SVBContextDefinitions();
+    _defs = [self svbSortedDefsForMode:[self svbIsNotesMode] ? 1 : 0];
     self.tableView.tableHeaderView = [self makeHeroHeader];
     [self.tableView reloadData];
 }
