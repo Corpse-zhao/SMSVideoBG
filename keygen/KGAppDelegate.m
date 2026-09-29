@@ -390,8 +390,7 @@ static UITextField *KGField(NSString *placeholder, CGFloat fontSize, BOOL digits
     UIView *card = KGCard(@"Gitee 同步（国内直连 · 客户不用挂代理）", &stack);
 
     [stack addArrangedSubview:KGLabel(
-        @"Gitee 是国内站点，客户手机直连就能拉到名单。建议和 GitHub 同时开，"
-        @"两边名单内容完全一样（只有指纹，没有 UDID 原文）。",
+        @"Gitee 是国内站点，客户手机直连就能拉到名单。建议和 GitHub 同时开，两边名单内容完全一样（只有指纹，没有 UDID 原文）。",
         12.5, UIFontWeightRegular, [UIColor tertiaryLabelColor])];
 
     _giteeTokenField = KGField(@"Gitee 私人令牌（设置→私人令牌，勾 projects）", 12.5, NO);
@@ -686,9 +685,7 @@ static UITextField *KGField(NSString *placeholder, CGFloat fontSize, BOOL digits
             w.udidField.text = @"";
             w.noteField.text = @"";
         } else {
-            w.issueStatus.text = [NSString stringWithFormat:
-                @"⚠️ 已记入本机名单，但推送失败：%@（点「立即推送名单」可重试；"
-                @"也可以长按名单行取「离线授权串」直接发给客户）", msg ?: @"未知错误"];
+            w.issueStatus.text = [NSString stringWithFormat:@"⚠️ 已记入本机名单，但推送失败：%@（点「立即推送名单」可重试；也可以长按名单行取「离线授权串」直接发给客户）", msg ?: @"未知错误"];
             w.issueStatus.textColor = [UIColor systemOrangeColor];
         }
     }];
@@ -740,24 +737,15 @@ static UITextField *KGField(NSString *placeholder, CGFloat fontSize, BOOL digits
     NSString *udid = d[@"udid"] ?: @"";
 
     if (!udid.length) {
-        UIAlertController *ac = [UIAlertController
-            alertControllerWithTitle:@"这条记录没有 UDID 原文"
-                             message:@"离线授权串必须绑定设备 UDID；这条是从远端名单同步来的，"
-                                     @"本机没存原文。让客户把 UDID 发来、重新签发一次即可。"
-                      preferredStyle:UIAlertControllerStyleAlert];
-        [ac addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
-        [self presentViewController:ac animated:YES completion:nil];
+        [self kgAlert:@"这条记录没有 UDID 原文"
+                  msg:@"离线授权串必须绑定设备 UDID。这条是从远端名单同步来的，本机没存原文。\n让客户把 UDID 发来、重新签发一次即可。"];
         return;
     }
 
     uint32_t exp = (uint32_t)[d[@"exp"] unsignedIntValue];
     NSString *ticket = KGAuthBuildOfflineTicket(KGCompiledSecret(), udid, exp);
     if (!ticket.length) {
-        UIAlertController *ac = [UIAlertController
-            alertControllerWithTitle:@"生成失败" message:@"签名密钥异常，无法生成离线授权串。"
-                      preferredStyle:UIAlertControllerStyleAlert];
-        [ac addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
-        [self presentViewController:ac animated:YES completion:nil];
+        [self kgAlert:@"生成失败" msg:@"签名密钥异常，无法生成离线授权串。"];
         return;
     }
 
@@ -765,19 +753,17 @@ static UITextField *KGField(NSString *placeholder, CGFloat fontSize, BOOL digits
     uint32_t cap = KGDayIndexFromNow(30);
     BOOL capped = (exp == KG_AUTH_FOREVER || exp > cap);
 
-    UIAlertController *ac = [UIAlertController
-        alertControllerWithTitle:@"离线授权串已复制"
-                         message:[NSString stringWithFormat:
-        @"%@\n\n（全文已复制到剪贴板，直接粘给客户即可）\n\n"
-        @"让客户在控制 App 里点「粘贴离线授权」导入：\n"
-        @"· 不需要任何网络就能生效\n"
-        @"· 只对这台设备有效（已绑定它的 UDID）\n"
-        @"· 离线有效期最长 30 天%@\n"
-        @"· 客户一旦联网校验成功，会自动转成完整期限：%@",
+    NSString *msg = [NSString stringWithFormat:@"%@\n\n（全文已复制到剪贴板，直接粘给客户即可）\n\n让客户在控制 App 里点「粘贴离线授权」导入：\n- 不需要任何网络就能生效\n- 只对这台设备有效（已绑定它的 UDID）\n- 离线有效期最长 30 天%@\n- 客户一旦联网校验成功，会自动转成完整期限：%@",
         KGAuthShortTicket(ticket),
         capped ? @"（本单按 30 天算）" : @"（按你签的期限算）",
-        KGDateTextForDayIndex(exp)],
-         preferredStyle:UIAlertControllerStyleAlert];
+        KGDateTextForDayIndex(exp)];
+    [self kgAlert:@"离线授权串已复制" msg:msg];
+}
+
+- (void)kgAlert:(NSString *)title msg:(NSString *)msg {
+    UIAlertController *ac = [UIAlertController alertControllerWithTitle:title
+                                                               message:msg
+                                                        preferredStyle:UIAlertControllerStyleAlert];
     [ac addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
     [self presentViewController:ac animated:YES completion:nil];
 }
