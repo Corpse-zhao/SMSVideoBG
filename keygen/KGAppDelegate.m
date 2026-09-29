@@ -172,6 +172,10 @@ static UITextField *KGField(NSString *placeholder, CGFloat fontSize, BOOL digits
 @property (nonatomic, strong) UILabel *ledgerStatusLabel;
 @property (nonatomic, strong) UIStackView *ledgerStack;
 @property (nonatomic, strong) NSMutableArray<NSDictionary *> *ledger;
+
+@property (nonatomic, strong) UITextField *grantCodeField;    // v1.4.0 远程改签
+@property (nonatomic, strong) UITextField *grantDaysField;
+@property (nonatomic, strong) UILabel *grantStatusLabel;
 @end
 
 @implementation KGViewController
@@ -220,6 +224,7 @@ static UITextField *KGField(NSString *placeholder, CGFloat fontSize, BOOL digits
     [root addArrangedSubview:[self resultCard]];
     [root addArrangedSubview:[self buildHistoryCard]];
     [root addArrangedSubview:[self ledgerCard]];
+    [root addArrangedSubview:[self grantCard]];
     [root addArrangedSubview:[self revokeCard]];
     [root addArrangedSubview:[self secretCard]];
     [root addArrangedSubview:[self footerLabel]];
@@ -522,9 +527,9 @@ static UITextField *KGField(NSString *placeholder, CGFloat fontSize, BOOL digits
 
     [stack addArrangedSubview:KGLabel(
         @"客户操作：控制 App → 授权 → 授权凭证 → 复制后发给你。"
-        @"粘进来点登记，台账会记下设备码、激活时间、到期日。点某一行可以改备注 / 续签 / 强制升级 / 删除。"
-        @"v1.3.0 续签直达：续签后新码自动送达对方设备（插件联网 30 分钟内自动换新），客户无需重新输入激活码。"
-        @"v1.4.0 强制升级：把旧码作废 + 新码直达 —— 装老版本（9.9.13 及更早）的客户直接丢授权，装新版的不受影响，逼客户升级。",
+        @"粘进来点登记，台账会记下设备码、激活时间、到期日。点某一行可以改备注 / 改签 / 强制升级 / 删除。"
+        @"v1.4.0 远程改签：不改激活码，直接改对方授权时间（续签 / 改短 / 复活过期码），客户零输入，30 分钟内自动生效。"
+        @"强制升级：旧码进作废名单（老版本 ≤9.9.14 直接失效）+ 改签表兜底（升级到 9.9.15+ 自动恢复），逼客户升级。",
         12.5, UIFontWeightRegular, [UIColor tertiaryLabelColor])];
     return card;
 }
@@ -647,7 +652,8 @@ static UITextField *KGField(NSString *placeholder, CGFloat fontSize, BOOL digits
     __weak typeof(self) w = self;
     [ac addAction:[UIAlertAction actionWithTitle:@"改备注" style:UIAlertActionStyleDefault
                                           handler:^(UIAlertAction *a) { [w editLedgerNote:i]; }]];
-    [ac addAction:[UIAlertAction actionWithTitle:@"续签（签新码并复制）" style:UIAlertActionStyleDefault
+    [ac addAction:[UIAlertAction actionWithTitle:@"改签（远程改到期·不发新码）"
+                                           style:UIAlertActionStyleDefault
                                           handler:^(UIAlertAction *a) { [w renewLedger:i]; }]];
     [ac addAction:[UIAlertAction actionWithTitle:@"强制升级（作废旧码·对方须装新版）"
                                            style:UIAlertActionStyleDefault
@@ -708,17 +714,17 @@ static UITextField *KGField(NSString *placeholder, CGFloat fontSize, BOOL digits
 - (void)renewLedger:(NSInteger)i {
     if (i < 0 || i >= self.ledger.count) return;
     NSDictionary *d = self.ledger[i];
-    NSString *devRaw = [d objectForKey:@"deviceRaw"];
-    if (!devRaw.length) devRaw = [[d objectForKey:@"device"] stringByReplacingOccurrencesOfString:@"-" withString:@""];
-    if (devRaw.length != 8) {
-        _ledgerStatusLabel.text = @"⚠️ 这条登记没有可用的设备码，无法续签";
+    NSString *oldCode = [d objectForKey:@"code"];
+    if (oldCode.length != 24) {
+        _ledgerStatusLabel.text = @"⚠️ 这条登记没有激活码, 无法改签 (让对方重发一次授权凭证)";
         _ledgerStatusLabel.textColor = [UIColor systemOrangeColor];
         return;
     }
 
     UIAlertController *ac = [UIAlertController
-        alertControllerWithTitle:@"续签"
-                         message:[NSString stringWithFormat:@"给 %@ 签一枚新码（留空天数 = 永久）。\n新码会通过远程续签通道自动送达对方设备 —— 客户什么都不用输入。", [d objectForKey:@"device"] ?: devRaw]
+        alertControllerWithTitle:@"远程改签"
+                         message:[NSString stringWithFormat:@"%@\n\n不改激活码, 直接改对方的授权时间 (可续签 / 改短 / 复活过期码)。客户什么都不用输, 插件 30 分钟内（或打开控制 App 时）自动生效。",
+                                  [d objectForKey:@"note"] ?: ([d objectForKey:@"device"] ?: @"-")]
                   preferredStyle:UIAlertControllerStyleAlert];
     [ac addTextFieldWithConfigurationHandler:^(UITextField *tf) {
         tf.placeholder = @"天数（留空 = 永久）";
@@ -727,7 +733,7 @@ static UITextField *KGField(NSString *placeholder, CGFloat fontSize, BOOL digits
     }];
     __weak typeof(self) w = self;
     [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
-    [ac addAction:[UIAlertAction actionWithTitle:@"签发并送达" style:UIAlertActionStyleDefault
+    [ac addAction:[UIAlertAction actionWithTitle:@"改签" style:UIAlertActionStyleDefault
                                           handler:^(UIAlertAction *a) {
         NSString *t = [ac.textFields.firstObject.text
                        stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
@@ -736,52 +742,37 @@ static UITextField *KGField(NSString *placeholder, CGFloat fontSize, BOOL digits
         if (!forever && days <= 0) days = 365;
 
         NSString *secret = w.secretField.text.length ? w.secretField.text : [w currentSecret];
-        NSString *exp = nil, *err = nil;
-        NSString *code = KGBuildCode(secret, devRaw, NO, forever, days, &exp, &err);
-        if (!code) {
-            w.ledgerStatusLabel.text = [NSString stringWithFormat:@"⚠️ %@", err ?: @"签发失败"];
-            w.ledgerStatusLabel.textColor = [UIColor systemOrangeColor];
-            return;
-        }
-        NSString *expText = exp ?: @"-";
+        NSString *hash = KGRevokeHashForCode(oldCode);
+        uint32_t dayIdx = forever ? 0xFFFFFFFFu : (uint32_t)KGDayIndexFromNow(days);
+        NSString *expText = forever ? @"永久" : (KGDateTextForDayIndex(dayIdx) ?: @"-");
 
-        [w ledgerCopy:code label:@"新激活码"];
-        [w saveHistoryCode:code device:KGGroupDevice8(devRaw) universal:NO exp:exp];
-
-        NSMutableDictionary *m = [w.ledger[i] mutableCopy];
-        NSDictionary *dec = KGDecodeCode(code) ?: @{};
-        m[@"code"]     = code;
-        m[@"exp"]      = [dec objectForKey:@"exp"] ?: exp ?: @"-";
-        m[@"forever"]  = [dec objectForKey:@"forever"] ?: @(forever);
-        m[@"daysLeft"] = [dec objectForKey:@"daysLeft"] ?: @(-1);
-        m[@"renewedAt"] = @([[NSDate date] timeIntervalSince1970]);
-        [w.ledger replaceObjectAtIndex:i withObject:m];
-        [w saveLedger];
-        [w refreshLedger];
-        w.ledgerStatusLabel.text = [NSString stringWithFormat:@"✓ 已续签 · 至 %@ · 正在送达对方…", expText];
-        w.ledgerStatusLabel.textColor = [UIColor systemGreenColor];
-
-        // v1.3.0 续签直达: 旧码 -> 新码 的映射推到远端续签表,
-        // 客户插件 30 分钟内(或打开控制 App 时)拉到后自动换码, 无需重新输入
-        NSString *oldCode = [d objectForKey:@"code"];
-        NSString *oldHash = KGRevokeHashForCode(oldCode);
-        if (oldHash.length != 16) {
-            w.ledgerStatusLabel.text = [NSString stringWithFormat:@"⚠️ 新码已复制, 但旧码缺失, 对方需手动输入新码"];
-            w.ledgerStatusLabel.textColor = [UIColor systemOrangeColor];
-            return;
-        }
-        [KGRevokeClient pushRenewals:@{oldHash: code} secret:secret completion:^(BOOL ok, NSString *error) {
+        w.ledgerStatusLabel.text = @"⏳ 正在推送改签…";
+        w.ledgerStatusLabel.textColor = [UIColor secondaryLabelColor];
+        [KGRevokeClient pushGrants:@{hash: [NSString stringWithFormat:@"%u", dayIdx]}
+                         removeKeys:nil secret:secret
+                         completion:^(BOOL ok, NSString *error) {
             if (!w) return;
-            if (ok) {
+            if (!ok) {
                 w.ledgerStatusLabel.text =
-                    [NSString stringWithFormat:@"✓ 续签已送达 %@ · 至 %@ · 对方 30 分钟内自动换新",
-                     [KGRevokeClient repo], expText];
-                w.ledgerStatusLabel.textColor = [UIColor systemGreenColor];
-            } else {
-                w.ledgerStatusLabel.text =
-                    [NSString stringWithFormat:@"⚠️ 新码已复制, 但自动送达失败（%@）—— 让对方手动输入", error ?: @"未知错误"];
+                    [NSString stringWithFormat:@"⚠️ 改签失败：%@（客户授权暂不受影响）", error ?: @"未知错误"];
                 w.ledgerStatusLabel.textColor = [UIColor systemOrangeColor];
+                return;
             }
+            // 本地台账同步显示
+            uint32_t todayIdx = (uint32_t)KGDayIndexFromNow(0);
+            NSMutableArray *arr = [w.ledger mutableCopy];
+            NSMutableDictionary *m = [arr[i] mutableCopy];
+            m[@"exp"]      = expText;
+            m[@"forever"]  = @(forever);
+            m[@"daysLeft"] = forever ? @(-1) : @((NSInteger)dayIdx - (NSInteger)todayIdx);
+            m[@"grantedAt"] = @([[NSDate date] timeIntervalSince1970]);
+            [arr replaceObjectAtIndex:i withObject:m];
+            w.ledger = arr;
+            [w saveLedger];
+            [w refreshLedger];
+            w.ledgerStatusLabel.text =
+                [NSString stringWithFormat:@"✓ 已改签 · 至 %@ · 对方 30 分钟内自动生效（无需输入任何东西）", expText];
+            w.ledgerStatusLabel.textColor = [UIColor systemGreenColor];
         }];
     }]];
     [self presentViewController:ac animated:YES completion:nil];
@@ -789,27 +780,24 @@ static UITextField *KGField(NSString *placeholder, CGFloat fontSize, BOOL digits
 
 #pragma mark 强制升级 (v1.4.0)
 
-// 原理: 老版本插件 (≤9.9.13) 只认离线签名 + 远程作废名单, 没有续签通道。
-// 把客户旧码加进作废名单 -> 老版本直接「已作废」;
-// 同时把 {旧码: 新码(原有效期)} 推进续签表 -> 9.9.14+ 插件拉到后先自动换新码
-// 再做作废判定, 所以新版本完全不受影响 —— 即「不升级就丢授权」。
+// 原理: 老版本插件 (≤9.9.14) 只有「离线签名 + 作废名单」, 没有改签表。
+// ① 旧码全部加进作废名单 -> 老版本 30 分钟内直接「已作废」;
+// ② 同时把 {旧码: 原到期日} 推进远程改签表 -> 9.9.15+ 插件命中改签表时
+//    到期以表为准且免疫作废名单 —— 授权自动恢复, 激活码不用换。
+// 效果: 不升级 = 丢授权; 升级 = 无感恢复。
 
-// 单个客户: 原有效期重签 + 送达 + 作废旧码
 - (void)forceUpgradeLedger:(NSInteger)i {
     if (i < 0 || i >= self.ledger.count) return;
     NSDictionary *d = self.ledger[i];
-    NSString *oldCode = [d objectForKey:@"code"];
-    NSString *devRaw = [d objectForKey:@"deviceRaw"];
-    if (!devRaw.length) devRaw = [[d objectForKey:@"device"] stringByReplacingOccurrencesOfString:@"-" withString:@""];
-    if (oldCode.length != 24 || devRaw.length != 8) {
-        _ledgerStatusLabel.text = @"⚠️ 这条登记缺旧码或设备码, 无法强制升级 (让对方重发一次授权凭证)";
+    if ([d objectForKey:@"code"].length != 24) {
+        _ledgerStatusLabel.text = @"⚠️ 这条登记没有激活码, 无法强制升级 (让对方重发一次授权凭证)";
         _ledgerStatusLabel.textColor = [UIColor systemOrangeColor];
         return;
     }
 
     UIAlertController *ac = [UIAlertController
         alertControllerWithTitle:@"强制升级"
-                         message:[NSString stringWithFormat:@"%@\n\n做两件事:\n① 旧码加入远程作废名单 —— 对方装的老版本 (9.9.13 及更早) 30 分钟内直接显示「已作废」;\n② 按原有效期签新码并推进续签表 —— 对方装了 9.9.14+ 的话会自动换新码, 授权不受影响。\n\n等于告诉客户: 想继续用, 请升级。",
+                         message:[NSString stringWithFormat:@"%@\n\n做两件事:\n① 旧码加入远程作废名单 —— 对方装的老版本 (9.9.14 及更早) 30 分钟内直接显示「已作废」;\n② 把旧码按原有效期推进远程改签表 —— 对方升级到 9.9.15+ 后授权自动恢复, 激活码不用换。\n\n等于告诉客户: 想继续用, 请升级。",
                                   [d objectForKey:@"note"] ?: ([d objectForKey:@"device"] ?: @"-")]
                   preferredStyle:UIAlertControllerStyleAlert];
     __weak typeof(self) w = self;
@@ -827,7 +815,7 @@ static UITextField *KGField(NSString *placeholder, CGFloat fontSize, BOOL digits
     }
     UIAlertController *ac = [UIAlertController
         alertControllerWithTitle:@"全员强制升级"
-                         message:[NSString stringWithFormat:@"对台账里的全部 %lu 位客户执行:\n\n① 旧码全部加入远程作废名单 —— 装老版本 (9.9.13 及更早) 的 30 分钟内直接「已作废」;\n② 按各自原有效期重签新码并推进续签表 —— 装了 9.9.14+ 的自动换新码, 授权不受影响。\n\n请确认客户都已拿到新版 deb 后再执行。",
+                         message:[NSString stringWithFormat:@"对台账里的全部 %lu 位客户执行:\n\n① 旧码全部加入远程作废名单 —— 装老版本 (9.9.14 及更早) 的 30 分钟内直接「已作废」;\n② 同时把各自的旧码按原有效期推进远程改签表 —— 升级到 9.9.15+ 的客户授权自动恢复, 不用换码也不用重新输入。\n\n请确认新 deb 已经发给客户后再执行。",
                                   (unsigned long)self.ledger.count]
                   preferredStyle:UIAlertControllerStyleAlert];
     __weak typeof(self) w = self;
@@ -841,90 +829,60 @@ static UITextField *KGField(NSString *placeholder, CGFloat fontSize, BOOL digits
     [self presentViewController:ac animated:YES completion:nil];
 }
 
-// 批量执行: 重签(保有效期) -> 更新台账 -> 推续签表 -> 成功后把旧码追加进作废名单
+// 批量执行: 推改签表(原有效期) -> 成功后把旧码追加进作废名单
+// 顺序保证: 改签表没送达之前绝不动作废名单, 新版本客户不掉授权
 - (void)forceUpgradeApply:(NSArray<NSNumber *> *)indexes title:(NSString *)title {
     NSString *secret = _secretField.text.length ? _secretField.text : [self currentSecret];
-    NSMutableDictionary<NSString *, NSString *> *renewMap = [NSMutableDictionary dictionary];
+    NSMutableDictionary<NSString *, NSString *> *grantMap = [NSMutableDictionary dictionary];
     NSMutableArray<NSString *> *oldHashes = [NSMutableArray array];
-    NSMutableArray<NSDictionary *> *updates = [NSMutableArray array];   // (idx, 新码, exp, forever, daysLeft)
     NSInteger skipped = 0;
 
     for (NSNumber *n in indexes) {
         NSInteger i = [n integerValue];
         if (i < 0 || i >= (NSInteger)self.ledger.count) continue;
-        NSDictionary *d = self.ledger[i];
-        NSString *oldCode = [d objectForKey:@"code"];
-        NSString *devRaw = [d objectForKey:@"deviceRaw"];
-        if (!devRaw.length) devRaw = [[d objectForKey:@"device"] stringByReplacingOccurrencesOfString:@"-" withString:@""];
+        NSString *oldCode = [self.ledger[i] objectForKey:@"code"];
         NSDictionary *dec = KGDecodeCode(oldCode);
-        if (oldCode.length != 24 || devRaw.length != 8 || !dec) { skipped++; continue; }
-
+        if (!dec) { skipped++; continue; }
         uint32_t dayIdx = (uint32_t)[[dec objectForKey:@"dayIndex"] unsignedIntValue];
-        NSString *exp = nil, *err = nil;
-        NSString *newCode = KGBuildCodeWithDayIndex(secret, devRaw, NO, dayIdx, &exp, &err);
-        if (!newCode.length) { skipped++; continue; }
-
-        NSString *oldHash = KGRevokeHashForCode(oldCode);
-        if (oldHash.length == 16) {
-            [renewMap setObject:KGCodeNormalize(newCode) forKey:oldHash];
-            if (![oldHashes containsObject:oldHash]) [oldHashes addObject:oldHash];
-        }
-        [updates addObject:@{@"idx": @(i), @"code": newCode, @"exp": exp ?: @"-",
-                             @"forever": [dec objectForKey:@"forever"] ?: @NO,
-                             @"daysLeft": [dec objectForKey:@"daysLeft"] ?: @(-1)}];
+        NSString *h = KGRevokeHashForCode(oldCode);
+        if (h.length != 16 || dayIdx == 0) { skipped++; continue; }
+        if (![grantMap objectForKey:h]) [grantMap setObject:[NSString stringWithFormat:@"%u", dayIdx] forKey:h];
+        if (![oldHashes containsObject:h]) [oldHashes addObject:h];
     }
 
-    if (!updates.count) {
-        _ledgerStatusLabel.text = @"⚠️ 没有可强制升级的登记 (缺旧码/设备码)";
+    if (!grantMap.count) {
+        _ledgerStatusLabel.text = @"⚠️ 没有可强制升级的登记 (缺激活码)";
         _ledgerStatusLabel.textColor = [UIColor systemOrangeColor];
         return;
     }
 
-    // 先更新台账 (本地), 再推续签表, 成功后才作废旧码 —— 顺序保证新版本客户不掉授权
-    for (NSDictionary *u in updates) {
-        NSInteger i = [[u objectForKey:@"idx"] integerValue];
-        NSMutableDictionary *m = [self.ledger[i] mutableCopy];
-        m[@"code"]      = [u objectForKey:@"code"];
-        m[@"exp"]       = [u objectForKey:@"exp"];
-        m[@"forever"]   = [u objectForKey:@"forever"];
-        m[@"daysLeft"]  = [u objectForKey:@"daysLeft"];
-        m[@"renewedAt"] = @([[NSDate date] timeIntervalSince1970]);
-        m[@"forceUpgradedAt"] = @([[NSDate date] timeIntervalSince1970]);
-        [self.ledger replaceObjectAtIndex:i withObject:m];
-        [self saveHistoryCode:[u objectForKey:@"code"]
-                       device:[self.ledger[i] objectForKey:@"device"]
-                     universal:NO
-                           exp:[u objectForKey:@"exp"]];
-    }
-    [self saveLedger];
-    [self refreshLedger];
     _ledgerStatusLabel.text = [NSString stringWithFormat:
-        @"⏳ %@强制升级: 已重签 %lu 位客户 (跳过 %ld), 正在送达…",
-        title, (unsigned long)updates.count, (long)skipped];
+        @"⏳ %@强制升级: %lu 位客户 (跳过 %ld), 正在推送改签表…",
+        title, (unsigned long)grantMap.count, (long)skipped];
     _ledgerStatusLabel.textColor = [UIColor secondaryLabelColor];
 
     __weak typeof(self) w = self;
-    [KGRevokeClient pushRenewals:renewMap secret:secret completion:^(BOOL ok, NSString *error) {
+    [KGRevokeClient pushGrants:grantMap removeKeys:nil secret:secret completion:^(BOOL ok, NSString *error) {
         if (!w) return;
         if (!ok) {
             w.ledgerStatusLabel.text =
-                [NSString stringWithFormat:@"⚠️ 新码已签并复制在台账里, 但送达失败（%@）—— 不要作废旧码, 客户暂不受影响", error ?: @"未知错误"];
+                [NSString stringWithFormat:@"⚠️ 改签表推送失败（%@）—— 未作废旧码, 客户暂不受影响, 可重试", error ?: @"未知错误"];
             w.ledgerStatusLabel.textColor = [UIColor systemOrangeColor];
             return;
         }
-        // 续签表已送达, 现在可以安全作废旧码 (老版本失效, 新版本已换新)
+        // 改签表已送达, 现在作废旧码: 老版本失效; 9.9.15+ 命中改签表自动恢复
         [KGRevokeClient revokeAdditionalHashes:oldHashes secret:secret completion:^(BOOL ok2, NSString *error2) {
             if (!w) return;
             if (ok2) {
                 w.ledgerStatusLabel.text =
                     [NSString stringWithFormat:
-                     @"✓ %@强制升级完成: %lu 位客户已重签并送达, 旧码已作废 —— 老版本 30 分钟内丢授权, 9.9.14+ 自动换新不受影响",
-                     title, (unsigned long)updates.count];
+                     @"✓ %@强制升级完成: %lu 位客户已处理 —— 老版本 30 分钟内丢授权; 升级到 9.9.15+ 的自动恢复, 码都不用换",
+                     title, (unsigned long)grantMap.count];
                 w.ledgerStatusLabel.textColor = [UIColor systemGreenColor];
             } else {
                 w.ledgerStatusLabel.text =
                     [NSString stringWithFormat:
-                     @"⚠️ 新码已送达, 但旧码作废失败（%@）—— 老版本暂时还能用, 可稍后重试强制升级",
+                     @"⚠️ 改签表已送达, 但作废旧码失败（%@）—— 老版本暂时还能用, 可稍后重试",
                      error2 ?: @"未知错误"];
                 w.ledgerStatusLabel.textColor = [UIColor systemOrangeColor];
             }
@@ -975,6 +933,126 @@ static UITextField *KGField(NSString *placeholder, CGFloat fontSize, BOOL digits
                                (hit >= 0 ? @"已更新" : @"已登记"), [rec objectForKey:@"device"] ?: @"",
                                [rec objectForKey:@"exp"] ?: @"-"];
     _ledgerStatusLabel.textColor = valid ? [UIColor systemGreenColor] : [UIColor systemOrangeColor];
+}
+
+#pragma mark 远程改签 (v1.4.0)
+
+// 原理: licenses.json 改签表 {激活码hash: 到期dayIndex} 与插件共用同一密钥签名。
+// 插件 (9.9.15+) 命中改签表时到期以表为准 (可续签/改短/复活过期码), 且优先于
+// 作废名单 —— 老版本没有这张表, 作废只对老版本生效。激活码本身不变, 客户零输入。
+
+- (UIView *)grantCard {
+    UIStackView *stack;
+    UIView *card = KGCard(@"远程改签（不改激活码，直接改对方授权时间）", &stack);
+
+    _grantCodeField = KGField(@"对方的激活码（留空则读剪贴板）", 12, NO);
+    [_grantCodeField.heightAnchor constraintEqualToConstant:44].active = YES;
+    [stack addArrangedSubview:_grantCodeField];
+
+    _grantDaysField = KGField(@"天数（留空 = 永久）", 12, YES);
+    [_grantDaysField.heightAnchor constraintEqualToConstant:44].active = YES;
+    [stack addArrangedSubview:_grantDaysField];
+
+    UIStackView *line = [[UIStackView alloc] initWithFrame:CGRectZero];
+    line.axis = UILayoutConstraintAxisHorizontal;
+    line.spacing = 8;
+    line.distribution = UIStackViewDistributionFillEqually;
+    line.translatesAutoresizingMaskIntoConstraints = NO;
+
+    UIButton *go = KGButton(@"改签", KGAccent(), UIColor.whiteColor, 42);
+    [go addTarget:self action:@selector(grantApplyTapped) forControlEvents:UIControlEventTouchUpInside];
+    UIButton *cancel = KGButton(@"取消改签", [UIColor systemGrayColor], UIColor.whiteColor, 42);
+    [cancel addTarget:self action:@selector(grantCancelTapped) forControlEvents:UIControlEventTouchUpInside];
+    [line addArrangedSubview:go];
+    [line addArrangedSubview:cancel];
+    [stack addArrangedSubview:line];
+
+    _grantStatusLabel = KGLabel(@"", 12.5, UIFontWeightMedium, [UIColor secondaryLabelColor]);
+    _grantStatusLabel.numberOfLines = 0;
+    [stack addArrangedSubview:_grantStatusLabel];
+
+    [stack addArrangedSubview:KGLabel(
+        @"把客户发来的激活码粘进来，改个到期时间点「改签」—— 客户什么都不用输，插件 30 分钟内"
+        @"（或打开控制 App 时）自动生效。可续签、改短、复活过期码。「取消改签」恢复激活码内印的原始到期日。"
+        @"配合「全员强制升级」：旧码作废后老版本直接失效，升级到 9.9.15+ 的客户靠这张改签表自动恢复。",
+        12.5, UIFontWeightRegular, [UIColor tertiaryLabelColor])];
+    return card;
+}
+
+// 取输入框里的激活码 (留空读剪贴板), 归一化成 24 位, 失败回 nil 并提示
+- (NSString *)grantCodeFromInput {
+    NSString *raw = [_grantCodeField.text stringByTrimmingCharactersInSet:
+                     [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (!raw.length) raw = [UIPasteboard generalPasteboard].string ?: @"";
+    NSString *code = KGCodeNormalize(raw);
+    if (code.length != 24) {
+        _grantStatusLabel.text = @"⚠️ 激活码不合法（应为 24 位，去空格/横线后）";
+        _grantStatusLabel.textColor = [UIColor systemOrangeColor];
+        return nil;
+    }
+    return code;
+}
+
+- (void)grantApplyTapped {
+    [self.view endEditing:YES];
+    NSString *code = [self grantCodeFromInput];
+    if (!code) return;
+
+    NSString *t = [_grantDaysField.text stringByTrimmingCharactersInSet:
+                   [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    BOOL forever = (t.length == 0);
+    NSInteger days = forever ? 0 : [t integerValue];
+    if (!forever && days <= 0) days = 365;
+
+    NSString *secret = _secretField.text.length ? _secretField.text : [self currentSecret];
+    NSString *hash = KGRevokeHashForCode(code);
+    uint32_t dayIdx = forever ? 0xFFFFFFFFu : (uint32_t)KGDayIndexFromNow(days);
+    NSString *expText = forever ? @"永久" : KGDateTextForDayIndex(dayIdx) ?: @"-";
+
+    _grantStatusLabel.text = @"⏳ 正在推送改签…";
+    _grantStatusLabel.textColor = [UIColor secondaryLabelColor];
+    __weak typeof(self) w = self;
+    [KGRevokeClient pushGrants:@{hash: [NSString stringWithFormat:@"%u", dayIdx]}
+                     removeKeys:nil
+                         secret:secret
+                     completion:^(BOOL ok, NSString *error) {
+        if (!w) return;
+        if (ok) {
+            w.grantStatusLabel.text =
+                [NSString stringWithFormat:@"✓ 已改签 %@ · 至 %@ · 对方 30 分钟内自动生效（无需输入任何东西）",
+                 [code substringToIndex:12], expText];
+            w.grantStatusLabel.textColor = [UIColor systemGreenColor];
+            w.grantCodeField.text = @"";
+        } else {
+            w.grantStatusLabel.text = [NSString stringWithFormat:@"⚠️ 改签失败：%@", error ?: @"未知错误"];
+            w.grantStatusLabel.textColor = [UIColor systemOrangeColor];
+        }
+    }];
+}
+
+- (void)grantCancelTapped {
+    [self.view endEditing:YES];
+    NSString *code = [self grantCodeFromInput];
+    if (!code) return;
+
+    NSString *secret = _secretField.text.length ? _secretField.text : [self currentSecret];
+    NSString *hash = KGRevokeHashForCode(code);
+    _grantStatusLabel.text = @"⏳ 正在取消改签…";
+    _grantStatusLabel.textColor = [UIColor secondaryLabelColor];
+    __weak typeof(self) w = self;
+    [KGRevokeClient pushGrants:@{} removeKeys:@[hash] secret:secret
+                     completion:^(BOOL ok, NSString *error) {
+        if (!w) return;
+        if (ok) {
+            w.grantStatusLabel.text =
+                [NSString stringWithFormat:@"✓ 已取消 %@… 的远程改签, 恢复激活码内印的原始到期日",
+                 [code substringToIndex:12]];
+            w.grantStatusLabel.textColor = [UIColor systemGreenColor];
+        } else {
+            w.grantStatusLabel.text = [NSString stringWithFormat:@"⚠️ 取消失败：%@", error ?: @"未知错误"];
+            w.grantStatusLabel.textColor = [UIColor systemOrangeColor];
+        }
+    }];
 }
 
 #pragma mark 远程作废名单

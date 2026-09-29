@@ -40,6 +40,16 @@ BOOL SVBRevokeApplyRenewal(void);
 // 缓存的续签条目数 (控制App 展示用)
 NSInteger SVBRevokeCachedRenewCount(void);
 
+// ---- 远程改签表 (v9.9.15, 签发 App 的 licenses.json) ----
+//   {"v":1,"ts":..,"grants":{"<码hash16>":<到期dayIndex>},"sig":..}
+//   签名原文 "SVBGLICENSE/v1|<ts>|<hash=dayIndex 升序逗号连接>", 与作废名单同密钥。
+//   命中改签表时: 到期日以表为准 (可续签/改短/复活过期码), 且优先于作废名单
+//   —— 老版本没有这张表, 所以作废只对老版本生效 (强制升级的底座)。
+// 该码的远程到期 dayIndex (0 = 无改签记录; 0xFFFFFFFF = 永久)
+uint32_t SVBRevokeGrantForCode(NSString *code);
+// 缓存的改签条目数 (控制App 展示用)
+NSInteger SVBRevokeCachedGrantCount(void);
+
 // 缓存状态 (控制App 展示用)
 NSInteger SVBRevokeCachedCount(void);
 NSTimeInterval SVBRevokeLastFetchTime(void);

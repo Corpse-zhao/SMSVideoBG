@@ -308,8 +308,31 @@ SVBLicenseState SVBLicenseCurrentState(NSString **detail) {
     NSString *det = nil;
     SVBLicenseState st = SVBLicenseVerify(code, &det);
 
+    // v9.9.15: 远程改签 —— 作者在签发 App 里直接改授权时间。命中改签表时:
+    // 到期日以表为准 (可续签 / 改短 / 复活过期码), 且优先于作废名单。
+    // 老版本 (≤9.9.14) 没有这张表 —— 所以「作废 + 改签」只对老版本生效,
+    // 这就是强制升级的底座: 升级 = 自动恢复, 不升级 = 已作废。
+    uint32_t grant = (st == SVBLicenseStateValid || st == SVBLicenseStateExpired)
+                   ? SVBRevokeGrantForCode(code) : 0;
+    if (grant != 0) {
+        if (grant == 0xFFFFFFFFu) {
+            det = @"永久";
+        } else {
+            NSTimeInterval gExp = SVB_LIC_EPOCH + (NSTimeInterval)grant * 86400.0 + 86399.0;
+            NSDateFormatter *gdf = [[NSDateFormatter alloc] init];
+            gdf.dateFormat = @"yyyy-MM-dd";
+            gdf.timeZone = [NSTimeZone timeZoneWithName:@"UTC"];
+            det = [gdf stringFromDate:[NSDate dateWithTimeIntervalSince1970:gExp]];
+        }
+        NSTimeInterval gNow = [[NSDate date] timeIntervalSince1970];
+        BOOL gOk = (grant == 0xFFFFFFFFu) ||
+                   (gNow <= SVB_LIC_EPOCH + (NSTimeInterval)grant * 86400.0 + 86399.0 + 86400.0);
+        st = gOk ? SVBLicenseStateValid : SVBLicenseStateExpired;
+    }
+
     // v9.9.10: 远程作废名单优先判定 —— 签名/设备/到期都通过, 但作者已把码作废
-    if (st == SVBLicenseStateValid && SVBRevokeIsCodeRevoked(code)) {
+    // (改签命中的码不受作废影响: 那是给老版本的死刑判决, 新版本已被改签表救回)
+    if (st == SVBLicenseStateValid && grant == 0 && SVBRevokeIsCodeRevoked(code)) {
         if (detail) *detail = det;
         return SVBLicenseStateRevoked;
     }

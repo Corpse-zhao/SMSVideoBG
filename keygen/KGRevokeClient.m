@@ -6,6 +6,7 @@ static NSString * const kKGRepoKey  = @"kg_gh_repo";
 static NSString * const kKGFileKey  = @"kg_gh_file";
 static NSString * const kKGBranchKey = @"kg_gh_branch";
 static NSString * const kKGRenewFileKey = @"kg_gh_renew_file";   // v1.3.0 续签表文件名
+static NSString * const kKGLicenseFileKey = @"kg_gh_license_file"; // v1.4.0 改签表文件名
 
 static NSString *KGPref(NSString *key, NSString *fallback) {
     NSString *v = [[NSUserDefaults standardUserDefaults] stringForKey:key];
@@ -356,6 +357,95 @@ static NSString *KGPref(NSString *key, NSString *fallback) {
         for (NSString *u in adds) if (![merged containsObject:u]) [merged addObject:u];
 
         [KGRevokeClient pushHashes:merged secret:secret completion:done];
+    });
+}
+
+// v1.4.0 推送改签表: 合并远端 licenses.json 后整体重签覆盖; removeKeys 用于取消改签
++ (void)pushGrants:(NSDictionary<NSString *, NSString *> *)add
+        removeKeys:(NSArray<NSString *> *)remove
+            secret:(NSString *)secret
+        completion:(void (^)(BOOL, NSString *))done {
+    NSString *tok = [self token];
+    if (!tok.length) { done(NO, @"未配置 GitHub Token，无法推送"); return; }
+    if (!secret.length) { done(NO, @"签名密钥为空"); return; }
+    if (!add.count && !remove.count) { done(NO, @"没有要推送的改签条目"); return; }
+
+    NSString *path = KGPref(kKGLicenseFileKey, @"licenses.json");
+    NSString *apiURL = [NSString stringWithFormat:@"https://api.github.com/repos/%@/contents/%@?ref=%@",
+                        [self repo], path, [self branch]];
+
+    // 清洗入参
+    NSMutableDictionary *entries = [NSMutableDictionary dictionary];
+    for (NSString *h in add) {
+        NSString *hu = [h uppercaseString];
+        NSString *v = [add objectForKey:h];
+        if (hu.length == 16 && v.length) [entries setObject:v forKey:hu];
+    }
+
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSString *err = @"推送失败";
+        BOOL ok = NO;
+
+        NSString *branchErr = nil;
+        if (![KGRevokeClient ensureBranchWithToken:tok error:&branchErr]) {
+            dispatch_async(dispatch_get_main_queue(), ^{ done(NO, branchErr ?: @"无法准备名单分支"); });
+            return;
+        }
+
+        // 拉远端现表合并 (拉不到/验签失败按空表处理, 推送前整体重签)
+        NSMutableDictionary *merged = [entries mutableCopy];
+        NSDictionary *g = [KGRevokeClient syncRequest:@"GET" url:apiURL token:tok
+                                                 body:nil accept:@"application/vnd.github.raw"];
+        NSInteger gs = [g[@"status"] integerValue];
+        if (gs == 200) {
+            NSDictionary *old = KGLicenseParseJSON(g[@"data"], secret);
+            if (old) {
+                [merged addEntriesFromDictionary:old];
+                for (NSString *h in remove) {
+                    if ([h isKindOfClass:[NSString class]]) [merged removeObjectForKey:[h uppercaseString]];
+                }
+            }
+        }
+        if (!merged.count) { err = @"合并后改签表为空"; 
+            dispatch_async(dispatch_get_main_queue(), ^{ done(NO, err); });
+            return; }
+
+        for (int attempt = 0; attempt < 2; attempt++) {
+            NSString *fileSHA = nil;
+            NSDictionary *h = [KGRevokeClient syncRequest:@"GET" url:apiURL token:tok
+                                                     body:nil accept:@"application/vnd.github+json"];
+            NSInteger hs = [h[@"status"] integerValue];
+            if (hs == 200) {
+                id obj = [NSJSONSerialization JSONObjectWithData:h[@"data"] options:0 error:NULL];
+                if ([obj isKindOfClass:[NSDictionary class]] && [obj[@"sha"] isKindOfClass:[NSString class]])
+                    fileSHA = obj[@"sha"];
+            } else if (hs != 404) {
+                err = [KGRevokeClient errorTextForStatus:hs data:h[@"data"]];
+                break;
+            }
+
+            NSData *content = KGLicenseBuildJSON(secret,
+                                                 (NSInteger)[[NSDate date] timeIntervalSince1970],
+                                                 merged);
+            if (!content) { err = @"改签表序列化失败"; break; }
+
+            NSMutableDictionary *payload = [NSMutableDictionary dictionary];
+            payload[@"message"] = [NSString stringWithFormat:@"更新改签表 (%lu 条)", (unsigned long)merged.count];
+            payload[@"content"] = [content base64EncodedStringWithOptions:0];
+            payload[@"branch"] = [KGRevokeClient branch];
+            if (fileSHA.length) payload[@"sha"] = fileSHA;
+
+            NSData *body = [NSJSONSerialization dataWithJSONObject:payload options:0 error:NULL];
+            NSDictionary *p = [KGRevokeClient syncRequest:@"PUT" url:apiURL token:tok
+                                                     body:body accept:@"application/vnd.github+json"];
+            NSInteger ps = [p[@"status"] integerValue];
+            if (ps == 200 || ps == 201) { ok = YES; err = nil; break; }
+            if (ps == 409 || ps == 422) { err = @"写入冲突（远端被同时修改），已重试"; continue; }
+            err = [KGRevokeClient errorTextForStatus:ps data:p[@"data"]];
+            break;
+        }
+
+        dispatch_async(dispatch_get_main_queue(), ^{ done(ok, err); });
     });
 }
 

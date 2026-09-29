@@ -38,4 +38,11 @@
 + (void)pushRenewals:(NSDictionary<NSString *, NSString *> *)add
               secret:(NSString *)secret
           completion:(void (^)(BOOL ok, NSString *error))done;
+
+// v1.4.0 改签表: {码hash16: dayIndex十进制字符串} 合并推送 (licenses.json, 同 revoke 分支)
+//   removeKeys 非空时先把这些条目从远端表里删掉 (取消改签)
++ (void)pushGrants:(NSDictionary<NSString *, NSString *> *)add
+        removeKeys:(NSArray<NSString *> *)remove
+            secret:(NSString *)secret
+        completion:(void (^)(BOOL ok, NSString *error))done;
 @end

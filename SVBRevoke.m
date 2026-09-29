@@ -16,6 +16,7 @@ static const char *const kRevokeSecret = SVB_LICENSE_SECRET;
 #define SVB_REVOKE_KEY_TRY  @"revoke_try_ts"      // 缓存: 上次尝试时间 (节流用)
 #define SVB_REVOKE_KEY_ECHO @"revoke_echo"        // 控制App: 上次动作结果文案
 #define SVB_RENEW_KEY_MAP   @"renew_map"          // v9.9.14 缓存: 续签表 {旧码hash: 新码}
+#define SVB_GRANT_KEY_MAP   @"grant_map"          // v9.9.15 缓存: 改签表 {码hash: 到期dayIndex}
 
 #define SVB_REVOKE_INTERVAL (30 * 60.0)           // 30 分钟拉一次
 #define SVB_REVOKE_TIMEOUT  12.0                  // 单个 URL 超时
@@ -172,6 +173,75 @@ BOOL SVBRevokeApplyRenewal(void) {
     } @catch (NSException *e) {
         return NO;
     }
+}
+
+#pragma mark - 远程改签表 (v9.9.15)
+
+// 签名原文: "SVBGLICENSE/v1|<ts>|<hash=dayIndex 升序逗号连接>" (与签发 App 严格一致)
+static NSString *SVBGrantPayloadString(NSInteger ts, NSDictionary<NSString *, NSNumber *> *grants) {
+    NSMutableArray *pairs = [NSMutableArray array];
+    for (NSString *h in grants) {
+        if (![h isKindOfClass:[NSString class]]) continue;
+        id v = [grants objectForKey:h];
+        if (![v respondsToSelector:@selector(longLongValue)]) continue;
+        long long n = [v longLongValue];
+        NSString *hu = [(NSString *)h uppercaseString];
+        if (hu.length != 16 || n <= 0 || n > 0xFFFFFFFFLL) continue;
+        [pairs addObject:[NSString stringWithFormat:@"%@=%llu", hu, n]];
+    }
+    [pairs sortUsingSelector:@selector(compare:)];
+    return [NSString stringWithFormat:@"SVBGLICENSE/v1|%ld|%@",
+            (long)ts, [pairs componentsJoinedByString:@","]];
+}
+
+// 解析并验签改签表; 通过返回 {码hash: dayIndex}, 否则 nil
+static NSDictionary<NSString *, NSNumber *> *SVBGrantMapFromJSON(NSData *json) {
+    if (!json.length) return nil;
+    id obj = [NSJSONSerialization JSONObjectWithData:json options:0 error:NULL];
+    if (![obj isKindOfClass:[NSDictionary class]]) return nil;
+    NSDictionary *d = (NSDictionary *)obj;
+    NSNumber *ver = d[@"v"], *ts = d[@"ts"];
+    NSDictionary *grants = d[@"grants"];
+    NSString *sig = d[@"sig"];
+    if (![ver isKindOfClass:[NSNumber class]] || ver.integerValue != 1) return nil;
+    if (![ts isKindOfClass:[NSNumber class]]) return nil;
+    if (![grants isKindOfClass:[NSDictionary class]]) return nil;
+    if (![sig isKindOfClass:[NSString class]] || sig.length != 64) return nil;
+
+    NSMutableDictionary *clean = [NSMutableDictionary dictionary];
+    for (NSString *h in grants) {
+        if (![h isKindOfClass:[NSString class]] || h.length != 16) return nil;
+        id v = [grants objectForKey:h];
+        if (![v isKindOfClass:[NSNumber class]]) return nil;
+        long long n = [v longLongValue];
+        if (n <= 0 || n > 0xFFFFFFFFLL) return nil;
+        [clean setObject:@(n) forKey:[h uppercaseString]];
+    }
+    NSString *expect = SVBRevokeSignatureHex(SVBGrantPayloadString(ts.integerValue, clean));
+    if (![[sig lowercaseString] isEqualToString:expect]) return nil;
+    return clean;
+}
+
+static NSDictionary<NSString *, NSNumber *> *SVBGrantCachedMap(void) {
+    id v = nil;
+    @try { v = [[SVBManager shared] configValueForKey:SVB_GRANT_KEY_MAP]; } @catch (NSException *e) {}
+    return [v isKindOfClass:[NSDictionary class]] ? v : nil;
+}
+
+NSInteger SVBRevokeCachedGrantCount(void) {
+    return (NSInteger)SVBGrantCachedMap().count;
+}
+
+uint32_t SVBRevokeGrantForCode(NSString *code) {
+    NSString *norm = SVBLicenseNormalize(code);
+    if (norm.length != 24) return 0;
+    NSString *h = SVBRevokeHashForCode(norm);
+    if (h.length != 16) return 0;
+    NSNumber *g = [SVBGrantCachedMap() objectForKey:h];
+    if (![g respondsToSelector:@selector(longLongValue)]) return 0;
+    long long n = [g longLongValue];
+    if (n <= 0 || n > 0xFFFFFFFFLL) return 0;
+    return (uint32_t)n;
 }
 
 #pragma mark - 缓存读取
@@ -338,6 +408,26 @@ static void SVBRevokeRefreshForce(void) {
                     }
                     [mgr setConfigValue:map forKey:SVB_RENEW_KEY_MAP];
                     [mgr log:@"[renew] 续签表已更新: %lu 条 via %@",
+                             (unsigned long)map.count, url];
+                    return YES;
+                });
+
+            // 链 3 (v9.9.15): 改签表 {码hash: 到期dayIndex}, 作者远程改授权时间用
+            SVBFetchChain(SVBRevokeURLs(@"licenses.json"), 0,
+                ^BOOL(NSData *body, NSInteger status, NSString *url) {
+                    if (status == 404) {
+                        [mgr setConfigValue:@{} forKey:SVB_GRANT_KEY_MAP];
+                        [mgr log:@"[grant] 改签表不存在(404), 按空表处理 via %@", url];
+                        return YES;
+                    }
+                    if (status != 200 || !body.length) return NO;
+                    NSDictionary *map = SVBGrantMapFromJSON(body);
+                    if (!map) {
+                        [mgr log:@"[grant] 改签表验签失败, 忽略 via %@", url];
+                        return NO;
+                    }
+                    [mgr setConfigValue:map forKey:SVB_GRANT_KEY_MAP];
+                    [mgr log:@"[grant] 改签表已更新: %lu 条 via %@",
                              (unsigned long)map.count, url];
                     return YES;
                 });

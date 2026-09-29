@@ -319,6 +319,83 @@ NSData *KGRenewBuildJSON(NSString *secret, NSInteger ts, NSDictionary<NSString *
                                              error:NULL];
 }
 
+#pragma mark - 远程改签表 (v1.4.0)
+
+// 值统一为 dayIndex 十进制字符串
+NSString *KGLicensePayloadString(NSInteger ts, NSDictionary<NSString *, NSString *> *grants) {
+    NSMutableArray *pairs = [NSMutableArray array];
+    for (NSString *h in grants) {
+        if (![h isKindOfClass:[NSString class]]) continue;
+        id v = [grants objectForKey:h];
+        NSString *s = nil;
+        if ([v isKindOfClass:[NSNumber class]]) s = [v stringValue];
+        else if ([v isKindOfClass:[NSString class]]) s = v;
+        NSString *hu = [(NSString *)h uppercaseString];
+        if (hu.length != 16 || !s.length) continue;
+        // 只留数字
+        NSMutableString *num = [NSMutableString string];
+        for (NSUInteger k = 0; k < s.length; k++) {
+            unichar c = [s characterAtIndex:k];
+            if (c >= '0' && c <= '9') [num appendFormat:@"%C", c];
+        }
+        if (!num.length) continue;
+        [pairs addObject:[NSString stringWithFormat:@"%@=%@", hu, num]];
+    }
+    [pairs sortUsingSelector:@selector(compare:)];
+    return [NSString stringWithFormat:@"SVBGLICENSE/v1|%ld|%@",
+            (long)ts, [pairs componentsJoinedByString:@","]];
+}
+
+NSDictionary<NSString *, NSString *> *KGLicenseParseJSON(NSData *json, NSString *secret) {
+    if (!json.length) return nil;
+    id obj = [NSJSONSerialization JSONObjectWithData:json options:0 error:NULL];
+    if (![obj isKindOfClass:[NSDictionary class]]) return nil;
+    NSDictionary *d = (NSDictionary *)obj;
+    NSNumber *ver = d[@"v"], *ts = d[@"ts"];
+    NSDictionary *grants = d[@"grants"];
+    NSString *sig = d[@"sig"];
+    if (![ver isKindOfClass:[NSNumber class]] || ver.integerValue != 1) return nil;
+    if (![ts isKindOfClass:[NSNumber class]]) return nil;
+    if (![grants isKindOfClass:[NSDictionary class]]) return nil;
+    if (![sig isKindOfClass:[NSString class]] || sig.length != 64) return nil;
+
+    NSMutableDictionary *clean = [NSMutableDictionary dictionary];
+    for (NSString *h in grants) {
+        if (![h isKindOfClass:[NSString class]] || h.length != 16) return nil;
+        id v = [grants objectForKey:h];
+        if (![v isKindOfClass:[NSNumber class]]) return nil;
+        long long n = [v longLongValue];
+        if (n <= 0 || n > 0xFFFFFFFFLL) return nil;
+        [clean setObject:[NSString stringWithFormat:@"%llu", n]
+                  forKey:[h uppercaseString]];
+    }
+    NSString *expect = KGRevokeSignatureHex(KGLicensePayloadString(ts.integerValue, clean), secret);
+    if (![[sig lowercaseString] isEqualToString:expect]) return nil;
+    return clean;
+}
+
+NSData *KGLicenseBuildJSON(NSString *secret, NSInteger ts, NSDictionary<NSString *, NSString *> *grants) {
+    if (!secret.length || grants.count == 0) return nil;
+    NSString *payload = KGLicensePayloadString(ts, grants);
+    if (!payload.length) return nil;
+    // 值转成数字写进 JSON (与插件端解析约定一致)
+    NSMutableDictionary *vals = [NSMutableDictionary dictionary];
+    for (NSString *h in grants) {
+        NSString *s = [grants objectForKey:h];
+        long long n = [s longLongValue];
+        if (n <= 0 || n > 0xFFFFFFFFLL) continue;
+        [vals setObject:@(n) forKey:[h uppercaseString]];
+    }
+    if (!vals.count) return nil;
+    NSDictionary *d = @{@"v": @1,
+                        @"ts": @(ts),
+                        @"grants": vals,
+                        @"sig": KGRevokeSignatureHex(payload, secret)};
+    return [NSJSONSerialization dataWithJSONObject:d
+                                           options:NSJSONWritingPrettyPrinted | NSJSONWritingSortedKeys
+                                             error:NULL];
+}
+
 static NSString *KGDateTextForTimestamp(NSTimeInterval ts) {
     NSDateFormatter *df = [[NSDateFormatter alloc] init];
     df.dateFormat = @"yyyy-MM-dd";

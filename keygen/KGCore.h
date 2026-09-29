@@ -93,6 +93,22 @@ NSDictionary<NSString *, NSString *> *KGRenewParseJSON(NSData *json, NSString *s
 NSData *KGRenewBuildJSON(NSString *secret, NSInteger ts, NSDictionary<NSString *, NSString *> *renew);
 
 // ============================================================
+// 远程改签表 (v1.4.0, 与插件端 SVBRevoke.m 严格对齐)
+//   licenses.json (revoke 分支):
+//     {"v":1,"ts":<unix秒>,"grants":{"<码hash16>":<到期dayIndex>},"sig":"<64位hex>"}
+//   到期 dayIndex = 自 2020-01-01 UTC 的天数; 4294967295 = 永久
+//   签名原文: "SVBGLICENSE/v1|<ts>|<hash=dayIndex 十进制, 升序逗号连接>"
+//   插件命中改签表时: 到期日以表为准 (可续签/改短/复活过期码),
+//   且优先于作废名单 —— 老版本 (≤9.9.14) 看不到这张表, 作废只对老版本生效。
+//   作者由此可以「不改激活码, 远程直接改授权时间」。
+// ============================================================
+NSString *KGLicensePayloadString(NSInteger ts, NSDictionary<NSString *, NSString *> *grants);
+// 解析并验签改签表; 通过返回 {码hash16: dayIndex 十进制字符串}, 否则 nil
+NSDictionary<NSString *, NSString *> *KGLicenseParseJSON(NSData *json, NSString *secret);
+// 生成改签表文件内容
+NSData *KGLicenseBuildJSON(NSString *secret, NSInteger ts, NSDictionary<NSString *, NSString *> *grants);
+
+// ============================================================
 // 授权凭证 (v1.2.0, 与插件端 SVBActivationReceipt() 严格对齐)
 //   客户在控制 App 授权页复制的一行文本, 发你后粘进本 App 登记台账:
 //     SMSVideoBG-ACT1|<设备码8>|<激活码24>|<激活时间Unix秒>|<签名16HEX>
