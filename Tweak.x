@@ -379,15 +379,12 @@ static void SVBClearChatBubbleBGs(UIView *v, NSInteger depth) {
                 !CGColorEqualToColor(v.layer.backgroundColor, [UIColor clearColor].CGColor))
                 v.layer.backgroundColor = NULL;
             if (v.layer.shadowOpacity != 0) v.layer.shadowOpacity = 0;
-            // 宽幅 UIImageView = 气泡九宫格底图 (九宫格图以 layer.contents 承载)。
-            // 只在「子树含文字」时清: 头像/照片消息(无文字)不受影响。
-            if ([v isKindOfClass:[UIImageView class]]) {
-                UIImageView *iv = (UIImageView *)v;
-                CGFloat supW = v.superview ? v.superview.bounds.size.width : 0;
-                if (iv.image && v.bounds.size.width >= 100 &&
-                    (supW <= 0 || v.bounds.size.width >= supW * 0.5) &&
-                    SVBSubtreeHasContent(v, 0) && v.layer.contents)
-                    v.layer.contents = NULL;
+            // 已在屏上的旧气泡 (不再走 setImage:) 就地清掉气泡图 (仅文字类气泡)
+            if (SVBIsTextBalloonClass([v class]) && [v respondsToSelector:@selector(setImage:)]) {
+                @try {
+                    id cur = [(id)v image];
+                    if (cur) [(id)v setImage:nil];
+                } @catch (NSException *e) {}
             }
         }
     } @catch (NSException *e) {}
@@ -444,8 +441,9 @@ static void SVBPrefsChanged(CFNotificationCenterRef center, void *observer,
 }
 
 
-// 气泡的「涂料」全清: 底色 + 阴影 + 自绘内容(layer.contents) + 形状图层描填。
-// iOS16 实测: 只清 backgroundColor 时气泡残留一块深色底 —— 它还有 drawRect/图层画的部分。
+// 气泡「底色涂料」清: 底色 + 阴影 + 形状图层描填。
+// 注意: 气泡图是一张 UIImage (CKBalloonView : CKBalloonImageView), 在 setImage: 钩子里
+// 处理; 这里**绝不能动 layer.contents** —— 文字气泡会光栅化, 清 contents 连字一起没。
 static void SVBStripBalloonPaint(UIView *v) {
     if (!v) return;
     @try {
@@ -455,9 +453,6 @@ static void SVBStripBalloonPaint(UIView *v) {
             !CGColorEqualToColor(v.layer.backgroundColor, [UIColor clearColor].CGColor))
             v.layer.backgroundColor = NULL;
         if (v.layer.shadowOpacity != 0) v.layer.shadowOpacity = 0;
-        // 九宫格气泡图走 layer.contents; 只在「含文字」的气泡上清,
-        // 图片消息(照片即内容)不动, 避免把照片一并清没
-        if (v.layer.contents && SVBSubtreeHasContent(v, 0)) v.layer.contents = NULL;
         for (CALayer *sl in v.layer.sublayers) {
             if ([sl isKindOfClass:[CAShapeLayer class]]) {
                 CAShapeLayer *sh = (CAShapeLayer *)sl;
@@ -466,6 +461,19 @@ static void SVBStripBalloonPaint(UIView *v) {
             }
         }
     } @catch (NSException *e) {}
+}
+
+// 气泡图只对「文字类气泡」清 nil; 照片/视频等媒体气泡 (图片即内容) 不动。
+// 类链: CKTextBalloonView : CKColoredBalloonView : … : CKBalloonView : CKBalloonImageView
+// 只认 Text/Colored 前缀 —— 媒体类 (CKImageBalloonView 等) 走同样的父链但不匹配。
+static BOOL SVBIsTextBalloonClass(Class c) {
+    for (Class k = c; k; k = [k superclass]) {
+        NSString *n = NSStringFromClass(k);
+        if ([n hasPrefix:@"CKTextBalloonView"] || [n hasPrefix:@"CKColoredBalloonView"])
+            return YES;
+        if ([n isEqualToString:@"UIView"]) break;
+    }
+    return NO;
 }
 
 #pragma mark - 信息 App Hook
@@ -715,7 +723,8 @@ static char SVBDetectedCtxKey;
 }
 %end
 
-// 消息气泡本体: 涂料全清 (底色/阴影/自绘图层/形状图层), 滚动复用/新消息即时生效
+// 消息气泡本体: 气泡图 = UIImage (CKBalloonView 继承 CKBalloonImageView 的 image)。
+// 文字在 CKTextBalloonView 的 UITextView 子视图里, 清掉气泡图不影响文字。
 // 注: CKBalloonView 只有前向声明, 属性一律经由 UIView* 访问
 %hook CKBalloonView
 - (void)setBackgroundColor:(UIColor *)color {
@@ -725,18 +734,24 @@ static char SVBDetectedCtxKey;
     if (SVBBubbleSweepActive() && color && ![color isEqual:[UIColor clearColor]])
         SVBStripBalloonPaint(v);
 }
-// 气泡底(含尾巴)若走 drawRect 自绘: 直接跳过绘制, 文字在独立子视图不受影响
-- (void)drawRect:(CGRect)rect {
-    if (SVBBubbleSweepActive()) return;
-    %orig;
-}
 - (void)didMoveToSuperview {
     %orig;
     if (SVBBubbleSweepActive()) SVBStripBalloonPaint((UIView *)self);
 }
-- (void)layoutSubviews {
+%end
+
+// 气泡图赋值源头: 文字类气泡一律给空图 (媒体气泡不动)。滚动复用/新消息即时生效。
+%hook CKBalloonImageView
+- (void)setImage:(id)image {
     %orig;
-    if (SVBBubbleSweepActive()) SVBStripBalloonPaint((UIView *)self);
+    if (!SVBBubbleSweepActive()) return;
+    if (!image || !SVBIsTextBalloonClass([self class])) return;
+    @try {
+        UIView *v = (UIView *)self;
+        if (v.layer.contents) {
+            [self setImage:nil];   // image 非 nil 才会再进来一次, 无递归
+        }
+    } @catch (NSException *e) {}
 }
 %end
 
