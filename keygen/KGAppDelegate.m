@@ -420,15 +420,6 @@ static UITextField *KGField(NSString *placeholder, CGFloat fontSize, BOOL digits
             [v.bottomAnchor constraintEqualToAnchor:row.bottomAnchor constant:-8],
         ]];
 
-        NSString *who = [d objectForKey:@"universal"] ? @"通用码" :
-            [NSString stringWithFormat:@"设备 %@", [d objectForKey:@"device"] ?: @"-"];
-        UILabel *l1 = KGLabel([NSString stringWithFormat:@"%@ · %@", who, [d objectForKey:@"exp"] ?: @"-"],
-                              12.5, UIFontWeightMedium, [UIColor secondaryLabelColor]);
-        UILabel *l2 = KGLabel([d objectForKey:@"code"] ?: @"", 13.5, UIFontWeightSemibold, [UIColor labelColor]);
-        l2.font = [UIFont monospacedSystemFontOfSize:13 weight:UIFontWeightSemibold];
-        [v addArrangedSubview:l1];
-        [v addArrangedSubview:l2];
-
         NSString *code = [d objectForKey:@"code"] ?: @"";
         NSString *hash = KGRevokeHashForCode(code);
         BOOL revoked = (hash.length > 0 && [_revokedList containsObject:hash]);
