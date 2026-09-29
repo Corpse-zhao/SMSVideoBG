@@ -937,8 +937,16 @@ static char SVBDetectedCtxKey;
     NSString *orig = %orig;
     @try {
         if ([[self bundleIdentifier] isEqualToString:@"com.nvb.smsvideobg.app"]) {
-            NSString *custom = [[SVBManager shared] appDisplayName];
-            if (custom.length) return custom;
+            // v10.4.0g: 5 秒缓存 —— 桌面摆图标/切页会高频调 displayName,
+            // 不缓存就是每次都开 NSUserDefaults 读盘, 桌面主线程被我们拖累
+            static NSString *cached = nil;
+            static CFAbsoluteTime last = 0;
+            CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+            if (!cached || now - last > 5.0) {
+                last = now;
+                cached = [[SVBManager shared] appDisplayName] ?: @"";
+            }
+            if (cached.length) return cached;
         }
     } @catch (NSException *e) {}
     return orig;
@@ -954,16 +962,15 @@ static char SVBDetectedCtxKey;
         @try {
             NSString *proc = NSProcessInfo.processInfo.processName ?: @"?";
             BOOL isSB = [proc isEqualToString:@"SpringBoard"];
-            [[SVBManager shared] writeHeartbeat:
-                [NSString stringWithFormat:@"tweak 已注入 %@", proc]];
-            [[SVBManager shared] log:@"=== SMSVideoBG v%@ tweak loaded in %@ ===",
-                SVB_VERSION, proc];
 
-            // v10.3.0: 授权 = 纯离线授权串 (零网络) —— 这里不再有任何拉取动作。
-            // 授权态在判定时按需本地复算, 启动时不必预热。
-
+            // v10.4.0g: SpringBoard (桌面) 崩溃 = 全机安全模式, 桌面侧零文件 IO ——
+            // 心跳/日志只在宿主 App (信息/备忘录探针) 里写, 桌面只保留 displayName 钩子
             // SpringBoard 只用 displayName 钩子, 不做素材迁移/诊断横幅 (防干扰桌面启动)
             if (!isSB) {
+                [[SVBManager shared] writeHeartbeat:
+                    [NSString stringWithFormat:@"tweak 已注入 %@", proc]];
+                [[SVBManager shared] log:@"=== SMSVideoBG v%@ tweak loaded in %@ ===",
+                    SVB_VERSION, proc];
                 // 自愈迁移: 把 jbroot 等其它可读根里的旧素材搬进主根 (信息App 容器)
                 dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
                     [[SVBManager shared] migrateMediaIntoPrimaryRoot];
