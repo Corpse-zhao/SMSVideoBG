@@ -167,6 +167,9 @@ static BOOL SVBDiagnoseReportEnabled(void) {
     return [v respondsToSelector:@selector(boolValue)] ? [v boolValue] : NO;
 }
 
+// 完整诊断报告文本 (报告页 / 文件共用; 函数体在文件末尾 SVBDiagnosticsController 段之前)
+static NSString *SVBGenerateDiagnoseReport(void);
+
 // 按开关生成 / 删除报告文件夹 (App 启动与切换开关时各调一次)
 static void SVBRefreshDiagnoseReport(void) {
     @try {
@@ -188,9 +191,6 @@ static void SVBRefreshDiagnoseReport(void) {
         }
     } @catch (NSException *e) {}
 }
-
-// 完整诊断报告文本 (报告页 / 文件共用; 函数体在文件末尾 SVBDiagnosticsController 段之前)
-static NSString *SVBGenerateDiagnoseReport(void);
 
 #pragma mark - AppDelegate
 
