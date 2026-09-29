@@ -1,11 +1,13 @@
 {
   "revoked" : [
     "0B8741DC19EBA368",
+    "54FDECD282796CEF",
     "793248125AAB376F",
+    "A1838988267B47AD",
     "E42D87B6169FB8B4",
     "F0D57FD08E02B90C"
   ],
-  "sig" : "d34d6c610f5a384d74d6b4b096698acd2c5f27b2dcdaf4b69cf226d9c48cb939",
-  "ts" : 1790659238,
+  "sig" : "66f4ed477cadfffc7d352a225fbcbfd36e1978202b19900f63c01b7cc0d42a9a",
+  "ts" : 1790660626,
   "v" : 1
 }
