@@ -193,14 +193,14 @@ static void SVBDiagAppendSnapshot(NSString *reason) {
         [s appendFormat:@"\n---- 快照 %@ (%@) ----\n", SVBDiagStamp(nil), reason ?: @"定时"];
         [s appendString:SVBGenerateDiagnoseReport() ?: @""];
         NSString *p = SVBDiagWorkingPath();
-        NSFileHandle *h = [fm fileHandleForWritingAtPath:p];
+        NSFileHandle *h = [NSFileHandle fileHandleForWritingAtPath:p];
         if (!h) {
             NSString *head = [NSString stringWithFormat:
                 @"==== 诊断记录开始 %@ ====\n", SVBDiagStamp(nil)];
             [fm createFileAtPath:p
                           contents:[head dataUsingEncoding:NSUTF8StringEncoding]
                          attributes:nil];
-            h = [fm fileHandleForWritingAtPath:p];
+            h = [NSFileHandle fileHandleForWritingAtPath:p];
         }
         if (h) {
             [h seekToEndOfFile];
@@ -216,7 +216,7 @@ static void SVBDiagFinalize(void) {
         NSFileManager *fm = [NSFileManager defaultManager];
         NSString *p = SVBDiagWorkingPath();
         if (![fm fileExistsAtPath:p]) return;
-        NSFileHandle *h = [fm fileHandleForWritingAtPath:p];
+        NSFileHandle *h = [NSFileHandle fileHandleForWritingAtPath:p];
         if (h) {
             [h seekToEndOfFile];
             NSData *tail = [[NSString stringWithFormat:
