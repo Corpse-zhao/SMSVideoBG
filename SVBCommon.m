@@ -86,12 +86,12 @@ NSArray<NSArray<NSString *> *> *SVBContextDefinitions(void) {
 
 NSArray<NSArray<NSString *> *> *SVBNotesContextDefinitions(void) {
     return @[ @[SVBContextNBody,     @"备忘录正文",  @"打开某条备忘录后的浏览/编辑界面"],
-              @[SVBContextNList,     @"笔记列表",    @"文件夹里的备忘录列表"],
-              @[SVBContextNFolder,   @"文件夹",      @"备忘录文件夹列表(首页)"],
+              @[SVBContextNList,     @"笔记列表",    @"所有iCloud/某文件夹里的备忘录列表"],
+              @[SVBContextNFolder,   @"文件夹首页",  @"打开备忘录看到的第一屏(文件夹列表), 文件夹内列表也算"],
               @[SVBContextNGallery,  @"画廊",        @"备忘录缩略图画廊视图"],
               @[SVBContextNSearch,   @"搜索",        @"备忘录搜索结果页"],
               @[SVBContextNRecent,   @"最近删除",    @"最近删除列表"],
-              @[SVBContextNInternal, @"内部页面",    @"其余近似全屏的备忘录页面(兜底)"] ];
+              @[SVBContextNInternal, @"其它内部页",  @"其余近似全屏的备忘录页面(兜底)"] ];
 }
 
 NSArray<NSArray<NSString *> *> *SVBAllContextDefinitions(void) {
@@ -165,11 +165,15 @@ NSString *SVBRootLabel(NSString *root) {
     }
     if ([root containsString:@"/Containers/Data/Application"]) {
         // v11.0.0: 双容器 —— 按路径对应关系区分是信息还是备忘录
+        // v11.0.3: 各自独立重算 —— 原写法 (!smsC && !notesC) 下若信息容器定位成功
+        // 而备忘录容器偶发失败, notesC 永不再算 -> 备忘录自己容器显示「宿主App容器」
         static NSString *smsC = nil, *notesC = nil;
-        if (!smsC && !notesC) {
+        if (!smsC) {
             NSString *c = SVBFindAppDataContainer(SVB_SMS_BUNDLE_ID);
             if (c.length) smsC = [[c stringByAppendingPathComponent:@"Library"]
                                    stringByAppendingPathComponent:SVB_MEDIA_DIR_NAME];
+        }
+        if (!notesC) {
             NSString *nc = SVBFindAppDataContainer(SVB_NOTES_BUNDLE_ID);
             if (nc.length) notesC = [[nc stringByAppendingPathComponent:@"Library"]
                                       stringByAppendingPathComponent:SVB_MEDIA_DIR_NAME];
@@ -1527,7 +1531,10 @@ static BOOL SVBCopyInto(NSString *srcPath, NSString *dir, NSString *name, NSErro
         if (!path) return nil;
 
         AVPlayer *p = self.players[ctx];
-        if (p && !force && [self.playerPaths[ctx] isEqualToString:path]) return p;
+        // v11.0.3: 缓存命中额外自检 —— 播放器/当前item 已失败的不复用 (自动重建),
+        // 配合 recover 只恢复可见语境, 不可见语境的坏 player 进页面时在这里自愈
+        if (p && !force && p.status != AVPlayerStatusFailed &&
+            [self.playerPaths[ctx] isEqualToString:path]) return p;
 
         // 清理旧播放器 (looper 必须先 disable, 否则它会继续往队列塞副本)
         AVPlayerLooper *oldLooper = self.loopers[ctx];
@@ -1771,6 +1778,12 @@ static void SVBCollectToolbars(UIView *view, NSMutableArray<UIToolbar *> *out_, 
         // 键盘整棵子树跳过 (拆键盘模糊会毁掉键盘观感)
         if ([low containsString:@"keyboard"]) continue;
         if (depth <= 3) [self logClassOnce:cls context:ctx];
+        // v11.0.3: iOS16 系统内容背景视图 —— 纯白/系统色的大底 (诊断实锤出现在
+        // 备忘录搜索/列表页), 内容为空, 直接清透明 (底部/页尾白条的来源之一)
+        if ([cls isEqualToString:@"_UISystemBackgroundView"]) {
+            if (sub.backgroundColor && ![sub.backgroundColor isEqual:[UIColor clearColor]])
+                sub.backgroundColor = [UIColor clearColor];
+        }
         // v1.7.14: 聊天页「原样」档 (ba>=0.999) = 看消息模式, 页面内部完全收手
         // (透明化只作用于透明/隐藏档), 杜绝一切对原样外观的干扰
         BOOL originMode = [ctx isEqualToString:SVBContextChat] &&
@@ -2329,6 +2342,17 @@ static BOOL sSVBSweepCheckResult = NO;
     }
 }
 
+// v11.0.3: 预载播放器 (只预热解码/建缓冲, 立即暂停不出声) —— 修「进页面视频
+// 出来慢」: AVURLAsset 首次建 player 要开文件+起解码器, 冷启动 1~3 秒白屏。
+// 启动时后台把常用界面的 player 先建好, 进页面时缓存直接命中, 即进即显。
+- (void)preloadPlayerForContext:(NSString *)ctx {
+    @try {
+        if (![self activeVideoPathForContext:ctx].length) return;
+        AVPlayer *p = [self playerForContext:ctx forceRebuild:NO];
+        if (p) [p pause];
+    } @catch (NSException *e) {}
+}
+
 // v11.0.2: 暂停除指定语境外的全部播放器 (备忘录防串音专用)。
 // 备忘录一次只见一个页面, 进入新页时把其它语境的视频声音全停掉 ——
 // 回到原页面时 apply -> configure -> play 自动恢复。信息侧不接 (行为保持)。
@@ -2349,7 +2373,14 @@ static BOOL sSVBSweepCheckResult = NO;
         } @catch (NSException *e) {}
 
         // 2) 播放器自检: 队列被清空 / item 解码失败 -> 只能重建
-        for (NSString *ctx in self.players.allKeys) {
+        //    v11.0.3: 只自检「当前挂载着背景视图的语境」—— 此前对所有 player 重建,
+        //    重建路径会 [p play] -> 回前台瞬间所有界面的声音一起响 (真机串音实锤)。
+        //    不可见语境的坏 player 由 playerForContext 的 status 自检兜底 (进页面时重建)。
+        NSMutableSet<NSString *> *visibleCtx = [NSMutableSet set];
+        for (SVBVideoBackgroundView *v in [self allVideoBackgroundViews])
+            if (v.contextKey.length) [visibleCtx addObject:v.contextKey];
+        for (NSString *ctx in [self.players.allKeys copy]) {
+            if (![visibleCtx containsObject:ctx]) continue;   // 不可见的不动
             AVPlayer *p = self.players[ctx];
             BOOL bad = force || !p || p.status == AVPlayerStatusFailed;
             if (!bad && [p isKindOfClass:[AVQueuePlayer class]]) {

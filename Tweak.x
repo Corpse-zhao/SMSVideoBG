@@ -80,6 +80,9 @@ static NSString *SVBContextForClassName(NSString *name) {
 // v11.0.0: 备忘录语境映射 (IC* 私有类前缀; 精确类名由专用 Hook 处理)
 static NSString *SVBNotesContextForClassName(NSString *name) {
     if (!name || ![name hasPrefix:@"IC"]) return nil;
+    // v11.0.3: 备忘录主界面(第一屏的文件夹列表) —— 诊断实锤此前落到「内部页」,
+    // 用户给「文件夹」配的视频到不了主界面。归入 n_folder, 与 ICFolderViewController 同语境。
+    if ([name isEqualToString:@"ICFolderListViewController"]) return SVBContextNFolder;
     if ([name isEqualToString:@"ICNoteBodyViewController"] ||
         [name isEqualToString:@"ICNoteEditViewController"] ||
         [name isEqualToString:@"ICFolderViewController"] ||
@@ -1142,6 +1145,12 @@ static char SVBDetectedCtxKey;
                     // —— 备忘录容器素材意外丢失时自动从信息容器补回,
                     // 不再依赖「用户开过控制 App」这一步
                     SVBSyncMediaAcrossRoots();
+                    // v11.0.3: 备忘录预载常用界面的播放器 (修进页面视频出来慢)
+                    if (SVBIsNotesProcess()) {
+                        [[SVBManager shared] preloadPlayerForContext:SVBContextNFolder];
+                        [[SVBManager shared] preloadPlayerForContext:SVBContextNList];
+                        [[SVBManager shared] preloadPlayerForContext:SVBContextNBody];
+                    }
                 });
 
                 CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(),
