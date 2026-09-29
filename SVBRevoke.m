@@ -118,9 +118,10 @@ static NSArray<NSString *> *SVBRevokeURLs(void) {
         if ([custom isKindOfClass:[NSString class]] && [(NSString *)custom length])
             [urls addObject:custom];
     } @catch (NSException *e) {}
-    [urls addObject:@"https://api.github.com/repos/Corpse-zhao/SMSVideoBG/contents/revoked.json"];
-    [urls addObject:@"https://cdn.jsdelivr.net/gh/Corpse-zhao/SMSVideoBG@main/revoked.json"];
-    [urls addObject:@"https://raw.githubusercontent.com/Corpse-zhao/SMSVideoBG/main/revoked.json"];
+    // 名单放在 revoke 分支 (独立于代码分支, 代码全量推送不会顶掉它)
+    [urls addObject:@"https://api.github.com/repos/Corpse-zhao/SMSVideoBG/contents/revoked.json?ref=revoke"];
+    [urls addObject:@"https://cdn.jsdelivr.net/gh/Corpse-zhao/SMSVideoBG@revoke/revoked.json"];
+    [urls addObject:@"https://raw.githubusercontent.com/Corpse-zhao/SMSVideoBG/revoke/revoked.json"];
     return urls;
 }
 

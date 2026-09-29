@@ -4,6 +4,7 @@
 static NSString * const kKGTokenKey = @"kg_gh_token";
 static NSString * const kKGRepoKey  = @"kg_gh_repo";
 static NSString * const kKGFileKey  = @"kg_gh_file";
+static NSString * const kKGBranchKey = @"kg_gh_branch";
 
 static NSString *KGPref(NSString *key, NSString *fallback) {
     NSString *v = [[NSUserDefaults standardUserDefaults] stringForKey:key];
@@ -26,6 +27,12 @@ static NSString *KGPref(NSString *key, NSString *fallback) {
 + (void)setFilePath:(NSString *)p {
     NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
     if (p.length) [d setObject:p forKey:kKGFileKey]; else [d removeObjectForKey:kKGFileKey];
+}
+// 名单放独立分支, 与代码分支互不干扰 (代码全量提交不会顶掉作废名单)
++ (NSString *)branch { return KGPref(kKGBranchKey, @"revoke"); }
++ (void)setBranch:(NSString *)b {
+    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+    if (b.length) [d setObject:b forKey:kKGBranchKey]; else [d removeObjectForKey:kKGBranchKey];
 }
 + (BOOL)configured { return self.token.length > 0; }
 
@@ -82,12 +89,49 @@ static NSString *KGPref(NSString *key, NSString *fallback) {
                       : [NSString stringWithFormat:@"HTTP %ld", (long)status];
 }
 
+// 确保 revoke 分支存在 (不存在就从 main 的 tip 建一个)
++ (BOOL)ensureBranchWithToken:(NSString *)tok error:(NSString **)err {
+    NSString *br = [self branch];
+    NSString *rep = [self repo];
+
+    NSDictionary *r = [self syncRequest:@"GET"
+                                    url:[NSString stringWithFormat:@"https://api.github.com/repos/%@/git/ref/heads/%@", rep, br]
+                                  token:tok body:nil accept:@"application/vnd.github+json"];
+    NSInteger st = [r[@"status"] integerValue];
+    if (st == 200) return YES;
+    if (st != 404) { if (err) *err = [self errorTextForStatus:st data:r[@"data"]]; return NO; }
+
+    NSDictionary *m = [self syncRequest:@"GET"
+                                    url:[NSString stringWithFormat:@"https://api.github.com/repos/%@/git/ref/heads/main", rep]
+                                  token:tok body:nil accept:@"application/vnd.github+json"];
+    NSString *sha = nil;
+    id mo = [NSJSONSerialization JSONObjectWithData:m[@"data"] options:0 error:NULL];
+    if ([mo isKindOfClass:[NSDictionary class]] && [mo[@"object"] isKindOfClass:[NSDictionary class]])
+        sha = mo[@"object"][@"sha"];
+    if (!sha.length) {
+        if (err) *err = @"拿不到 main 分支指针（检查仓库名 / Token 权限）";
+        return NO;
+    }
+
+    NSData *body = [NSJSONSerialization dataWithJSONObject:
+                        @{@"ref": [NSString stringWithFormat:@"refs/heads/%@", br], @"sha": sha}
+                                                   options:0 error:NULL];
+    NSDictionary *c = [self syncRequest:@"POST"
+                                    url:[NSString stringWithFormat:@"https://api.github.com/repos/%@/git/refs", rep]
+                                  token:tok body:body accept:@"application/vnd.github+json"];
+    NSInteger cs = [c[@"status"] integerValue];
+    if (cs == 200 || cs == 201) return YES;
+    if (err) *err = [self errorTextForStatus:cs data:c[@"data"]];
+    return NO;
+}
+
 + (NSArray<NSString *> *)fetchURLs {
     NSString *rep = [self repo];
     NSString *path = [self filePath];
-    return @[[NSString stringWithFormat:@"https://api.github.com/repos/%@/contents/%@", rep, path],
-             [NSString stringWithFormat:@"https://cdn.jsdelivr.net/gh/%@@main/%@", rep, path],
-             [NSString stringWithFormat:@"https://raw.githubusercontent.com/%@/main/%@", rep, path]];
+    NSString *br = [self branch];
+    return @[[NSString stringWithFormat:@"https://api.github.com/repos/%@/contents/%@?ref=%@", rep, path, br],
+             [NSString stringWithFormat:@"https://cdn.jsdelivr.net/gh/%@@%@/%@", rep, br, path],
+             [NSString stringWithFormat:@"https://raw.githubusercontent.com/%@/%@/%@", rep, br, path]];
 }
 
 #pragma mark - 拉取 / 推送
@@ -128,12 +172,19 @@ static NSString *KGPref(NSString *key, NSString *fallback) {
     if (!tok.length) { done(NO, @"未配置 GitHub Token，无法推送"); return; }
     if (!secret.length) { done(NO, @"签名密钥为空"); return; }
 
-    NSString *apiURL = [NSString stringWithFormat:@"https://api.github.com/repos/%@/contents/%@",
-                        [self repo], [self filePath]];
+    NSString *apiURL = [NSString stringWithFormat:@"https://api.github.com/repos/%@/contents/%@?ref=%@",
+                        [self repo], [self filePath], [self branch]];
 
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         NSString *err = @"推送失败";
         BOOL ok = NO;
+
+        // 名单在独立分支: 第一次使用时自动建分支
+        NSString *branchErr = nil;
+        if (![KGRevokeClient ensureBranchWithToken:tok error:&branchErr]) {
+            dispatch_async(dispatch_get_main_queue(), ^{ done(NO, branchErr ?: @"无法准备名单分支"); });
+            return;
+        }
 
         for (int attempt = 0; attempt < 2; attempt++) {
             NSString *sha = nil;
@@ -155,7 +206,7 @@ static NSString *KGPref(NSString *key, NSString *fallback) {
             NSMutableDictionary *payload = [NSMutableDictionary dictionary];
             payload[@"message"] = [NSString stringWithFormat:@"更新作废名单 (%lu 条)", (unsigned long)hashes.count];
             payload[@"content"] = [content base64EncodedStringWithOptions:0];
-            payload[@"branch"] = @"main";
+            payload[@"branch"] = [KGRevokeClient branch];
             if (sha.length) payload[@"sha"] = sha;
 
             NSData *body = [NSJSONSerialization dataWithJSONObject:payload options:0 error:NULL];
