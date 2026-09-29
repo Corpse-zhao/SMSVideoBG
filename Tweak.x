@@ -720,6 +720,22 @@ static char SVBDetectedCtxKey;
                                                 NULL,
                                                 CFNotificationSuspensionBehaviorDeliverImmediately);
 
+                // v9.9.11: 前后台自愈 —— 后台暂停、回前台重连显示管线并续播
+                // (AVPlayerLayer 的内容会被系统回收, 光 play 不重绘 -> 卡在最后一帧)
+                // 顺带监听音频中断结束 (来电/闹钟后自动续播)
+                @try {
+                    NSNotificationCenter *nc = [NSNotificationCenter defaultCenter];
+                    SVBManager *m = [SVBManager shared];
+                    [nc addObserver:m selector:@selector(handleAppEnterBackground)
+                               name:UIApplicationDidEnterBackgroundNotification object:nil];
+                    [nc addObserver:m selector:@selector(handleAppWillEnterForeground)
+                               name:UIApplicationWillEnterForegroundNotification object:nil];
+                    [nc addObserver:m selector:@selector(handleAppDidBecomeActive)
+                               name:UIApplicationDidBecomeActiveNotification object:nil];
+                    [nc addObserver:m selector:@selector(handleAudioInterruption:)
+                               name:AVAudioSessionInterruptionNotification object:nil];
+                } @catch (NSException *e) {}
+
                 // 等宿主 App 窗口就绪后挂诊断横幅 (重试 ~20 秒, 之后靠 VC 出现时刷新)
                 @try {
                     __block NSInteger tries = 0;

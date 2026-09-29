@@ -5,6 +5,7 @@
 #import <stdlib.h>
 #import <stdio.h>
 #import <limits.h>
+#import <signal.h>
 
 // ============================================================
 // 共享核心: 配置管理 / 素材文件夹 / 播放器 / 背景视图 / 诊断
@@ -36,6 +37,21 @@ NSString * const SVBContextChat     = @"chat";
 static NSString * const SVBConfigFileName  = @"_config.plist";
 static NSString * const SVBAliveFileName   = @"_tweak_alive";
 static NSString * const SVBLogFileName     = @"_tweak.log";
+
+// ---- v9.9.11 前后台自愈 / 切后台自动清理 的共享状态 ----
+static volatile BOOL sSVBInBackground = NO;       // 宿主当前是否在后台
+static int64_t sSVBKillGeneration = 0;            // 代际号: 一递增, 已排队的清理立即作废
+static UIBackgroundTaskIdentifier sSVBKillTask = UIBackgroundTaskInvalid;
+
+// 真正的终止动作 (只会在信息App 进程里被调用; 调用前已校验 bundle id)
+static void SVBPerformBackgroundKill(void) {
+    @try {
+        [[SVBManager shared] log:@"后台清理: 结束宿主进程 (pid %d) —— 避免回前台视频卡住", (int)getpid()];
+    } @catch (NSException *e) {}
+    usleep(180 * 1000);          // 给日志落盘留点时间
+    kill(getpid(), SIGKILL);     // 干净终止 (不留 crash 报告)
+    _exit(0);                    // 兜底: SIGKILL 万一被拦
+}
 
 NSArray<NSArray<NSString *> *> *SVBContextDefinitions(void) {
     return @[ @[SVBContextMain,    @"主页面",       @"打开信息App 的第一屏(过滤器列表)"],
@@ -226,6 +242,9 @@ BOOL SVBDirWritablePath(NSString *dir) {
 - (void)dumpHierarchyRec:(UIView *)v depth:(NSInteger)depth into:(NSMutableString *)out;
 - (void)refreshInView:(UIView *)view;
 - (void)playerDidEnd:(NSNotification *)n;
+- (void)collectVideoViewsIn:(UIView *)view into:(NSMutableArray *)out;
+- (void)pauseAllPlayers;
+- (void)scheduleBackgroundKill;
 @end
 
 @implementation SVBManager
@@ -1669,6 +1688,175 @@ static void SVBCollectToolbars(UIView *view, NSMutableArray<UIToolbar *> *out_, 
     [self log:@"VC: %@ -> ctx=%@", name, ctx ?: @"(跳过)"];
 }
 
+#pragma mark - v9.9.11 前后台自愈 (切后台再回前台视频不卡)
+//
+// 卡住的根因 (两个叠加):
+//   1) App 进后台后系统会失活 AVAudioSession, 回前台时 player 处于暂停,
+//      rate=0 -> 画面上就是「停在最后一帧不动」;
+//   2) AVPlayerLayer 的显示内容会被系统回收 (purge), 光靠 play 不会重绘,
+//      必须重新绑定 layer.player 才能重建显示管线;
+//   3) AVQueuePlayer + AVPlayerLooper 的队列副本偶尔会被清空 -> 彻底播不出来,
+//      这种情况只能重建播放器。
+// 因此策略分三级: 轻量重连 -> 复核 -> 强制重建。
+
+- (void)collectVideoViewsIn:(UIView *)view into:(NSMutableArray *)out {
+    if ([view isKindOfClass:[SVBVideoBackgroundView class]]) { [out addObject:view]; return; }
+    for (UIView *sub in view.subviews) [self collectVideoViewsIn:sub into:out];
+}
+
+- (NSArray<SVBVideoBackgroundView *> *)allVideoBackgroundViews {
+    NSMutableArray *out = [NSMutableArray array];
+    @try {
+        for (UIScene *scene in UIApplication.sharedApplication.connectedScenes.allObjects) {
+            if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+            for (UIWindow *w in ((UIWindowScene *)scene).windows) [self collectVideoViewsIn:w into:out];
+        }
+        for (UIWindow *w in UIApplication.sharedApplication.windows) [self collectVideoViewsIn:w into:out];
+    } @catch (NSException *e) {}
+    return out;
+}
+
+- (void)pauseAllPlayers {
+    for (NSString *k in self.players.allKeys) {
+        @try { [self.players[k] pause]; } @catch (NSException *e) {}
+    }
+}
+
+- (void)recoverVideoPlaybackForce:(BOOL)force {
+    @try {
+        // 1) 音频会话: 后台被失活, 不重新激活的话续播会静默失败
+        @try {
+            AVAudioSession *s = [AVAudioSession sharedInstance];
+            [s setCategory:AVAudioSessionCategoryAmbient withOptions:0 error:nil];
+            [s setActive:YES error:nil];
+        } @catch (NSException *e) {}
+
+        // 2) 播放器自检: 队列被清空 / item 解码失败 -> 只能重建
+        for (NSString *ctx in self.players.allKeys) {
+            AVPlayer *p = self.players[ctx];
+            BOOL bad = force || !p || p.status == AVPlayerStatusFailed;
+            if (!bad && [p isKindOfClass:[AVQueuePlayer class]]) {
+                if (((AVQueuePlayer *)p).items.count == 0) bad = YES;   // 无缝循环副本没了
+            }
+            if (!bad) {
+                AVPlayerItem *it = p.currentItem;
+                if (!it || it.status == AVPlayerItemStatusFailed) bad = YES;
+            }
+            if (bad) [self playerForContext:ctx forceRebuild:YES];
+        }
+
+        // 3) 重连显示管线 + 续播
+        for (SVBVideoBackgroundView *v in [self allVideoBackgroundViews]) {
+            [v reconnectPlayerForce:force];
+        }
+    } @catch (NSException *e) {}
+}
+
+- (void)handleAppEnterBackground {
+    @try {
+        sSVBInBackground = YES;
+        [self pauseAllPlayers];                     // 后台不解码, 省电
+        if (self.bgKillEnabled) [self scheduleBackgroundKill];
+    } @catch (NSException *e) {}
+}
+
+- (void)handleAppWillEnterForeground {
+    @try {
+        sSVBInBackground = NO;
+        [self cancelScheduledBackgroundKill];        // 用户回来了 -> 取消清理
+        [self recoverVideoPlaybackForce:NO];
+    } @catch (NSException *e) {}
+}
+
+- (void)handleAppDidBecomeActive {
+    @try {
+        [self recoverVideoPlaybackForce:NO];
+        // 0.6s 后复核: 还没画面 = 轻量修复没救回来 -> 逐界面强制重建
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            @try {
+                if (UIApplication.sharedApplication.applicationState != UIApplicationStateActive) return;
+                for (SVBVideoBackgroundView *v in [self allVideoBackgroundViews]) {
+                    if ([v playbackLooksBroken]) {
+                        [self log:@"前后台自愈: 画面未就绪, 强制重建播放器 (ctx=%@)", v.contextKey];
+                        [self playerForContext:v.contextKey forceRebuild:YES];
+                        [v reconnectPlayerForce:YES];
+                    }
+                }
+            } @catch (NSException *e) {}
+        });
+    } @catch (NSException *e) {}
+}
+
+- (void)handleAudioInterruption:(NSNotification *)n {
+    @try {
+        NSInteger type = [n.userInfo[AVAudioSessionInterruptionTypeKey] integerValue];
+        if (type == AVAudioSessionInterruptionTypeEnded) {
+            [self recoverVideoPlaybackForce:NO];     // 来电/闹钟等打断结束后自动续播
+        }
+    } @catch (NSException *e) {}
+}
+
+#pragma mark - v9.9.11 切后台自动清理 (可选, 默认开)
+
+- (BOOL)bgKillEnabled {
+    id v = [self configValueForKey:@"bg_kill"];
+    if (!v) return YES;                              // 默认开
+    return [v respondsToSelector:@selector(boolValue)] ? [v boolValue] : YES;
+}
+
+- (void)setBgKillEnabled:(BOOL)on {
+    [self setConfigValue:@(on) forKey:@"bg_kill"];
+    [self postChangeNotification];
+    if (!on) [self cancelScheduledBackgroundKill];
+}
+
+- (NSTimeInterval)bgKillDelay {
+    id v = [self configValueForKey:@"bg_kill_delay"];
+    NSTimeInterval d = [v respondsToSelector:@selector(doubleValue)] ? [v doubleValue] : 0;
+    return d >= 1.0 ? d : 5.0;                       // 默认 5 秒 (短暂切走不清理)
+}
+
+- (void)setBgKillDelay:(NSTimeInterval)d {
+    [self setConfigValue:@(d >= 1.0 ? d : 5.0) forKey:@"bg_kill_delay"];
+    [self postChangeNotification];
+}
+
+- (void)scheduleBackgroundKill {
+    @try {
+        // 只在真正的宿主「信息」里做 (绝不误杀 SpringBoard 等)
+        if (![SVBHostBundleIdentifier() isEqualToString:SVB_SMS_BUNDLE_ID]) return;
+        [self cancelScheduledBackgroundKill];
+        int64_t gen = ++sSVBKillGeneration;
+        NSTimeInterval delay = self.bgKillDelay;
+
+        UIApplication *app = UIApplication.sharedApplication;
+        // 申请后台额度: 否则进后台后 GCD 定时器会被挂起, 定时杀不可靠
+        __block UIBackgroundTaskIdentifier task = UIBackgroundTaskInvalid;
+        task = [app beginBackgroundTaskWithName:@"SVBBackgroundKill" expirationHandler:^{
+            if (sSVBInBackground) SVBPerformBackgroundKill();   // 宽限期到点仍在后台 -> 直接结束
+            if (task != UIBackgroundTaskInvalid) [app endBackgroundTask:task];
+        }];
+        sSVBKillTask = task;
+
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)),
+                       dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+            if (!sSVBInBackground || gen != sSVBKillGeneration) return;  // 已回前台/已取消
+            SVBPerformBackgroundKill();
+        });
+    } @catch (NSException *e) {}
+}
+
+- (void)cancelScheduledBackgroundKill {
+    @try {
+        sSVBKillGeneration++;                        // 让挂起的 dispatch_after 作废
+        if (sSVBKillTask != UIBackgroundTaskInvalid) {
+            [UIApplication.sharedApplication endBackgroundTask:sSVBKillTask];
+            sSVBKillTask = UIBackgroundTaskInvalid;
+        }
+    } @catch (NSException *e) {}
+}
+
 @end
 
 #pragma mark - 视频背景视图
@@ -1779,6 +1967,43 @@ static void SVBCollectToolbars(UIView *view, NSMutableArray<UIToolbar *> *out_, 
             if (p.rate == 0.0) [p play];
         }
     } @catch (NSException *e) {}
+}
+
+#pragma mark - v9.9.11 前后台自愈
+
+// 重建显示管线。后台被系统回收内容后, AVPlayerLayer 不会自行重绘 ——
+// 只 play 没有用, 必须把 player 重新绑一次 (先摘后挂) 才会重新出画面。
+- (void)reconnectPlayerForce:(BOOL)force {
+    @try {
+        if (self.hidden) return;
+        SVBManager *mgr = [SVBManager shared];
+        AVPlayer *p = [mgr playerForContext:self.contextKey forceRebuild:NO];
+        if (!p) return;
+
+        AVPlayerLayer *L = self.videoLayer;
+        if (force || L.player != p) {
+            L.player = nil;      // 摘掉 -> 显示管线失效
+            L.player = p;        // 重新挂上 -> 强制重建
+        } else {
+            [L setNeedsDisplay];
+        }
+        if (p.rate == 0.0) [p play];
+        [self configure];        // 顺带把不透明度/模糊/音量重新套一遍
+    } @catch (NSException *e) {}
+}
+
+// 画面是否处于「后台回来的卡死态」: 片源已就绪, 但 layer 没画面 / 停了
+- (BOOL)playbackLooksBroken {
+    @try {
+        if (self.hidden || !self.superview) return NO;
+        AVPlayer *p = [SVBManager shared].players[self.contextKey];
+        if (!p) return NO;                                   // 本来就没背景
+        AVPlayerItem *it = p.currentItem;
+        if (!it || it.status != AVPlayerItemStatusReadyToPlay) return NO;   // 还在加载, 不算坏
+        if (!self.videoLayer.isReadyForDisplay) return YES;  // 典型症状: 有片源但没画面
+        if (p.rate == 0.0) return YES;                       // 该播却没播
+        return NO;
+    } @catch (NSException *e) { return NO; }
 }
 
 @end

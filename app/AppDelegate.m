@@ -14,6 +14,7 @@
 
 static char SVBSwitchAssocKey;
 static char SVBProxyAssocKey;
+static char SVBBgKillLabelKey;   // v9.9.11: 切后台清理行的延时标签
 
 #pragma mark - 主题
 
@@ -610,14 +611,14 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
     if (section == 0) return 1;
     if (section == 1) return (NSInteger)_defs.count;
-    if (section == 2) return 1; // 注入诊断横幅
+    if (section == 2) return 2; // 切后台自动清理 / 注入诊断横幅 (v9.9.11)
     return 4; // 授权状态 / 素材总目录 / 诊断报告 / App名称与图标 (v1.9.0 加授权)
 }
 
 - (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
     if (section == 0) return @"总开关";
     if (section == 1) return @"各界面背景";
-    if (section == 2) return @"调试";
+    if (section == 2) return @"后台与调试";
     return @"说明";
 }
 
@@ -625,7 +626,7 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
     if (section == 1)
         return @"点按某一行可为该界面导入/选用素材并单独设置不透明度/模糊度/音量。每个界面对应素材目录下一个独立的文件夹，用 Filza 直接放入视频同样生效。\n\n「对话详情」= 点进某个对话后上下聊天的那个界面（不是列表）。「未导入素材」的界面不会显示视频背景，导入并打开开关后生效。";
     if (section == 2)
-        return @"打开信息App（或备忘录）时，窗口顶部会显示一条横幅：能看到它 = 插件注入成功。横幅里列出每个素材根是否可读、有几个素材，点一下可临时隐藏。";
+        return @"「切后台自动清理」：信息App 划到后台超过设定时间就自动结束它的进程（从后台再进去等于重开），用来解决个别情况下回前台视频卡住的问题；设定时间内回来（复制粘贴、看眼别的 App）不会被清理。点左侧秒数可以改时间。\n\n「显示注入诊断横幅」：打开信息App（或备忘录）时，窗口顶部会显示一条横幅：能看到它 = 插件注入成功。横幅里列出每个素材根是否可读、有几个素材，点一下可临时隐藏。";
     if (section == 3) {
         NSString *primary = [[SVBManager shared] mediaDirectory];
         return [NSString stringWithFormat:
@@ -688,8 +689,40 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
         return c;
     }
 
-    // 调试区: 注入诊断横幅开关
+    // 后台与调试区 (v9.9.11: row0 = 切后台自动清理, row1 = 注入诊断横幅)
     if (indexPath.section == 2) {
+        if (indexPath.row == 0) {
+            static NSString *bgKillId = @"svb-cell-bgkill";
+            UITableViewCell *c = [tableView dequeueReusableCellWithIdentifier:bgKillId];
+            if (!c) {
+                c = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:bgKillId];
+                UILabel *lbl = [UILabel new];
+                lbl.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
+                lbl.textColor = SVBAccent();
+                lbl.userInteractionEnabled = YES;   // 点秒数改时间
+                [lbl addGestureRecognizer:[[UITapGestureRecognizer alloc]
+                                            initWithTarget:self action:@selector(bgKillDelayTapped)]];
+                UISwitch *sw = [UISwitch new];
+                sw.onTintColor = SVBAccent();
+                [sw addTarget:self action:@selector(bgKillToggled:) forControlEvents:UIControlEventValueChanged];
+                UIStackView *box = [[UIStackView alloc] initWithArrangedSubviews:@[lbl, sw]];
+                box.axis = UILayoutConstraintAxisHorizontal;
+                box.spacing = 8;
+                box.alignment = UIStackViewAlignmentCenter;
+                c.accessoryView = box;
+                objc_setAssociatedObject(c, &SVBBgKillLabelKey, lbl, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            }
+            UILabel *lbl = objc_getAssociatedObject(c, &SVBBgKillLabelKey);
+            BOOL on = [mgr bgKillEnabled];
+            lbl.text = on ? [NSString stringWithFormat:@"%.0f 秒", [mgr bgKillDelay]] : @"";
+            ((UISwitch *)c.accessoryView.arrangedSubviews[1]).on = on;
+            c.textLabel.text = @"切后台自动清理";
+            c.imageView.image = SVBBadgeIcon(@"bolt.slash.fill",
+                [UIColor colorWithRed:1.00 green:0.45 blue:0.35 alpha:1],
+                [UIColor colorWithRed:1.00 green:0.28 blue:0.45 alpha:1]);
+            SVBApplyCardStyle(c, 0, 2);
+            return c;
+        }
         static NSString *debugSwitchId = @"svb-switch-debug";
         UITableViewCell *c = [tableView dequeueReusableCellWithIdentifier:debugSwitchId];
         if (!c) {
@@ -702,7 +735,7 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
         c.textLabel.text = @"显示注入诊断横幅";
         c.imageView.image = SVBIconForKey(@"__debug");
         ((UISwitch *)c.accessoryView).on = [mgr debugBannerEnabled];
-        SVBApplyCardStyle(c, 0, 1);
+        SVBApplyCardStyle(c, 1, 2);
         return c;
     }
 
@@ -748,6 +781,34 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
     SVBManager *mgr = [SVBManager shared];
     [mgr setConfigValue:@(sw.on) forKey:@"debug_banner"];
     [mgr postChangeNotification];
+}
+
+#pragma mark - v9.9.11 切后台自动清理
+
+- (void)bgKillToggled:(UISwitch *)sw {
+    [SVBManager shared].bgKillEnabled = sw.on;
+    [self.tableView reloadData];
+}
+
+- (void)bgKillDelayTapped {
+    SVBManager *mgr = [SVBManager shared];
+    UIAlertController *ac = [UIAlertController
+        alertControllerWithTitle:@"切后台多久后清理"
+                         message:@"这个时间内回到信息App 不会被清理（复制粘贴、看眼别的 App 都来得及）。"
+                  preferredStyle:UIAlertControllerStyleActionSheet];
+    for (NSNumber *d in @[@3, @5, @10, @30]) {
+        NSString *t = [NSString stringWithFormat:@"%.0f 秒", d.doubleValue];
+        if (fabs(mgr.bgKillDelay - d.doubleValue) < 0.01) t = [t stringByAppendingString:@"   ✓"];
+        [ac addAction:[UIAlertAction actionWithTitle:t style:UIAlertActionStyleDefault
+                                            handler:^(UIAlertAction *a) {
+            [SVBManager shared].bgKillDelay = d.doubleValue;
+            [self.tableView reloadData];
+        }]];
+    }
+    [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    ac.popoverPresentationController.sourceView = self.view;
+    ac.popoverPresentationController.sourceRect = self.view.bounds;
+    [self presentViewController:ac animated:YES completion:nil];
 }
 
 - (void)masterToggled:(UISwitch *)sw {

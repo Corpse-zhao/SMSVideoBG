@@ -20,7 +20,7 @@
 //   同时保留 jbroot / Documents 等共享根作为兜底, 用户放哪都能被扫到。
 // ============================================================
 
-#define SVB_VERSION @"9.9.10"
+#define SVB_VERSION @"9.9.11"
 #define SVB_SUITE @"com.nvb.smsvideobg"
 #define SVB_DARWIN_NOTE "com.nvb.smsvideobg/prefs.changed"
 #define SVB_MEDIA_DIR_NAME @"SMSVideoBG"
@@ -118,6 +118,26 @@ NSArray<NSArray<NSString *> *> *SVBContextDefinitions(void);
 - (void)refreshVisibleBackgrounds;
 - (void)postChangeNotification;
 
+#pragma mark - v9.9.11 前后台自愈 (切后台再回前台视频不卡)
+
+// 宿主 App 生命周期回调 (由 Tweak 在 %ctor 里注册通知后转发进来)
+- (void)handleAppEnterBackground;
+- (void)handleAppWillEnterForeground;
+- (void)handleAppDidBecomeActive;
+- (void)handleAudioInterruption:(NSNotification *)n;
+// 音频会话重新激活 + 重连 AVPlayerLayer + 续播
+//   force=NO  轻量修复 (清 layer 内容缓存 + 重设 player + play)
+//   force=YES 逐界面强制重建播放器 (looper 队列被清空/解码失败的终极大招)
+- (void)recoverVideoPlaybackForce:(BOOL)force;
+// 屏幕上全部视频背景视图 (自愈/诊断用)
+- (NSArray<SVBVideoBackgroundView *> *)allVideoBackgroundViews;
+
+#pragma mark - v9.9.11 切后台自动清理
+
+@property (nonatomic, assign) BOOL bgKillEnabled;          // 默认开: 切后台 N 秒后结束信息App
+@property (nonatomic, assign) NSTimeInterval bgKillDelay;  // 默认 5 秒
+- (void)cancelScheduledBackgroundKill;
+
 #pragma mark 诊断
 - (void)log:(NSString *)fmt, ... NS_FORMAT_FUNCTION(1, 2);   // 多通道 (全部可写根)
 - (void)logClassOnce:(NSString *)name context:(NSString *)ctx;
@@ -134,4 +154,8 @@ NSArray<NSArray<NSString *> *> *SVBContextDefinitions(void);
 @property (nonatomic, strong) AVPlayerLayer *videoLayer;
 - (instancetype)initWithFrame:(CGRect)frame contextKey:(NSString *)key;
 - (void)configure;
+// v9.9.11: 重建显示管线 (后台被系统回收内容后会卡在最后一帧)
+- (void)reconnectPlayerForce:(BOOL)force;
+// v9.9.11: 显示管线是否正常 (layer 有可用画面且播放器在走)
+- (BOOL)playbackLooksBroken;
 @end
