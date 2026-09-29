@@ -54,6 +54,24 @@ jobs:
       - name: Verify package contents (filter / control / arch)
         run: python3 tools/inspect_deb.py packages/*.deb || true
 
+      # v1.9.1: 确认授权密钥真的注入进了二进制 (只打印哈希前缀, 不泄露明文)
+      - name: Verify license secret injected
+        env:
+          SVB_LICENSE_SECRET: ${{ secrets.SVB_LICENSE_SECRET }}
+        run: |
+          if [ -z "$SVB_LICENSE_SECRET" ]; then
+            echo "::warning::SVB_LICENSE_SECRET 未配置, 使用兜底密钥"
+            exit 0
+          fi
+          printf 'secret sha256[:8] = '; printf '%s' "$SVB_LICENSE_SECRET" | shasum -a 256 | cut -c1-8
+          ok=1
+          for f in .theos/obj/SMSVideoBG.dylib .theos/obj/SMSVideoBGApp; do
+            if [ -f "$f" ]; then
+              if grep -q "$SVB_LICENSE_SECRET" "$f"; then echo "OK  $f 已注入密钥"; else echo "FAIL $f 未见密钥"; ok=0; fi
+            fi
+          done
+          [ "$ok" = "1" ] || { echo "::error::授权密钥未能注入二进制"; exit 1; }
+
       - name: Diagnose Mach-O slices (log load commands per arch)
         run: |
           if [ -f .theos/obj/SMSVideoBG.dylib ]; then python3 tools/macho_dump.py .theos/obj/SMSVideoBG.dylib; fi
