@@ -1,8 +1,8 @@
 {
   "revoked" : [
-
+    "793248125AAB376F"
   ],
-  "sig" : "f6ec9bdb87629668fb40f4c7f7d7eeb8afafbc70fc033ed90cb09fdbbf6fc29a",
-  "ts" : 1790653224,
+  "sig" : "6159c666d751d1c7d75fc811367e0946713aeb9fb752260394eb6d2d36e46793",
+  "ts" : 1790653226,
   "v" : 1
 }
