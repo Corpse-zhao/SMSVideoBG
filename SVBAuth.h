@@ -56,6 +56,9 @@ NSString *SVBAuthStateText(SVBAuthState st, NSString *detail);
 
 // ---- 同步 / 缓存 ----
 void SVBAuthRefreshIfNeeded(BOOL force);     // force=YES 立即拉一次
+// 作废 SVBAuthIsAuthorized 的 60 秒判定缓存 (拉取成功后内部自动调用;
+// 控制 App 收到同步完成通知时也可以主动调一次, 让界面立刻反映新结论)
+void SVBAuthInvalidateCache(void);
 NSInteger SVBAuthCachedCount(void);          // 缓存名单里的台数
 NSTimeInterval SVBAuthLastSyncTime(void);    // 上次成功同步时间 (0 = 从未)
 BOOL SVBAuthCachedHasSelf(NSString **expText);  // 本机命中缓存名单? 回传到期文本

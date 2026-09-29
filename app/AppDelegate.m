@@ -500,6 +500,10 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
 
 @implementation SVBHomeViewController {
     NSArray<NSArray<NSString *> *> *_defs;
+    // v10.0.1: 未授权时首页只留「授权」一栏 (开关全部隐藏), 且无需再点进授权页
+    SVBAuthState _authState;
+    NSString *_authDetail;
+    BOOL _authSyncing;
 }
 
 - (instancetype)initWithStyle:(UITableViewStyle)style {
@@ -508,6 +512,71 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
         self.title = @"信息视频背景";
     }
     return self;
+}
+
+#pragma mark - v10.0.1 未授权时首页只显示授权栏
+
+// 已授权 -> 完整设置页; 未授权/过期/待校验 -> 只显示授权栏
+- (BOOL)authOK { return SVBIsLicensed(); }
+
+- (void)svbReloadAuthState {
+    NSString *det = nil;
+    SVBAuthRefreshIfNeeded(NO);          // 内部 30 分钟节流
+    _authState = SVBAuthCurrentState(&det);
+    _authDetail = det;
+}
+
+- (void)svbCopyUDID {
+    NSString *udid = SVBAuthUDID();
+    if (!udid.length) {
+        [self svbAlert:@"读不到 UDID"
+                   msg:@"本机读不到硬件 UDID / 序列号，没法走 UDID 授权。\n"
+                        @"请联系作者说明情况。"];
+        return;
+    }
+    [UIPasteboard generalPasteboard].string = udid;
+    [self svbAlert:@"UDID 已复制"
+               msg:[NSString stringWithFormat:
+        @"%@\n\n识别方式：%@\n把它发给作者，让作者为你签发授权。\n\n"
+        @"作者签发后本机联网自动生效；作者删除这条记录后，本机最多 30 分钟掉授权。",
+        udid, SVBAuthUDIDSource()]];
+}
+
+- (void)svbAuthSync {
+    if (_authSyncing) return;
+    _authSyncing = YES;
+    SVBAuthRefreshIfNeeded(YES);
+    [self svbReloadAuthState];
+    [self.tableView reloadData];
+    // 拉取在后台串行跑多源, 耗时不定 -> 分几次回看结果 (每次都会顺手重算授权态)
+    for (NSNumber *delay in @[@1.2, @3.0, @6.0]) {
+        __weak typeof(self) w = self;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                     (int64_t)(delay.doubleValue * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            typeof(self) s = w;             // ARC: 先拿强引用才能碰 ivar
+            if (!s) return;
+            SVBAuthInvalidateCache();       // 强制按最新缓存重判一次
+            [s svbReloadAuthState];
+            [s.tableView reloadData];
+        });
+    }
+    __weak typeof(self) w2 = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(6.5 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        typeof(self) s = w2;
+        if (!s) return;
+        s->_authSyncing = NO;
+        [s svbReloadAuthState];
+        [s.tableView reloadData];
+    });
+}
+
+- (void)svbAlert:(NSString *)title msg:(NSString *)msg {
+    UIAlertController *ac = [UIAlertController alertControllerWithTitle:title message:msg
+                                                        preferredStyle:UIAlertControllerStyleAlert];
+    [ac addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
+    [self presentViewController:ac animated:YES completion:nil];
 }
 
 // v1.8: 首页 Hero 渐变卡 (标题+副标题+渐变图标, 替代系统大标题)
@@ -599,14 +668,18 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
 
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
+    [self svbReloadAuthState];
     [self.tableView reloadData];
 }
 
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView {
+    // v10.0.1: 未授权只留「授权」一栏, 全部设置开关隐藏
+    if (![self authOK]) return 1;
     return 4; // 总开关 / 界面开关 / 调试 / 说明 (v1.6: 全局效果滑条已下沉到各界面)
 }
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
+    if (![self authOK]) return 3;  // 授权状态 / 本机 UDID / 立即联网校验
     if (section == 0) return 1;
     if (section == 1) return (NSInteger)_defs.count;
     if (section == 2) return 2; // 切后台自动清理 / 注入诊断横幅 (v9.9.11)
@@ -614,6 +687,7 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
 }
 
 - (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
+    if (![self authOK]) return @"授权";
     if (section == 0) return @"总开关";
     if (section == 1) return @"各界面背景";
     if (section == 2) return @"后台与调试";
@@ -621,6 +695,11 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
 }
 
 - (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
+    if (![self authOK])
+        return @"本插件按设备授权。把上面「本机 UDID」那一行点一下复制，发给作者；"
+                "作者签发后本机联网（点「立即联网校验」）即可生效。\n\n"
+                "未授权时，信息 App 里的视频背景不会生效，设置项也已全部隐藏。\n"
+                "作者删除你这条 UDID 记录后，本机最多 30 分钟掉授权（需联网）。";
     if (section == 1)
         return @"点按某一行可为该界面导入/选用素材并单独设置不透明度/模糊度/音量。每个界面对应素材目录下一个独立的文件夹，用 Filza 直接放入视频同样生效。\n\n「对话详情」= 点进某个对话后上下聊天的那个界面（不是列表）。「未导入素材」的界面不会显示视频背景，导入并打开开关后生效。";
     if (section == 2)
@@ -634,7 +713,61 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
     return nil;
 }
 
+// v10.0.1: 未授权首页的唯一一栏 —— 授权状态 / 本机 UDID(点按复制) / 立即联网校验
+- (UITableViewCell *)authOnlyCell:(NSInteger)row tableView:(UITableView *)tableView {
+    static NSString *authOnlyId = @"svb-home-authonly";
+    UITableViewCell *c = [tableView dequeueReusableCellWithIdentifier:authOnlyId];
+    if (!c) c = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:authOnlyId];
+    // 复用时把上一轮的样式全部还原
+    c.textLabel.text = nil;
+    c.textLabel.textColor = [UIColor labelColor];
+    c.textLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightRegular];
+    c.detailTextLabel.text = nil;
+    c.detailTextLabel.textColor = [UIColor secondaryLabelColor];
+    c.detailTextLabel.font = [UIFont systemFontOfSize:15];
+    c.accessoryType = UITableViewCellAccessoryNone;
+    c.selectionStyle = UITableViewCellSelectionStyleDefault;
+
+    if (row == 0) {
+        BOOL ok = (_authState == SVBAuthStateAuthorized);
+        c.textLabel.text = @"授权状态";
+        c.detailTextLabel.text = SVBAuthStateText(_authState, _authDetail);
+        c.detailTextLabel.textColor = ok ? SVBAccent() : [UIColor systemOrangeColor];
+        c.detailTextLabel.font = [UIFont systemFontOfSize:14];
+        c.imageView.image = SVBBadgeIcon(ok ? @"checkmark.seal.fill" : @"lock.fill",
+            ok ? [UIColor colorWithRed:0.20 green:0.78 blue:0.45 alpha:1]
+               : [UIColor colorWithRed:1.00 green:0.58 blue:0.00 alpha:1],
+            ok ? [UIColor colorWithRed:0.35 green:0.85 blue:0.65 alpha:1]
+               : [UIColor colorWithRed:1.00 green:0.42 blue:0.30 alpha:1]);
+        c.selectionStyle = UITableViewCellSelectionStyleNone;   // 纯信息, 点不动
+    } else if (row == 1) {
+        c.textLabel.text = @"本机 UDID";
+        c.detailTextLabel.text = SVBAuthUDID() ?: @"读取失败";
+        c.detailTextLabel.font = [UIFont monospacedSystemFontOfSize:12.5 weight:UIFontWeightSemibold];
+        c.detailTextLabel.textColor = SVBAccent();
+        c.imageView.image = SVBBadgeIcon(@"iphone.gen3",
+            [UIColor colorWithRed:0.25 green:0.55 blue:1.00 alpha:1],
+            [UIColor colorWithRed:0.40 green:0.80 blue:1.00 alpha:1]);
+    } else {
+        NSTimeInterval ts = SVBAuthLastSyncTime();
+        NSDateFormatter *df = [[NSDateFormatter alloc] init];
+        df.dateFormat = @"MM-dd HH:mm";
+        c.textLabel.text = _authSyncing ? @"正在同步…" : @"立即联网校验";
+        c.detailTextLabel.text = [NSString stringWithFormat:@"名单 %ld 台 · %@",
+            (long)SVBAuthCachedCount(),
+            ts > 0 ? [df stringFromDate:[NSDate dateWithTimeIntervalSince1970:ts]] : @"未同步"];
+        c.detailTextLabel.font = [UIFont systemFontOfSize:13.5];
+        c.imageView.image = SVBBadgeIcon(@"arrow.triangle.2.circlepath",
+            [UIColor colorWithRed:0.30 green:0.62 blue:1.00 alpha:1],
+            [UIColor colorWithRed:0.55 green:0.45 blue:1.00 alpha:1]);
+    }
+    SVBApplyCardStyle(c, row, 3);
+    return c;
+}
+
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
+    if (![self authOK]) return [self authOnlyCell:indexPath.row tableView:tableView];
+
     static NSString *basicId  = @"svb-basic";
     static NSString *switchId = @"svb-switch";
     static NSString *linkId   = @"svb-link";
@@ -832,6 +965,12 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
 
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
+    // v10.0.1: 未授权首页只有授权栏, 点行直接办事, 不再跳授权页
+    if (![self authOK]) {
+        if (indexPath.row == 1) [self svbCopyUDID];
+        else if (indexPath.row == 2) [self svbAuthSync];
+        return;
+    }
     if (indexPath.section == 2 && indexPath.row == 0) {
         [self bgKillDelayTapped];   // v9.9.13: 点整行改清理延时
         return;

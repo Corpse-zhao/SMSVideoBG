@@ -249,16 +249,25 @@ SVBAuthState SVBAuthCurrentState(NSString **detail) {
     return SVBAuthStateAuthorized;
 }
 
+// v10.0.1: 缓存挪到文件作用域, 让「强制校验完成」可以立即作废它
+// (否则验证成功后最长 60 秒内 SVBIsLicensed() 还是旧结论, 用户会以为没生效)
+static SVBAuthState gAuthCachedState = SVBAuthStateOffline;
+static NSTimeInterval gAuthCachedAt = 0;
+
+void SVBAuthInvalidateCache(void) {
+    gAuthCachedState = SVBAuthStateOffline;
+    gAuthCachedAt = 0;
+}
+
 BOOL SVBAuthIsAuthorized(void) {
     @try {
         // 60 秒缓存, 避免每次挂背景都重算
-        static SVBAuthState cached = SVBAuthStateOffline;
-        static NSTimeInterval cachedAt = 0;
         NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
-        if (now - cachedAt < 60.0 && cachedAt > 0) return cached == SVBAuthStateAuthorized;
-        cached = SVBAuthCurrentState(NULL);
-        cachedAt = now;
-        return cached == SVBAuthStateAuthorized;
+        if (gAuthCachedAt > 0 && now - gAuthCachedAt < 60.0)
+            return gAuthCachedState == SVBAuthStateAuthorized;
+        gAuthCachedState = SVBAuthCurrentState(NULL);
+        gAuthCachedAt = now;
+        return gAuthCachedState == SVBAuthStateAuthorized;
     } @catch (NSException *e) {
         return NO;
     }
@@ -342,6 +351,7 @@ static void SVBAuthFetchChain(NSArray<NSString *> *urls, NSUInteger idx) {
         // 名单文件还不存在 = 还没授权过任何设备
         [mgr setConfigValue:@{} forKey:SVB_AUTH_KEY_MAP];
         [mgr setConfigValue:@(now) forKey:SVB_AUTH_KEY_TS];
+        SVBAuthInvalidateCache();   // v10.0.1: 结论可能变了, 立即作废 60 秒缓存
         [mgr log:@"[auth] 名单不存在(404), 按空名单处理 via %@", urlStr];
         return;
     }
@@ -350,6 +360,7 @@ static void SVBAuthFetchChain(NSArray<NSString *> *urls, NSUInteger idx) {
         if (map) {
             [mgr setConfigValue:map forKey:SVB_AUTH_KEY_MAP];
             [mgr setConfigValue:@(now) forKey:SVB_AUTH_KEY_TS];
+            SVBAuthInvalidateCache();   // v10.0.1: 结论可能变了, 立即作废 60 秒缓存
             [mgr log:@"[auth] 授权名单已更新: %lu 台设备 via %@",
                      (unsigned long)map.count, urlStr];
             return;
