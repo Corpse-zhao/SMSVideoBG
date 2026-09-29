@@ -597,22 +597,22 @@ static UITextField *KGField(NSString *placeholder, CGFloat fontSize, BOOL digits
     [KGAuthClient pushDevices:[self localMap] secret:KGCompiledSecret()
                    completion:^(BOOL ok, NSString *err) {
         if (!w) return;
-        w->_issueBtn.enabled = YES;
+        w.issueBtn.enabled = YES;
         if (ok) {
             w.remoteMap = [w localMap];
             w.lastSync = [[NSDate date] timeIntervalSince1970];
             [w refreshList];
             [w refreshSyncStatus];
-            w->_issueStatus.text = [NSString stringWithFormat:
+            w.issueStatus.text = [NSString stringWithFormat:
                 @"✓ %@ 已授权 · 至 %@ · 对方 30 分钟内自动生效（无需他操作）",
                 KGAuthShortUDID(udid), KGDateTextForDayIndex(exp)];
-            w->_issueStatus.textColor = [UIColor systemGreenColor];
-            w->_udidField.text = @"";
-            w->_noteField.text = @"";
+            w.issueStatus.textColor = [UIColor systemGreenColor];
+            w.udidField.text = @"";
+            w.noteField.text = @"";
         } else {
-            w->_issueStatus.text = [NSString stringWithFormat:
+            w.issueStatus.text = [NSString stringWithFormat:
                 @"⚠️ 已记入本机名单，但推送失败：%@（点「立即推送名单」可重试）", err ?: @"未知错误"];
-            w->_issueStatus.textColor = [UIColor systemOrangeColor];
+            w.issueStatus.textColor = [UIColor systemOrangeColor];
         }
     }];
 }
@@ -636,8 +636,8 @@ static UITextField *KGField(NSString *placeholder, CGFloat fontSize, BOOL digits
                                           handler:^(UIAlertAction *a) {
         if (!udid.length) return;
         [UIPasteboard generalPasteboard].string = udid;
-        w->_issueStatus.text = @"✓ 已复制 UDID";
-        w->_issueStatus.textColor = [UIColor systemGreenColor];
+        w.issueStatus.text = @"✓ 已复制 UDID";
+        w.issueStatus.textColor = [UIColor systemGreenColor];
     }]];
     [ac addAction:[UIAlertAction actionWithTitle:@"改备注" style:UIAlertActionStyleDefault
                                           handler:^(UIAlertAction *a) { [w editNote:i]; }]];
@@ -737,12 +737,12 @@ static UITextField *KGField(NSString *placeholder, CGFloat fontSize, BOOL digits
             w.remoteMap = map;
             w.lastSync = [[NSDate date] timeIntervalSince1970];
             [w refreshList];
-            w->_listStatus.text = [NSString stringWithFormat:
+            w.listStatus.text = [NSString stringWithFormat:
                 @"✓ 已推送 %lu 台到远端 · 对方 30 分钟内生效/掉授权", (unsigned long)map.count];
-            w->_listStatus.textColor = [UIColor systemGreenColor];
+            w.listStatus.textColor = [UIColor systemGreenColor];
         } else {
-            w->_listStatus.text = [NSString stringWithFormat:@"⚠️ 推送失败：%@", err ?: @"未知错误"];
-            w->_listStatus.textColor = [UIColor systemOrangeColor];
+            w.listStatus.text = [NSString stringWithFormat:@"⚠️ 推送失败：%@", err ?: @"未知错误"];
+            w.listStatus.textColor = [UIColor systemOrangeColor];
         }
     }];
 }

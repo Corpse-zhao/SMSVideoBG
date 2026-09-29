@@ -1421,9 +1421,10 @@ static void SVBAppPickImage(UIViewController *host, void (^done)(UIImage *image)
     __weak typeof(self) w = self;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4.0 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
-        if (!w) return;
-        w->_syncing = NO;
-        [w reloadAuth];
+        typeof(self) s = w;                 // ARC: 先拿强引用, 才能碰 ivar
+        if (!s) return;
+        s->_syncing = NO;
+        [s reloadAuth];
     });
 }
 
