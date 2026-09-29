@@ -443,9 +443,9 @@ static UITextField *KGField(NSString *placeholder, CGFloat fontSize, BOOL digits
 
         // v1.3.0: 标清楚设备码 (8 位码补 ABCD-EFGH 分组显示), 有备注则放最前
         NSString *dev8 = [d objectForKey:@"device"] ?: @"";
+        NSString *devDisp = (dev8.length == 8) ? KGGroupDevice8(dev8) : dev8;
         NSString *who = [d objectForKey:@"universal"] boolValue ? @"通用码"
-            : [NSString stringWithFormat:@"设备 %@",
-               (dev8.length == 8 ? KGGroupDevice8(dev8) : dev8) ?: dev8];
+            : [NSString stringWithFormat:@"设备 %@", devDisp];
         NSString *note = [d objectForKey:@"note"];
         NSString *line1 = [NSString stringWithFormat:@"%@%@ · %@%@",
                            note.length ? [note stringByAppendingString:@" · "] : @"",
@@ -993,9 +993,9 @@ static UITextField *KGField(NSString *placeholder, CGFloat fontSize, BOOL digits
     BOOL revoked = (hash.length > 0 && [_revokedList containsObject:hash]);
     NSString *note = [d objectForKey:@"note"];
     NSString *dev8 = [d objectForKey:@"device"] ?: @"";
+    NSString *devDisp = (dev8.length == 8) ? KGGroupDevice8(dev8) : dev8;
     NSString *who = [d objectForKey:@"universal"] boolValue ? @"通用码"
-        : [NSString stringWithFormat:@"设备 %@",
-           (dev8.length == 8 ? KGGroupDevice8(dev8) : dev8) ?: dev8];
+        : [NSString stringWithFormat:@"设备 %@", devDisp];
 
     UIAlertController *ac = [UIAlertController
         alertControllerWithTitle:note.length ? note : who
