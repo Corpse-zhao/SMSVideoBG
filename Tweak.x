@@ -212,6 +212,7 @@ static char SVBOrigHiddenKey;
 static NSMutableArray<UIView *> *SVBHiddenCards;
 
 // 子树里有没有「必须可见」的内容 (文字/控件/输入框) —— 有就不能整体藏
+static void SVBRestoreMappedBalloons(void);   // 前向声明 (定义在气泡映射段)
 static BOOL SVBSubtreeHasContent(UIView *v, NSInteger depth) {
     if (!v || depth > 8) return NO;
     if ([v isKindOfClass:[UILabel class]] || [v isKindOfClass:[UIControl class]] ||
