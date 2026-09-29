@@ -540,10 +540,13 @@ BOOL SVBDirWritablePath(NSString *dir) {
         NSString *udid = SVBAuthUDID() ?: @"(读不到)";
         NSString *appName = [self appDisplayName];
         if (!appName.length) appName = @"信息视频背景";
+        // v10.2.0: 默认纯离线模式 -> 不提示"去联网校验", 改提示导入授权串
+        NSString *how = SVBAuthOfflineOnlyMode()
+            ? @"把上面这串 UDID 发给作者；作者会回一段授权串，在控制 App 点「粘贴离线授权」导入即可（不用联网、不需要梯子）"
+            : @"把 UDID 发给作者授权，然后在控制 App 点「立即联网校验」";
         return [NSString stringWithFormat:
-            @"⚠️ SMSVideoBG v%@ 未生效\n授权状态：%@\n本机 UDID %@\n把 UDID 发给作者授权；"
-            @"作者删除该 UDID 后本机会掉授权（点本横幅可隐藏）",
-            SVB_VERSION, SVBAuthStateText(lic, licDetail), udid];
+            @"⚠️ %@ v%@ 未生效\n授权状态：%@\n本机 UDID %@\n%@\n（点本横幅可隐藏）",
+            appName, SVB_VERSION, SVBAuthStateText(lic, licDetail), udid, how];
     }
 
     NSString *bid = SVBHostBundleIdentifier();
