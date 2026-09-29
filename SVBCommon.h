@@ -26,7 +26,7 @@
 //   - 备忘录(com.apple.mobilenotes)的 7 类界面语境见下方 NVB 常量;
 //   - 控制App 首页可切「信息 / 备忘录」两个管理页, 各自独立开关;
 //   - 备忘录素材根 = 备忘录App 数据容器 (控制App 双容器齐写)。
-#define SVB_VERSION @"11.0.4"
+#define SVB_VERSION @"11.0.5"
 #define SVB_SUITE @"com.nvb.smsvideobg"
 #define SVB_DARWIN_NOTE "com.nvb.smsvideobg/prefs.changed"
 #define SVB_MEDIA_DIR_NAME @"SMSVideoBG"

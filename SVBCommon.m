@@ -201,16 +201,22 @@ NSString *SVBRootLabel(NSString *root) {
 }
 
 static NSArray<NSString *> *sSVBRoots = nil;
+static BOOL sSVBRootsCalculating = NO;   // v11.0.5: 重入保护
 
 // v11.0.4: 宿主进程读对方容器路径 (先运行时枚举, 失败回退控制App 记录的配置)
+// v11.0.5: 【紧急】不经过 configValueForKey —— 它内部会再查素材根
+// (effectiveConfig -> configReadPaths -> SVBRootCandidates) 形成无限递归,
+// 栈溢出导致信息/备忘录启动即崩 (真机实锤)。改读 NSUserDefaults suite
+// (控制App 的 setConfigValue prefs 通道已写入, 同一 suite 宿主可直接读)。
 static NSString *SVBOtherHostContainer(NSString *otherBid) {
     NSString *oc = SVBFindAppDataContainer(otherBid);
     if (oc.length) return oc;
     @try {
         NSString *key = [otherBid isEqualToString:SVB_SMS_BUNDLE_ID] ? @"svb_sms_container"
                                                                      : @"svb_notes_container";
-        NSString *v = [[SVBManager shared] configValueForKey:key];
-        if ([v isKindOfClass:[NSString class]] && v.length) return v;
+        NSUserDefaults *p = [[NSUserDefaults alloc] initWithSuiteName:SVB_SUITE];
+        NSString *v = [p stringForKey:key];
+        if (v.length) return v;
     } @catch (NSException *e) {}
     return nil;
 }
@@ -240,13 +246,18 @@ static NSArray<NSString *> *SVBLegacyRoots(void) {
 //   此前备忘录进程只有自己容器一根, 素材全在信息容器里 -> 备忘录「素材=0 全不生效」
 //   (真机实锤), 且完全依赖控制 App 的跨容器同步跑没跑过。现在直接聚合读双容器。
 NSArray<NSString *> *SVBRootCandidates(void) {
-    // v11.0.4: 双根缓存永久有效; 单根 (定位对方容器失败) 10 秒后允许重算 ——
-    // 启动早期枚举失败不至于永久单根
+    // v11.0.5: 重入保护 —— 根定位过程中任何代码再查根, 直接给当前缓存/兜底,
+    // 绝不再进计算 (v11.0.4b 的无限递归 = 信息/备忘录启动即崩, 血的教训)
+    if (sSVBRootsCalculating)
+        return sSVBRoots ?: (@[SVBJBMediaDirectory()]);
+    // v11.0.4: 双根缓存永久有效; 单根 (定位对方容器失败) 10 秒后允许重算
     static double sSVBSingleRootAt = 0;
     if (sSVBRoots) {
         if (sSVBRoots.count >= 2) return sSVBRoots;
         if ([NSDate date].timeIntervalSince1970 - sSVBSingleRootAt < 10.0) return sSVBRoots;
     }
+    sSVBRootsCalculating = YES;
+    @try {
     NSMutableArray<NSString *> *a = [NSMutableArray array];
     NSString *primary = nil;
 
@@ -278,12 +289,15 @@ NSArray<NSString *> *SVBRootCandidates(void) {
             }
         }
     }
-    if (!a.count) [a addObject:SVBJBMediaDirectory()];   // 应急兜底(仅定位不到容器时)
+        if (!a.count) [a addObject:SVBJBMediaDirectory()];   // 应急兜底(仅定位不到容器时)
 
-    sSVBRoots = [a copy];
-    if (sSVBRoots.count < 2) sSVBSingleRootAt = [NSDate date].timeIntervalSince1970;
-    else                     sSVBSingleRootAt = 0;
-    return sSVBRoots;
+        sSVBRoots = [a copy];
+        if (sSVBRoots.count < 2) sSVBSingleRootAt = [NSDate date].timeIntervalSince1970;
+        else                     sSVBSingleRootAt = 0;
+        return sSVBRoots;
+    } @finally {
+        sSVBRootsCalculating = NO;
+    }
 }
 
 // v11.0.4: 控制 App 把双容器路径写进配置 —— 宿主进程沙盒枚举失败时 (真机实锤:
