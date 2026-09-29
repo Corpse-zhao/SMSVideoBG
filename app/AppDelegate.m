@@ -161,6 +161,10 @@ static void SVBJumpToMediaPath(UIViewController *vc, NSString *path) {
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
         SVBEnsureFriendlyMediaPath(NULL);
         [[SVBManager shared] migrateMediaIntoPrimaryRoot];
+        // v10.4.0: 旧名杂项改名 / 过期诊断日志删除 / 界面子目录摊平
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+            SVBCleanupHousekeeping();
+        });
     });
     self.window = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
     UINavigationController *nav = [[UINavigationController alloc]
@@ -823,14 +827,14 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
                 "长按第一行可查看「授权诊断」或清除本机授权。";
     }
     if (section == 1)
-        return @"点按某一行可为该界面导入/选用素材并单独设置不透明度/模糊度/音量。每个界面对应素材目录下一个独立的文件夹，用 Filza 直接放入视频同样生效。\n\n「对话详情」= 点进某个对话后上下聊天的那个界面（不是列表）。「未导入素材」的界面不会显示视频背景，导入并打开开关后生效。";
+        return @"点按某一行可为该界面选用素材并单独设置不透明度/模糊度/音量。所有界面共用同一个素材文件夹（见下方「素材路径」），用 Filza 把视频直接丢进去，每个界面都能选它当背景。\n\n「对话详情」= 点进某个对话后上下聊天的那个界面（不是列表）。「未导入素材」的界面不会显示视频背景，导入并打开开关后生效。";
     if (section == 2)
         return @"「切后台自动清理」：信息App 划到后台超过设定时间就自动结束它的进程（从后台再进去等于重开），用来解决个别情况下回前台视频卡住的问题；设定时间内回来（复制粘贴、看眼别的 App）不会被清理。点这一行可以改时间。\n\n「显示注入诊断横幅」：打开信息App（或备忘录）时，窗口顶部会显示一条横幅：能看到它 = 插件注入成功。横幅里列出素材目录是否可读、有几个素材，点一下可临时隐藏。";
     if (section == 3) {
         return [NSString stringWithFormat:
-                @"素材统一放在这一个文件夹里（点「素材路径」可直接跳到 Filza）：\n%@\n\n"
-                "下面每个界面一个子文件夹：main / all / known / unknown / unread / junk / deleted / chat。"
-                "用 Filza 把视频丢进对应子文件夹同样生效（丢在根目录也能被识别）。\n"
+                @"所有界面的素材都放在这一个文件夹里（点「素材路径」可直接跳到 Filza）：\n%@\n\n"
+                "不再分界面子文件夹 —— 把视频直接丢进去，主页面/所有信息/对话详情等每个界面都能选它当背景，"
+                "各界面可单独选不同的视频、单独调效果。\n"
                 "各界面音量默认关闭。设置即时生效，无需注销。",
                 SVBMediaFriendlyRoot()];
     }
@@ -989,6 +993,7 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
     // 说明区 (v1.9.0: 授权状态提到第一行)
     UITableViewCell *c = [tableView dequeueReusableCellWithIdentifier:basicId];
     if (!c) c = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:basicId];
+    c.accessoryType = UITableViewCellAccessoryNone;   // v10.4.0: 复用时清掉, 防箭头串行
     if (indexPath.row == 0) {
         NSString *det = nil;
         SVBAuthState st = SVBAuthCurrentState(&det);
@@ -1005,13 +1010,13 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
         return c;
     }
     if (indexPath.row == 1) {
-        // v10.3.0: 统一素材路径 —— 点按跳 Filza, 长按复制路径
+        // v10.4.0: 统一素材路径 —— 点按跳 Filza, 长按复制路径
+        //   (去掉行尾的 › 和右侧箭头: 用户要求「板栗仁路径后面的 > 符号删掉」)
         c.textLabel.text = @"素材路径";
-        c.detailTextLabel.text = [NSString stringWithFormat:@"%@  ›",
-                                  SVBMediaFriendlyRoot().lastPathComponent];
+        c.detailTextLabel.text = SVBMediaFriendlyRoot().lastPathComponent;
         c.detailTextLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
         c.imageView.image = SVBIconForKey(@"__folder");
-        c.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+        c.accessoryType = UITableViewCellAccessoryNone;
     } else if (indexPath.row == 2) {
         c.textLabel.text = @"诊断报告";
         c.detailTextLabel.text = @"排查问题";
@@ -1183,11 +1188,11 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
 
 - (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
     if (section != 1) return nil;
-    // v10.3.0: 素材只有一个统一文件夹 (其余界面共用同一个父目录下的不同子文件夹)
+    // v10.4.0: 所有界面共用一个素材文件夹, 不再分子目录
     return [NSString stringWithFormat:
-        @"素材统一放在这一个文件夹里（点下方「在 Filza 中打开素材文件夹」直达）：\n%@\n\n"
-        "本界面用的是其中的「%@」子文件夹；放新文件后下拉刷新即可。左滑素材行可删除。",
-        SVBMediaFriendlyRoot(), self.contextKey];
+        @"所有界面共用这一个素材文件夹（点下方「在 Filza 中打开素材文件夹」直达）：\n%@\n\n"
+        "把视频直接丢进去即可，本界面会列出文件夹里全部视频；放新文件后下拉刷新。左滑素材行可删除。",
+        SVBMediaFriendlyRoot()];
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
@@ -1283,7 +1288,7 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
         SVBApplyCardStyle(c, indexPath.row, rows);
         return c;
     }
-    // v10.3.0: 跳转到统一素材路径 (本界面的子文件夹)
+    // v10.4.0: 跳转到统一素材路径 (所有界面共用这一个文件夹)
     c.textLabel.text = @"在 Filza 中打开素材文件夹";
     c.textLabel.textColor = SVBAccent();
     c.textLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightMedium];
@@ -1331,7 +1336,7 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
 
 // v10.3.0: 跳到本界面的素材文件夹 (Filza)
 - (void)openFolderInFilza {
-    [[SVBManager shared] contextDirectory:self.contextKey];   // 保证该子文件夹存在
+    [[SVBManager shared] contextDirectory:self.contextKey];   // 保证素材根存在
     SVBJumpToMediaPath(self, SVBMediaFriendlyPathForContext(self.contextKey));
 }
 
@@ -1953,19 +1958,29 @@ static void SVBAppPickImage(UIViewController *host, void (^done)(UIImage *image)
             (int)[fm isReadableFileAtPath:root]];
     }
 
-    [r appendString:@"\n--- 各界面素材 (逐根扫描) ---\n"];
-    for (NSArray<NSString *> *def in SVBContextDefinitions()) {
-        [r appendFormat:@"[%@] %@\n", def[0], def[1]];
-        for (NSString *root in SVBRootCandidates()) {
+    [r appendString:@"\n--- 素材文件夹内容 (v10.4.0: 所有界面共用这一个文件夹) ---\n"];
+    for (NSString *root in SVBRootCandidates()) {
+        NSError *err = nil;
+        NSArray *raw = [fm contentsOfDirectoryAtPath:root error:&err];
+        [r appendFormat:@"%@\n", root];
+        if (err) {
+            [r appendFormat:@"   错误: %@\n", err.localizedDescription];
+        } else {
+            NSMutableArray *movies = [NSMutableArray array];
+            for (NSString *f in raw)
+                if ([@[@"mp4", @"mov", @"m4v", @"3gp", @"mkv", @"webm"]
+                        containsObject:f.pathExtension.lowercaseString]) [movies addObject:f];
+            [r appendFormat:@"   视频 %lu 个: %@\n   其它条目 %lu 个 (运维文件为点前缀, Filza 默认不显示)\n",
+                (unsigned long)movies.count,
+                movies.count ? [movies componentsJoinedByString:@", "] : @"(无)",
+                (unsigned long)(raw.count - movies.count)];
+        }
+        // 旧版界面子目录若还在 (尚未摊平), 一并列出方便排查
+        for (NSArray<NSString *> *def in SVBContextDefinitions()) {
             NSString *dir = [root stringByAppendingPathComponent:def[0]];
-            NSError *err = nil;
-            NSArray *raw = [fm contentsOfDirectoryAtPath:dir error:&err];
-            if (err) {
-                [r appendFormat:@"   %@ -> 错误: %@\n", dir, err.localizedDescription];
-            } else {
-                [r appendFormat:@"   %@ -> %lu 项%@\n", dir, (unsigned long)raw.count,
-                    raw.count ? [NSString stringWithFormat:@" %@", [raw componentsJoinedByString:@","]] : @""];
-            }
+            NSArray *sub = [fm contentsOfDirectoryAtPath:dir error:nil];
+            if (sub.count)
+                [r appendFormat:@"   [旧子目录 %@] %lu 项 (启动时会自动搬进根目录)\n", def[0], (unsigned long)sub.count];
         }
     }
 
@@ -1996,6 +2011,7 @@ static void SVBAppPickImage(UIViewController *host, void (^done)(UIImage *image)
     [r appendString:@"• 若横幅显示容器素材=0、其它根有素材 -> 说明素材没送进容器, 重开信息App 前先在控制App 里重新导入一次。\n"];
 
     [r appendString:@"\n--- 插件侧日志尾部 ---\n"];
+    [r appendFormat:@"(诊断日志保留 3 天自动删除, 当前时间 %@)\n", [NSDate date]];
     NSString *tl = [mgr readTweakLog];
     [r appendString:(tl.length ? tl : @"(空)\n")];
 

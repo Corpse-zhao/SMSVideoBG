@@ -1,8 +1,8 @@
 #!/bin/bash
 # ============================================================
-# SMSVideoBG postinst (v1.7.4 精简版 —— 安装提速)
-#  1) 共享素材目录 (jbroot 主根 + Documents 辅根)
-#  2) 信息App 数据容器内的素材目录
+# SMSVideoBG postinst (v10.4.0)
+#  1) 统一素材路径父目录 (软链在定位到容器后建)
+#  2) 信息App 数据容器内的素材根 (v10.4.0: 不再建界面子目录)
 #  3) 控制App 图标注册
 #  4) 精简自检 (日志带轮转)
 #
@@ -14,7 +14,6 @@
 #   c) 旧版自检日志无限追加 (>>) 越滚越大。现超过 64KB 自动轮转。
 # ============================================================
 
-CTXS="all known unknown unread junk deleted chat"
 LOG=/var/mobile/Documents/smsvideobg_install.log
 
 # 0. 统一素材路径 (v10.3.0): /var/mobile/信息视频背景素材/板栗仁
@@ -26,16 +25,8 @@ mkdir -p "$FRIENDLY_PARENT" 2>/dev/null
 chmod 755 "$FRIENDLY_PARENT" 2>/dev/null
 chown mobile:mobile "$FRIENDLY_PARENT" 2>/dev/null
 
-# 1. 共享素材目录 (mobile 可读写, Filza 友好; 只设目录本身的权限, 不递归)
-for MEDIA in "/var/jb/Library/SMSVideoBG" "/var/mobile/Documents/SMSVideoBG"; do
-  for ctx in $CTXS; do
-    mkdir -p "$MEDIA/$ctx" 2>/dev/null
-  done
-  chmod 777 "$MEDIA" 2>/dev/null
-  chown mobile:mobile "$MEDIA" 2>/dev/null
-  chmod 777 "$MEDIA"/* 2>/dev/null
-  chown mobile:mobile "$MEDIA"/* 2>/dev/null
-done
+# 1. (v10.4.0 取消) 旧版在这里给每个共享根建界面子目录 —— 现在所有界面共用
+#    素材根一个文件夹, 子目录由 App/插件启动时摊平, 这里不再创建。
 
 # 2. 信息App 数据容器内的素材目录
 #    一次 grep 批量命中 (旧版是每容器一次 grep, 这是装得慢的主因)
@@ -54,11 +45,10 @@ for base in /var/mobile/Containers/Data/Application \
 done
 
 if [ -n "$SMS_C" ]; then
-  for ctx in $CTXS; do
-    mkdir -p "$SMS_C/Library/SMSVideoBG/$ctx" 2>/dev/null
-  done
-  chmod 777 "$SMS_C/Library/SMSVideoBG" "$SMS_C/Library/SMSVideoBG"/* 2>/dev/null
-  chown mobile:mobile "$SMS_C/Library/SMSVideoBG" "$SMS_C/Library/SMSVideoBG"/* 2>/dev/null
+  # v10.4.0: 只建素材根本身, 不再建 main/all/... 子目录
+  mkdir -p "$SMS_C/Library/SMSVideoBG" 2>/dev/null
+  chmod 777 "$SMS_C/Library/SMSVideoBG" 2>/dev/null
+  chown mobile:mobile "$SMS_C/Library/SMSVideoBG" 2>/dev/null
 
   # 2.1 统一素材路径 -> 软链到信息App 容器里的真实素材根
   #     只处理「不存在 / 已是软链」; 若用户早已在那里建了真目录(里面可能有素材),
@@ -95,7 +85,7 @@ if [ -f "$LOG" ] && [ "$(stat -c%s "$LOG" 2>/dev/null || echo 0)" -gt 65536 ]; t
   mv -f "$LOG" "$LOG.1" 2>/dev/null
 fi
 {
-  echo "=== postinst $(date) v10.3.0"
+  echo "=== postinst $(date) v10.4.0"
   echo "jbroot: $(readlink -f /var/jb 2>/dev/null)"
   D=/var/jb/Library/MobileSubstrate/DynamicLibraries
   [ -f "$D/SMSVideoBG.dylib" ] && echo "dylib: OK $(stat -c%s "$D/SMSVideoBG.dylib" 2>/dev/null) bytes" || echo "dylib: MISSING"

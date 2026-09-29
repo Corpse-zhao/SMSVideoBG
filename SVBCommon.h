@@ -22,16 +22,18 @@
 //   同时保留 jbroot / Documents 等共享根作为兜底, 用户放哪都能被扫到。
 // ============================================================
 
-#define SVB_VERSION @"10.3.0"
+#define SVB_VERSION @"10.4.0"
 #define SVB_SUITE @"com.nvb.smsvideobg"
 #define SVB_DARWIN_NOTE "com.nvb.smsvideobg/prefs.changed"
 #define SVB_MEDIA_DIR_NAME @"SMSVideoBG"
 
 // ------------------------------------------------------------
-// 统一素材路径 (v10.3.0)
-//   用户只认这一个文件夹: /var/mobile/信息视频背景素材/板栗仁/<界面>/
+// 统一素材路径 (v10.4.0)
+//   用户只认这一个文件夹: /var/mobile/信息视频背景素材/板栗仁/
+//   v10.4.0 起不再分界面子目录 —— 所有界面 (主页面/所有信息/对话详情…)
+//   共用这一个文件夹里的同一批视频, 每个界面单独记住自己选了哪个文件和效果。
 //   它是「软链」—— 真实文件仍然躺在信息App 数据容器里
-//   (<信息App容器>/Library/SMSVideoBG/<界面>/), 因为沙盒宿主进程只能读容器,
+//   (<信息App容器>/Library/SMSVideoBG/), 因为沙盒宿主进程只能读容器,
 //   读不到 /var/mobile 下的普通目录。软链让 Filza 里看到的路径就是这一条,
 //   两边指向同一份物理文件, 放哪都生效 (改的都是同一批文件)。
 // ------------------------------------------------------------
@@ -49,7 +51,8 @@ NSString *SVBJBMediaDirectory(void);
 // ---- 统一素材路径 (v10.3.0): 用户只看/只用这一条 ----
 // /var/mobile/信息视频背景素材/板栗仁  (软链 -> 信息App 容器内的真实素材根)
 NSString *SVBMediaFriendlyRoot(void);
-// /var/mobile/信息视频背景素材/板栗仁/<界面>/
+// 统一素材路径 (v10.4.0 起不分界面, 恒返回 SVBMediaFriendlyRoot();
+// ctx 参数保留只为兼容旧调用点)
 NSString *SVBMediaFriendlyPathForContext(NSString *ctx);
 // 建好统一素材路径 (父目录 + 软链) 并保证指向真实素材根。
 // 若该路径已存在一个**真目录**(用户早就往那儿放过素材), 会先把里面的视频
@@ -59,6 +62,13 @@ BOOL SVBEnsureFriendlyMediaPath(NSString **detail);
 // 在 Filza 中打开某个路径 (没装 Filza 时退回复制路径到剪贴板)。
 // message 回传提示文案。必须在主线程调用。
 BOOL SVBOpenPathInFilza(NSString *path, NSString **message);
+
+// v10.4.0 运维文件治理 (插件 %ctor 与控制App 启动时各跑一次):
+//   ① 旧名杂项 (_config.plist/_tweak_alive/_tweak.log/_app_probe) 改名到点前缀
+//      新名或删除 —— Filza 里素材文件夹只剩视频, 不再有一堆下划线文件;
+//   ② 诊断日志/探针超过 3 天自动删除 (「诊断报告不要一直保留」);
+//   ③ 旧版按界面分的子目录摊平: 视频上移到素材根, 空目录删除。
+void SVBCleanupHousekeeping(void);
 
 // 全部候选素材根, 顺序 = 优先级 (v1.3: 容器根在前)
 NSArray<NSString *> *SVBRootCandidates(void);

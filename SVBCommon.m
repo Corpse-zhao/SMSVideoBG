@@ -16,12 +16,12 @@
 //     1) /var/jb/Library/SMSVideoBG              <- jbroot, 越狱进程可达
 //     2) /var/mobile/Documents/SMSVideoBG        <- Filza 常用目录
 //     3) <本进程家目录>/Documents/SMSVideoBG
-//   每个根下: all/ known/ unknown/ unread/ junk/ deleted/ chat/
-//   控制App 侧会主动定位信息App 的数据容器, 导入时把素材「多根齐写」;
-//   扫描时全部根聚合去重, 用户放哪都能被找到。
+//   v10.4.0: 不再分界面子目录 —— 所有界面共用素材根里的同一批视频,
+//   每个界面单独记住自己选了哪一个文件/什么效果。旧版子目录里的素材
+//   会在启动时自动摊平到根目录, 空目录随后删除。
 //
-// 配置模型: NSUserDefaults(suite) + 每个根下 _config.plist 双写。
-//   信息App 进程若读不到 prefs, 仍可从 _config.plist 读到开关状态。
+// 配置模型: NSUserDefaults(suite) + 每个根下 .svb_config.plist 双写。
+//   信息App 进程若读不到 prefs, 仍可从 .svb_config.plist 读到开关状态。
 //   配置里同时带上 config_version, 便于诊断「插件读到的开关是否最新」。
 // ============================================================
 
@@ -34,9 +34,18 @@ NSString * const SVBContextJunk     = @"junk";
 NSString * const SVBContextDeleted  = @"deleted";
 NSString * const SVBContextChat     = @"chat";
 
-static NSString * const SVBConfigFileName  = @"_config.plist";
-static NSString * const SVBAliveFileName   = @"_tweak_alive";
-static NSString * const SVBLogFileName     = @"_tweak.log";
+// v10.4.0: 运维文件全部改成点前缀 —— Filza 默认不显示, 素材文件夹里只剩视频。
+// 旧名字 (_config.plist 等) 保留为「迁移源」: 启动时自动改名为新名字。
+static NSString * const SVBConfigFileName    = @".svb_config.plist";
+static NSString * const SVBConfigFileNameOld = @"_config.plist";
+static NSString * const SVBAliveFileName     = @".svb_alive";
+static NSString * const SVBAliveFileNameOld  = @"_tweak_alive";
+static NSString * const SVBLogFileName       = @".svb_tweak.log";
+static NSString * const SVBLogFileNameOld    = @"_tweak.log";
+static NSString * const SVBProbeFileName     = @".svb_probe";
+static NSString * const SVBProbeFileNameOld  = @"_app_probe";
+// 诊断日志最长保留天数 (超过自动删除 —— 用户要求「诊断报告不要一直保留」)
+static const NSTimeInterval SVBLogMaxAgeDays = 3.0;
 
 // ---- v9.9.11 前后台自愈 / 切后台自动清理 的共享状态 ----
 static volatile BOOL sSVBInBackground = NO;       // 宿主当前是否在后台
@@ -169,15 +178,95 @@ NSArray<NSString *> *SVBRootCandidates(void) {
     return sSVBRoots;
 }
 
+// ---- v10.4.0 运维文件治理 (在插件 %ctor 与控制App 启动时各跑一次) ----
+//   ① 旧名字文件 (_config.plist/_tweak_alive/_tweak.log/_app_probe) 改名/清理,
+//      让 Filza 里不再出现这些下划线开头的杂项;
+//   ② 诊断日志超过 3 天自动删除 (用户要求「诊断报告不要一直保留」);
+//   ③ 旧版按界面分的子目录 (main/all/known/...) 摊平: 视频移到素材根,
+//      空目录删除 —— 所有界面共用一个文件夹。
+static BOOL SVBCleanupIsMovie(NSString *f) {
+    if ([f hasPrefix:@"."] || [f hasPrefix:@"_"]) return NO;
+    return [@[@"mp4", @"mov", @"m4v", @"3gp", @"mkv", @"webm"]
+            containsObject:f.pathExtension.lowercaseString];
+}
+
+void SVBCleanupHousekeeping(void) {
+    @try {
+        NSFileManager *fm = [NSFileManager defaultManager];
+        NSDate *now = [NSDate date];
+        for (NSString *root in SVBRootCandidates()) {
+            if (![fm fileExistsAtPath:root]) continue;
+
+            // ① 配置: 旧名 -> 新名 (新名已在则旧名直接删, 它必然是旧版本写的过期副本)
+            NSString *cfgNew = [root stringByAppendingPathComponent:SVBConfigFileName];
+            NSString *cfgOld = [root stringByAppendingPathComponent:SVBConfigFileNameOld];
+            if ([fm fileExistsAtPath:cfgOld]) {
+                if (![fm fileExistsAtPath:cfgNew])
+                    [fm moveItemAtPath:cfgOld toPath:cfgNew error:nil];
+                if ([fm fileExistsAtPath:cfgOld]) [fm removeItemAtPath:cfgOld error:nil];
+            }
+            // ① 其余旧名杂项: 心跳/日志/探针在新机制下都会重建, 旧文件直接删
+            for (NSString *old in (@[[root stringByAppendingPathComponent:SVBAliveFileNameOld],
+                                     [root stringByAppendingPathComponent:SVBLogFileNameOld],
+                                     [root stringByAppendingPathComponent:SVBProbeFileNameOld]]))
+                if ([fm fileExistsAtPath:old]) [fm removeItemAtPath:old error:nil];
+
+            // ② 过期诊断文件删除 (日志/探针; 心跳会持续刷新, 不按龄删)
+            for (NSString *p in (@[[root stringByAppendingPathComponent:SVBLogFileName],
+                                   [root stringByAppendingPathComponent:SVBProbeFileName]])) {
+                NSDictionary *at = [fm attributesOfItemAtPath:p error:nil];
+                NSDate *mt = at[NSFileModificationDate];
+                if (mt && [-mt timeIntervalSinceDate:now] > SVBLogMaxAgeDays * 86400.0)
+                    [fm removeItemAtPath:p error:nil];
+            }
+
+            // ③ 摊平界面子目录: 里面的视频上移到素材根, 空目录删除
+            for (NSArray<NSString *> *def in SVBContextDefinitions()) {
+                NSString *sub = [root stringByAppendingPathComponent:def[0]];
+                if (![fm fileExistsAtPath:sub]) continue;
+                NSDictionary *at = [fm attributesOfItemAtPath:sub error:nil];
+                if (![at[NSFileType] isEqualToString:NSFileTypeDirectory]) continue;
+                for (NSString *f in [fm contentsOfDirectoryAtPath:sub error:nil]) {
+                    if (!SVBCleanupIsMovie(f)) continue;
+                    NSString *src = [sub stringByAppendingPathComponent:f];
+                    NSString *dst = [root stringByAppendingPathComponent:f];
+                    if ([fm fileExistsAtPath:dst]) {
+                        // 根目录已有同名: 保留已有的, 这份换个名字 (不丢用户文件)
+                        NSString *alt = [root stringByAppendingPathComponent:
+                            [NSString stringWithFormat:@"%@_子目录.%@",
+                                f.stringByDeletingPathExtension, f.pathExtension]];
+                        [fm moveItemAtPath:src toPath:alt error:nil];
+                    } else {
+                        [fm moveItemAtPath:src toPath:dst error:nil];
+                    }
+                }
+                // 只删空目录: 里面有非视频残留就留着 (绝不误删用户的东西)
+                NSArray *rest = [fm contentsOfDirectoryAtPath:sub error:nil];
+                if (rest.count == 0) [fm removeItemAtPath:sub error:nil];
+            }
+        }
+
+        // ② 共享日志 (Documents/Library) 超龄也删
+        for (NSString *p in (@[@"/var/mobile/Documents/smsvideobg_debug.log",
+                               @"/var/mobile/Library/smsvideobg_debug.log"])) {
+            NSDictionary *at = [fm attributesOfItemAtPath:p error:nil];
+            NSDate *mt = at[NSFileModificationDate];
+            if (mt && [-mt timeIntervalSinceDate:now] > SVBLogMaxAgeDays * 86400.0)
+                [fm removeItemAtPath:p error:nil];
+        }
+    } @catch (NSException *e) {}
+}
+
 #pragma mark - 统一素材路径 (v10.3.0)
 
 NSString *SVBMediaFriendlyRoot(void) {
     return [SVB_MEDIA_FRIENDLY_PARENT stringByAppendingPathComponent:SVB_AUTHOR_NAME];
 }
 
+// v10.4.0: 不再按界面分子目录 —— 所有界面共用这一个文件夹。
+// ctx 参数保留只为兼容旧调用点, 一律返回素材根本身。
 NSString *SVBMediaFriendlyPathForContext(NSString *ctx) {
-    NSString *root = SVBMediaFriendlyRoot();
-    return ctx.length ? [root stringByAppendingPathComponent:ctx] : root;
+    return SVBMediaFriendlyRoot();
 }
 
 // 把「统一路径」做成指向真实素材根的软链。
@@ -194,35 +283,26 @@ static NSInteger SVBAdoptFriendlyDirIfReal(NSString *link, NSString *target) {
                 containsObject:f.pathExtension.lowercaseString];
     };
 
-    // 各界面子目录里的视频 -> 真实根同名子目录
-    for (NSArray<NSString *> *def in SVBContextDefinitions()) {
-        NSString *ctx = def[0];
-        NSString *srcDir = [link stringByAppendingPathComponent:ctx];
-        if (![fm fileExistsAtPath:srcDir]) continue;
-        NSString *dstDir = [target stringByAppendingPathComponent:ctx];
-        for (NSString *f in [fm contentsOfDirectoryAtPath:srcDir error:nil]) {
-            if (!isMovie(f)) continue;
-            NSString *dst = [dstDir stringByAppendingPathComponent:f];
-            if ([fm fileExistsAtPath:dst]) continue;      // 同名保留真实根里已有的
-            if (![fm fileExistsAtPath:dstDir])
-                [fm createDirectoryAtPath:dstDir withIntermediateDirectories:YES attributes:nil error:nil];
-            if ([fm copyItemAtPath:[srcDir stringByAppendingPathComponent:f] toPath:dst error:nil]) copied++;
+    // v10.4.0: 不分界面 —— 子目录里和根目录散落的视频全部搬进真实根「根部」
+    NSArray<NSString *> *scanDirs = @[];
+    {
+        NSMutableArray<NSString *> *dirs = [NSMutableArray array];
+        for (NSArray<NSString *> *def in SVBContextDefinitions()) {
+            NSString *d = [link stringByAppendingPathComponent:def[0]];
+            if ([fm fileExistsAtPath:d]) [dirs addObject:d];
         }
+        [dirs addObject:link];   // 根目录散落文件最后扫 (含子目录搬上来的不在内)
+        scanDirs = dirs;
     }
-    // 直接丢在根目录里的视频 -> 真实根根部 (插件对"根目录里的文件"有兜底识别)
-    for (NSString *f in [fm contentsOfDirectoryAtPath:link error:nil]) {
-        if (!isMovie(f)) continue;
-        NSDictionary *attr = [fm attributesOfItemAtPath:[link stringByAppendingPathComponent:f] error:nil];
-        if (![attr[NSFileType] isEqualToString:NSFileTypeRegular]) continue;
-        NSString *dst = [target stringByAppendingPathComponent:f];
-        if ([fm fileExistsAtPath:dst]) continue;
-        if ([fm copyItemAtPath:[link stringByAppendingPathComponent:f] toPath:dst error:nil]) copied++;
-    }
-    // 顺手把界面子目录也补齐, 让 Filza 里进来就能看到结构
-    for (NSArray<NSString *> *def in SVBContextDefinitions()) {
-        NSString *d = [target stringByAppendingPathComponent:def[0]];
-        if (![fm fileExistsAtPath:d])
-            [fm createDirectoryAtPath:d withIntermediateDirectories:YES attributes:nil error:nil];
+    for (NSString *dir in scanDirs) {
+        for (NSString *f in [fm contentsOfDirectoryAtPath:dir error:nil]) {
+            if (!isMovie(f)) continue;
+            NSDictionary *attr = [fm attributesOfItemAtPath:[dir stringByAppendingPathComponent:f] error:nil];
+            if (![attr[NSFileType] isEqualToString:NSFileTypeRegular]) continue;
+            NSString *dst = [target stringByAppendingPathComponent:f];
+            if ([fm fileExistsAtPath:dst]) continue;      // 同名保留真实根里已有的
+            if ([fm copyItemAtPath:[dir stringByAppendingPathComponent:f] toPath:dst error:nil]) copied++;
+        }
     }
     return copied;
 }
@@ -248,7 +328,7 @@ BOOL SVBEnsureFriendlyMediaPath(NSString **detail) {
             msg = @"定位不到信息App 数据容器（先打开一次「信息」App，再回到这里点一次）";
             return NO;
         }
-        [[SVBManager shared] contextDirectory:SVBContextAll];   // 至少保证 all/ 存在
+        [[SVBManager shared] contextDirectory:SVBContextAll];   // 顺便保证素材根存在 (v10.4.0 起不再有 all/ 子目录)
 
         if (![fm fileExistsAtPath:parent]) {
             [fm createDirectoryAtPath:parent withIntermediateDirectories:YES attributes:nil error:nil];
@@ -356,7 +436,7 @@ static BOOL SVBDirWritable(NSString *dir) {
             [fm createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
         }
         if (![fm fileExistsAtPath:dir]) return NO;
-        NSString *probe = [dir stringByAppendingPathComponent:@".svb_probe"];
+        NSString *probe = [dir stringByAppendingPathComponent:SVBProbeFileName];
         BOOL ok = [@"ok" writeToFile:probe atomically:YES encoding:NSUTF8StringEncoding error:nil];
         if (ok) [fm removeItemAtPath:probe error:nil];
         return ok;
@@ -479,13 +559,21 @@ BOOL SVBDirWritablePath(NSString *dir) {
     return a;
 }
 
+// 读取用: 新名字 + 旧名字 (_config.plist, v10.3 及更早写的) 都认
+- (NSArray<NSString *> *)configReadPaths {
+    NSMutableArray *a = [[self configPaths] mutableCopy];
+    for (NSString *root in SVBRootCandidates())
+        [a addObject:[root stringByAppendingPathComponent:SVBConfigFileNameOld]];
+    return a;
+}
+
 - (NSDictionary *)effectiveConfig {
     NSMutableDictionary *d = [NSMutableDictionary dictionary];
     @try {
         NSDictionary *pd = [[self prefs] dictionaryRepresentation];
         if ([pd isKindOfClass:[NSDictionary class]]) [d addEntriesFromDictionary:pd];
     } @catch (NSException *e) {}
-    for (NSString *path in [self configPaths]) {
+    for (NSString *path in [self configReadPaths]) {
         @try {
             NSDictionary *fd = [NSDictionary dictionaryWithContentsOfFile:path];
             if ([fd isKindOfClass:[NSDictionary class]]) [d addEntriesFromDictionary:fd];
@@ -609,34 +697,46 @@ BOOL SVBDirWritablePath(NSString *dir) {
                           [NSDate date], proc, (int)getpid(), msg];
 
         // 通道 1: prefs suite (控制App 诊断页读这个)
+        //   v10.4.0: 超过 3 天自动清空 —— 诊断日志不一直保留
         @try {
             NSUserDefaults *ud = [[NSUserDefaults alloc] initWithSuiteName:SVB_SUITE];
-            NSString *old = [ud stringForKey:@"svb_debug_log"] ?: @"";
+            NSDate *stamp = [ud objectForKey:@"svb_debug_log_at"];
+            BOOL stale = stamp && [-stamp timeIntervalSinceNow] > SVBLogMaxAgeDays * 86400.0;
+            NSString *old = stale ? @"" : ([ud stringForKey:@"svb_debug_log"] ?: @"");
             NSString *nu = [old stringByAppendingString:line];
             if (nu.length > 12000) nu = [nu substringFromIndex:nu.length - 12000];
             [ud setObject:nu forKey:@"svb_debug_log"];
+            [ud setObject:[NSDate date] forKey:@"svb_debug_log_at"];
             [ud synchronize];
         } @catch (NSException *e) {}
 
-        // 通道 2: 每个素材根各写一份 _tweak.log
-        //   (信息App 容器根必然可写 -> 控制App 也能读到插件在信息App 里写的日志)
+        // 通道 2: 每个素材根各写一份 .svb_tweak.log (点前缀, Filza 默认不显示)
+        //   信息App 容器根必然可写 -> 控制App 也能读到插件在信息App 里写的日志
+        //   v10.4.0: 超过 3 天或 400KB 自动删除
         @try {
             NSFileManager *fm = [NSFileManager defaultManager];
             for (NSString *root in SVBRootCandidates()) {
                 [fm createDirectoryAtPath:root withIntermediateDirectories:YES attributes:nil error:nil];
                 NSString *p = [root stringByAppendingPathComponent:SVBLogFileName];
                 NSDictionary *at = [fm attributesOfItemAtPath:p error:nil];
-                if ([at[NSFileSize] unsignedLongLongValue] > 400000) // 防无限增长
-                    [fm removeItemAtPath:p error:nil];
+                NSDate *mt = at[NSFileModificationDate];
+                BOOL tooBig = [at[NSFileSize] unsignedLongLongValue] > 400000;
+                BOOL tooOld = mt && [-mt timeIntervalSinceNow] > SVBLogMaxAgeDays * 86400.0;
+                if (tooBig || tooOld) [fm removeItemAtPath:p error:nil];
                 FILE *f = fopen(p.UTF8String, "a");
                 if (f) { fputs(line.UTF8String, f); fclose(f); }
             }
         } @catch (NSException *e) {}
 
-        // 通道 3/4: 常见可写目录 (Filza 查看方便)
+        // 通道 3/4: 常见可写目录 (Filza 查看方便) —— 同样超 3 天自动删
         for (NSString *p in (@[@"/var/mobile/Documents/smsvideobg_debug.log",
                                @"/var/mobile/Library/smsvideobg_debug.log"])) {
             @try {
+                NSFileManager *fm = [NSFileManager defaultManager];
+                NSDictionary *at = [fm attributesOfItemAtPath:p error:nil];
+                NSDate *mt = at[NSFileModificationDate];
+                if (mt && [-mt timeIntervalSinceNow] > SVBLogMaxAgeDays * 86400.0)
+                    [fm removeItemAtPath:p error:nil];
                 FILE *f = fopen(p.UTF8String, "a");
                 if (f) { fputs(line.UTF8String, f); fclose(f); }
             } @catch (NSException *e) {}
@@ -795,7 +895,7 @@ BOOL SVBDirWritablePath(NSString *dir) {
                              stringByAppendingPathComponent:SVB_MEDIA_DIR_NAME];
             [r appendFormat:@"素材根: %@\n  exists=%d writable=%d\n", dir,
                 (int)[fm fileExistsAtPath:dir], (int)SVBDirWritable(dir)];
-            NSString *probe = [dir stringByAppendingPathComponent:@"_app_probe"];
+            NSString *probe = [dir stringByAppendingPathComponent:SVBProbeFileName];
             BOOL ok = [@"ok" writeToFile:probe atomically:YES encoding:NSUTF8StringEncoding error:nil];
             [r appendFormat:@"  跨容器写入探针: %@\n", ok ? @"成功 ✓ (素材可直送信息App)" : @"失败 ✗ (权限不足)"];
         }
@@ -840,7 +940,9 @@ BOOL SVBDirWritablePath(NSString *dir) {
 }
 
 - (NSString *)contextDirectory:(NSString *)ctx {
-    NSString *dir = [[self mediaDirectory] stringByAppendingPathComponent:ctx];
+    // v10.4.0: 不再按界面分子目录 —— 所有界面共用素材根这一个文件夹。
+    // ctx 参数保留为兼容旧调用点。旧版子目录会在启动时摊平 (SVBCleanupHousekeeping)。
+    NSString *dir = [self mediaDirectory];
     @try {
         [[NSFileManager defaultManager] createDirectoryAtPath:dir
                                   withIntermediateDirectories:YES attributes:nil error:nil];
@@ -848,13 +950,15 @@ BOOL SVBDirWritablePath(NSString *dir) {
     return dir;
 }
 
-// 某界面的所有候选目录 (fallback=YES 时追加「根目录本身」作为兜底)
+// 某界面的所有候选目录: 素材根本体 + (兼容) 旧版按界面分的子目录 ——
+// 子目录只读, 摊平完成后即不再存在; 不在这里创建任何子目录。
 - (NSArray<NSString *> *)directoriesForContext:(NSString *)ctx includeRootFallback:(BOOL)fallback {
     NSMutableArray *out_ = [NSMutableArray array];
-    for (NSString *root in [self mediaRoots])          // 专属文件夹优先
-        [out_ addObject:[root stringByAppendingPathComponent:ctx]];
-    if (fallback)
-        for (NSString *root in [self mediaRoots]) [out_ addObject:root];
+    for (NSString *root in [self mediaRoots]) {
+        [out_ addObject:root];
+        NSString *sub = [root stringByAppendingPathComponent:ctx];
+        if ([[NSFileManager defaultManager] fileExistsAtPath:sub]) [out_ addObject:sub];
+    }
     return out_;
 }
 
@@ -888,12 +992,14 @@ BOOL SVBDirWritablePath(NSString *dir) {
 // 列出某界面素材: 聚合所有根的专属文件夹; 全空时回退到各根目录根部的文件
 - (NSArray<NSString *> *)videosForContext:(NSString *)ctx {
     @try {
+        // v10.4.0: 单一文件夹 —— 直接扫素材根 (旧版子目录若还没摊平也一并算数)
         NSMutableArray *names = [NSMutableArray array];
-        for (NSString *root in [self mediaRoots])
-            [names addObjectsFromArray:[self listFilesInDir:[root stringByAppendingPathComponent:ctx]]];
-        if (!names.count)
-            for (NSString *root in [self mediaRoots])
-                [names addObjectsFromArray:[self listFilesInDir:root]];
+        for (NSString *root in [self mediaRoots]) {
+            [names addObjectsFromArray:[self listFilesInDir:root]];
+            NSString *sub = [root stringByAppendingPathComponent:ctx];
+            if ([[NSFileManager defaultManager] fileExistsAtPath:sub])
+                [names addObjectsFromArray:[self listFilesInDir:sub]];
+        }
 
         NSMutableArray *uniq = [NSMutableArray array];
         for (NSString *n in names)
@@ -925,17 +1031,14 @@ BOOL SVBDirWritablePath(NSString *dir) {
         NSInteger copied = 0;
         for (NSString *root in srcRoots) {
             if ([root isEqualToString:primary]) continue;
+            // v10.4.0: 全部进主根「根部」—— 不再保留按界面的子目录结构
             for (NSArray<NSString *> *def in SVBContextDefinitions()) {
                 NSString *srcDir = [root stringByAppendingPathComponent:def[0]];
-                NSString *dstDir = [primary stringByAppendingPathComponent:def[0]];
                 if (![fm fileExistsAtPath:srcDir]) continue;
                 for (NSString *f in [self listFilesInDir:srcDir]) {
                     if (![self isMovieFile:f]) continue;
-                    NSString *dst = [dstDir stringByAppendingPathComponent:f];
+                    NSString *dst = [primary stringByAppendingPathComponent:f];
                     if ([fm fileExistsAtPath:dst]) continue;
-                    if (![fm fileExistsAtPath:dstDir])
-                        [fm createDirectoryAtPath:dstDir
-                          withIntermediateDirectories:YES attributes:nil error:nil];
                     NSError *err = nil;
                     if ([fm copyItemAtPath:[srcDir stringByAppendingPathComponent:f]
                                     toPath:dst error:&err]) {
@@ -944,6 +1047,16 @@ BOOL SVBDirWritablePath(NSString *dir) {
                     } else if (err) {
                         [self log:@"迁移失败 %@: %@", f, err.localizedDescription];
                     }
+                }
+            }
+            // 旧根根目录里散落的视频也搬
+            for (NSString *f in [self listFilesInDir:root]) {
+                if (![self isMovieFile:f]) continue;
+                NSString *dst = [primary stringByAppendingPathComponent:f];
+                if ([fm fileExistsAtPath:dst]) continue;
+                if ([fm copyItemAtPath:[root stringByAppendingPathComponent:f] toPath:dst error:nil]) {
+                    copied++;
+                    [self log:@"迁移素材 -> 主根: %@", dst];
                 }
             }
         }

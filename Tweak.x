@@ -707,6 +707,8 @@ static char SVBDetectedCtxKey;
                 // 自愈迁移: 把 jbroot 等其它可读根里的旧素材搬进主根 (信息App 容器)
                 dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
                     [[SVBManager shared] migrateMediaIntoPrimaryRoot];
+                    // v10.4.0: 旧名杂项改名/过期诊断日志删除/界面子目录摊平
+                    SVBCleanupHousekeeping();
                 });
 
                 CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(),
