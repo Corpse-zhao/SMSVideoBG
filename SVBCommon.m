@@ -207,8 +207,9 @@ static NSArray<NSString *> *SVBLegacyRoots(void) {
 // jbroot 不再作为日常读取根 (沙盒宿主读不到), 只当"定位不到容器"时的应急落点。
 // v11.0.0: 双宿主素材根 ——
 //   控制App 进程: [信息App 容器根, 备忘录App 容器根] 两个都进候选 (读=聚合, 写=齐写)
-//   信息App 进程: 自身容器 (MobileSMS)
-//   备忘录进程:   自身容器 (MobileNotes) —— v10.4 的「探针」进程从此成为正式宿主
+//   v11.0.2: 宿主进程 = 自身容器根 + 另一个宿主的容器根 (越权环境互读)。
+//   此前备忘录进程只有自己容器一根, 素材全在信息容器里 -> 备忘录「素材=0 全不生效」
+//   (真机实锤), 且完全依赖控制 App 的跨容器同步跑没跑过。现在直接聚合读双容器。
 NSArray<NSString *> *SVBRootCandidates(void) {
     if (sSVBRoots) return sSVBRoots;
     NSMutableArray<NSString *> *a = [NSMutableArray array];
@@ -224,11 +225,22 @@ NSArray<NSString *> *SVBRootCandidates(void) {
         if (nc.length) {
             NSString *nroot = [[nc stringByAppendingPathComponent:@"Library"]
                                 stringByAppendingPathComponent:SVB_MEDIA_DIR_NAME];
-            if (![nroot isEqualToString:primary]) [a addObject:nroot];
+            if (![nroot isEqualToString:primary] && ![a containsObject:nroot]) [a addObject:nroot];
         }
     } else {
         primary = SVBAppContainerMediaDirectory();
         if (primary.length) [a addObject:primary];
+        // v11.0.2: 另一个宿主的数据容器 (备忘录进程->信息容器, 信息进程->备忘录容器)
+        NSString *otherBid = SVBIsNotesHostProcess() ? SVB_SMS_BUNDLE_ID : SVB_NOTES_BUNDLE_ID;
+        if (![SVBHostBundleIdentifier() isEqualToString:SVB_APP_BUNDLE_ID]) {
+            NSString *oc = SVBFindAppDataContainer(otherBid);
+            if (oc.length) {
+                NSString *oroot = [[oc stringByAppendingPathComponent:@"Library"]
+                                    stringByAppendingPathComponent:SVB_MEDIA_DIR_NAME];
+                if (![oroot isEqualToString:primary] && ![a containsObject:oroot])
+                    [a addObject:oroot];
+            }
+        }
     }
     if (!a.count) [a addObject:SVBJBMediaDirectory()];   // 应急兜底(仅定位不到容器时)
 
@@ -950,14 +962,19 @@ BOOL SVBDirWritablePath(NSString *dir) {
     NSMutableString *s = [NSMutableString string];
     NSFileManager *fm = [NSFileManager defaultManager];
     NSInteger idx = 0;
+    // v11.0.2: 统计口径修正 —— v10.4 起素材全部摊平在素材根目录下 (不再分界面
+    // 子目录), 此前按「根/ctx」子目录数文件恒等于 0 (真机实锤: 有素材也显示素材=0)。
+    // 现在统计根目录下的视频文件数。
     for (NSString *root in SVBRootCandidates()) {
         idx++;
         BOOL ex = [fm fileExistsAtPath:root];
-        NSArray *items = ex ? [fm contentsOfDirectoryAtPath:[root stringByAppendingPathComponent:ctx ?: SVBContextAll]
-                                                      error:nil] : nil;
+        NSArray *items = ex ? [fm contentsOfDirectoryAtPath:root error:nil] : nil;
         NSUInteger n = 0;
-        for (NSString *f in items) if (![f hasPrefix:@"."] && ![f hasPrefix:@"_"]) n++;
-        [s appendFormat:@"根%ld %@ 在=%@ 可读=%@ 素材=%lu\n", (long)idx,
+        for (NSString *f in items) {
+            if ([f hasPrefix:@"."] || [f hasPrefix:@"_"]) continue;
+            if ([self isMovieFile:f]) n++;
+        }
+        [s appendFormat:@"根%ld %@ 在=%@ 可读=%@ 视频=%lu\n", (long)idx,
             SVBRootLabel(root), ex ? @"是" : @"否",
             [fm isReadableFileAtPath:root] ? @"是" : @"否", (unsigned long)n];
     }
@@ -967,6 +984,16 @@ BOOL SVBDirWritablePath(NSString *dir) {
 - (BOOL)debugBannerEnabled {
     id v = [self configValueForKey:@"debug_banner"];
     return v ? [v boolValue] : YES; // 默认显示, 方便确认注入是否成功
+}
+
+// v11.0.2: 语境键 -> 中文界面名 (横幅显示用)。信息/备忘录两张定义表都查。
+NSString *SVBContextDisplayName(NSString *ctx) {
+    if (!ctx.length) return ctx;
+    for (NSArray<NSString *> *def in SVBContextDefinitions())
+        if ([def[0] isEqualToString:ctx]) return def[1];
+    for (NSArray<NSString *> *def in SVBNotesContextDefinitions())
+        if ([def[0] isEqualToString:ctx]) return def[1];
+    return ctx;
 }
 
 // 注入横幅文案: 一眼看清「插件有没有进信息App」+「素材到底读没读到」
@@ -1000,7 +1027,7 @@ BOOL SVBDirWritablePath(NSString *dir) {
     BOOL on = master && [self isEnabledForContext:ctx ?: SVBContextAll];
     BOOL has = [self activeVideoPathForContext:ctx ?: SVBContextAll].length > 0;
     [s appendFormat:@"界面[%@] 开关=%@ 素材=%@ 生效=%@\n",
-        ctx ?: SVBContextAll, on ? @"开" : @"关", has ? @"有" : @"无",
+        SVBContextDisplayName(ctx ?: SVBContextAll), on ? @"开" : @"关", has ? @"有" : @"无",
         (on && has) ? @"是✓" : @"否✗"];
     [s appendString:@"（点本横幅可隐藏；控制App 里可关闭）"];
     return s;
@@ -2298,6 +2325,16 @@ static BOOL sSVBSweepCheckResult = NO;
 
 - (void)pauseAllPlayers {
     for (NSString *k in self.players.allKeys) {
+        @try { [self.players[k] pause]; } @catch (NSException *e) {}
+    }
+}
+
+// v11.0.2: 暂停除指定语境外的全部播放器 (备忘录防串音专用)。
+// 备忘录一次只见一个页面, 进入新页时把其它语境的视频声音全停掉 ——
+// 回到原页面时 apply -> configure -> play 自动恢复。信息侧不接 (行为保持)。
+- (void)pauseAllPlayersExcept:(NSString *)ctx {
+    for (NSString *k in self.players.allKeys) {
+        if ([k isEqualToString:ctx]) continue;
         @try { [self.players[k] pause]; } @catch (NSException *e) {}
     }
 }

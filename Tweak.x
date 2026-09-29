@@ -207,8 +207,12 @@ static NSString *SVBDetectListContext(UIViewController *vc, NSString *fallback) 
 }
 
 // 横幅刷新 (注入探针进程也能用, 内容会标明是哪个 App)
+// v11.0.2: 记录最近一次刷新的语境 —— %ctor 的横幅重试 timer 用它显示,
+// 不再硬编码 all (用户实锤: 每个页面横幅都显示 界面[all], 真实语境被覆盖)
+static NSString *sSVBLastBannerCtx = nil;
 static void SVBRefreshBanner(NSString *ctx) {
     @try {
+        if (ctx.length) sSVBLastBannerCtx = ctx;
         // v1.9.0: 未授权提示不受「诊断横幅」开关影响, 必须让用户看到原因
         if (!SVBIsLicensed()) SVBShowDebugBannerForce([[SVBManager shared] bannerTextForContext:ctx]);
         else                 SVBShowDebugBanner([[SVBManager shared] bannerTextForContext:ctx]);
@@ -384,6 +388,10 @@ static void SVBScheduleMainPageCheck(UIViewController *vc) {
 // 白卡样式, 系统铺白发生在我们挂背景之后 (或滚动复用时), 没有补扫就是白底。
 static void SVBApplyNotesPage(UIViewController *vc, NSString *ctx) {
     [[SVBManager shared] applyToViewController:vc context:ctx];
+    // v11.0.2: 防串音 —— 备忘录一次只见一个页面, 进入本页时停掉其它语境的
+    // 视频声音 (用户实锤: 搜索页还能听到列表页的声音)。回原页面时
+    // apply -> configure -> play 自动恢复, 无需记录。
+    [[SVBManager shared] pauseAllPlayersExcept:ctx];
     SVBRefreshBanner(ctx);
     SVBClearContainerBGs(vc.view, 0);
     __weak UIViewController *wvc = vc;
@@ -1130,6 +1138,10 @@ static char SVBDetectedCtxKey;
                     [[SVBManager shared] migrateMediaIntoPrimaryRoot];
                     // v10.4.0: 旧名杂项改名/过期诊断日志删除/界面子目录摊平
                     SVBCleanupHousekeeping();
+                    // v11.0.2: 宿主进程也跑跨容器同步 (v11.0.2 起宿主候选根=双容器)
+                    // —— 备忘录容器素材意外丢失时自动从信息容器补回,
+                    // 不再依赖「用户开过控制 App」这一步
+                    SVBSyncMediaAcrossRoots();
                 });
 
                 CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(),
@@ -1170,7 +1182,11 @@ static char SVBDetectedCtxKey;
                     dispatch_source_set_event_handler(timer, ^{
                         tries++;
                         @try {
-                            SVBRefreshBanner(SVBContextAll);
+                            // v11.0.2: 显示最近一次 apply 的语境 (备忘录初始=列表页,
+                            // 信息=所有信息), 不再硬编码 all
+                            NSString *initCtx = sSVBLastBannerCtx
+                                ?: (SVBIsNotesProcess() ? SVBContextNList : SVBContextAll);
+                            SVBRefreshBanner(initCtx);
                         } @catch (NSException *e) {}
                         if (tries >= 10) dispatch_source_cancel(timer);
                     });
