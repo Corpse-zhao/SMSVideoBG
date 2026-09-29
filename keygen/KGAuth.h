@@ -39,3 +39,13 @@ NSString *KGDateTextForDayIndex(uint32_t idx);
 NSData *KGAuthBuildJSON(NSString *secret, NSInteger ts, NSDictionary<NSString *, NSNumber *> *devices);
 // 解析并验签; 通过返回 {H32: @(dayIndex)}, 否则 nil
 NSDictionary<NSString *, NSNumber *> *KGAuthParseJSON(NSData *json, NSString *secret);
+
+// ---- 离线授权串 (v2.1.0) ----
+// 给"客户端完全连不上网"的场景用: 生成一段文本发给客户, 客户在控制 App 粘贴导入即授权。
+//   串 = "SVBOFFLINE1:" + base64(JSON{"h":H32,"e":到期dayIndex,"t":ts,"s":sig})
+//   签名原文 = "SVBGOFFLINE/v1|<H32>|<e>|<t>", HMAC-SHA256(secret, 原文) 全 32 字节小写 hex
+//   插件端导入时会: ① 校验 H32 == 本机(一串只对一台设备有效); ② 验签;
+//                  ③ 把有效期截断到 30 天内(离线授权最长 30 天, 防断网永久白嫖)。
+NSString *KGAuthBuildOfflineTicket(NSString *secret, NSString *udid, uint32_t dayIndex);
+// 展示用: 过长时截断成 "头…尾"
+NSString *KGAuthShortTicket(NSString *ticket);

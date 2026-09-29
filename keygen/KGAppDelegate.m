@@ -161,6 +161,12 @@ static UITextField *KGField(NSString *placeholder, CGFloat fontSize, BOOL digits
 @property (nonatomic, strong) UITextField *branchField;
 @property (nonatomic, strong) UILabel *syncStatus;
 
+// v2.1.0: Gitee(码云) —— 国内直连, 客户手机不挂代理也能拉到名单
+@property (nonatomic, strong) UITextField *giteeTokenField;
+@property (nonatomic, strong) UITextField *giteeRepoField;
+@property (nonatomic, strong) UITextField *giteeBranchField;
+@property (nonatomic, strong) UILabel *giteeStatus;
+
 @property (nonatomic, strong) NSMutableArray<NSDictionary *> *devices;   // 本机名单
 @property (nonatomic, strong) NSDictionary<NSString *, NSNumber *> *remoteMap;  // 远端名单键
 @property (nonatomic, assign) NSTimeInterval lastSync;
@@ -199,6 +205,7 @@ static UITextField *KGField(NSString *placeholder, CGFloat fontSize, BOOL digits
     [root addArrangedSubview:[self heroCard]];
     [root addArrangedSubview:[self issueCard]];
     [root addArrangedSubview:[self listCard]];
+    [root addArrangedSubview:[self giteeCard]];
     [root addArrangedSubview:[self syncCard]];
     [root addArrangedSubview:[self secretCard]];
     [root addArrangedSubview:[self footerLabel]];
@@ -371,6 +378,68 @@ static UITextField *KGField(NSString *placeholder, CGFloat fontSize, BOOL digits
     return card;
 }
 
+- (UIView *)giteeCard {
+    UIStackView *stack;
+    UIView *card = KGCard(@"Gitee 同步（国内直连 · 客户不用挂代理）", &stack);
+
+    [stack addArrangedSubview:KGLabel(
+        @"Gitee 是国内站点，客户手机直连就能拉到名单。建议和 GitHub 同时开，"
+        @"两边名单内容完全一样（只有指纹，没有 UDID 原文）。",
+        12.5, UIFontWeightRegular, [UIColor tertiaryLabelColor])];
+
+    _giteeTokenField = KGField(@"Gitee 私人令牌（设置→私人令牌，勾 projects）", 12.5, NO);
+    _giteeTokenField.text = [KGAuthClient giteeToken];
+    _giteeTokenField.autocapitalizationType = UITextAutocapitalizationTypeNone;
+    _giteeTokenField.delegate = self;
+    [_giteeTokenField.heightAnchor constraintEqualToConstant:42].active = YES;
+    [stack addArrangedSubview:_giteeTokenField];
+
+    _giteeRepoField = KGField(@"Gitee 仓库 owner/name（需公开）", 12.5, NO);
+    _giteeRepoField.text = [KGAuthClient giteeRepo];
+    _giteeRepoField.autocapitalizationType = UITextAutocapitalizationTypeNone;
+    _giteeRepoField.delegate = self;
+    [_giteeRepoField.heightAnchor constraintEqualToConstant:42].active = YES;
+    [stack addArrangedSubview:_giteeRepoField];
+
+    _giteeBranchField = KGField(@"分支（默认 master）", 12.5, NO);
+    _giteeBranchField.text = [KGAuthClient giteeBranch];
+    _giteeBranchField.autocapitalizationType = UITextAutocapitalizationTypeNone;
+    _giteeBranchField.delegate = self;
+    [_giteeBranchField.heightAnchor constraintEqualToConstant:42].active = YES;
+    [stack addArrangedSubview:_giteeBranchField];
+
+    UIButton *save = KGButton(@"保存 Gitee 设置", [UIColor tertiarySystemFillColor], [UIColor labelColor], 42);
+    [save addTarget:self action:@selector(saveGiteeSettings) forControlEvents:UIControlEventTouchUpInside];
+    [stack addArrangedSubview:save];
+
+    _giteeStatus = KGLabel(@"", 12.5, UIFontWeightMedium, [UIColor secondaryLabelColor]);
+    _giteeStatus.numberOfLines = 0;
+    [stack addArrangedSubview:_giteeStatus];
+    [self refreshGiteeStatus];
+    return card;
+}
+
+- (void)refreshGiteeStatus {
+    if (![KGAuthClient giteeConfigured]) {
+        _giteeStatus.text = @"未启用（客户侧可先用「离线授权串」，或改用自定义源地址）";
+        _giteeStatus.textColor = [UIColor secondaryLabelColor];
+        return;
+    }
+    _giteeStatus.text = [NSString stringWithFormat:@"客户在控制 App 里长按「授权诊断」行填入：\n%@",
+                         [KGAuthClient giteeRawURL] ?: @""];
+    _giteeStatus.textColor = [UIColor systemGreenColor];
+}
+
+- (void)saveGiteeSettings {
+    [self dismissKeyboard];
+    [KGAuthClient setGiteeToken:_giteeTokenField.text];
+    [KGAuthClient setGiteeRepo:_giteeRepoField.text];
+    [KGAuthClient setGiteeBranch:_giteeBranchField.text];
+    _giteeBranchField.text = [KGAuthClient giteeBranch];
+    [self refreshGiteeStatus];
+    if ([KGAuthClient giteeConfigured]) [self pushTapped];   // 顺手同步一次
+}
+
 - (UIView *)secretCard {
     UIStackView *stack;
     UIView *card = KGCard(@"签名密钥", &stack);
@@ -391,7 +460,7 @@ static UITextField *KGField(NSString *placeholder, CGFloat fontSize, BOOL digits
 }
 
 - (UIView *)footerLabel {
-    return KGLabel(@"SMSVideoBG v10 · 授权机制 = UDID 白名单（远端名单 + HMAC 签名）",
+    return KGLabel(@"SMSVideoBG v10 · 授权 = UDID 白名单（在线名单 + 离线授权串双通道）",
                    12, UIFontWeightRegular, [UIColor tertiaryLabelColor]);
 }
 
@@ -594,8 +663,7 @@ static UITextField *KGField(NSString *placeholder, CGFloat fontSize, BOOL digits
     _issueStatus.text = @"⏳ 正在推送名单…";
     _issueStatus.textColor = [UIColor secondaryLabelColor];
     __weak typeof(self) w = self;
-    [KGAuthClient pushDevices:[self localMap] secret:KGCompiledSecret()
-                   completion:^(BOOL ok, NSString *err) {
+    [self pushAllWithCompletion:^(BOOL ok, NSString *msg) {
         if (!w) return;
         w.issueBtn.enabled = YES;
         if (ok) {
@@ -603,15 +671,17 @@ static UITextField *KGField(NSString *placeholder, CGFloat fontSize, BOOL digits
             w.lastSync = [[NSDate date] timeIntervalSince1970];
             [w refreshList];
             [w refreshSyncStatus];
+            [w refreshGiteeStatus];
             w.issueStatus.text = [NSString stringWithFormat:
-                @"✓ %@ 已授权 · 至 %@ · 对方 30 分钟内自动生效（无需他操作）",
-                KGAuthShortUDID(udid), KGDateTextForDayIndex(exp)];
+                @"✓ %@ 已授权 · 至 %@ · 已同步（%@）· 对方 30 分钟内自动生效",
+                KGAuthShortUDID(udid), KGDateTextForDayIndex(exp), msg ?: @""];
             w.issueStatus.textColor = [UIColor systemGreenColor];
             w.udidField.text = @"";
             w.noteField.text = @"";
         } else {
             w.issueStatus.text = [NSString stringWithFormat:
-                @"⚠️ 已记入本机名单，但推送失败：%@（点「立即推送名单」可重试）", err ?: @"未知错误"];
+                @"⚠️ 已记入本机名单，但推送失败：%@（点「立即推送名单」可重试；"
+                @"也可以长按名单行取「离线授权串」直接发给客户）", msg ?: @"未知错误"];
             w.issueStatus.textColor = [UIColor systemOrangeColor];
         }
     }];
@@ -639,6 +709,10 @@ static UITextField *KGField(NSString *placeholder, CGFloat fontSize, BOOL digits
         w.issueStatus.text = @"✓ 已复制 UDID";
         w.issueStatus.textColor = [UIColor systemGreenColor];
     }]];
+    // v2.1.0: 生成离线授权串 —— 客户完全连不上网时的兜底(不用任何网络就能授权)
+    [ac addAction:[UIAlertAction actionWithTitle:@"生成离线授权串（发客户）"
+                                           style:UIAlertActionStyleDefault
+                                          handler:^(UIAlertAction *a) { [w offlineTicket:i]; }]];
     [ac addAction:[UIAlertAction actionWithTitle:@"改备注" style:UIAlertActionStyleDefault
                                           handler:^(UIAlertAction *a) { [w editNote:i]; }]];
     [ac addAction:[UIAlertAction actionWithTitle:@"改有效期" style:UIAlertActionStyleDefault
@@ -649,6 +723,55 @@ static UITextField *KGField(NSString *placeholder, CGFloat fontSize, BOOL digits
     ac.popoverPresentationController.sourceView = self.view;
     ac.popoverPresentationController.sourceRect =
         CGRectMake(self.view.bounds.size.width / 2, self.view.bounds.size.height / 2, 1, 1);
+    [self presentViewController:ac animated:YES completion:nil];
+}
+
+// v2.1.0: 生成离线授权串 —— 客户完全连不上网时, 这段文本就是"无需网络的授权"
+- (void)offlineTicket:(NSInteger)i {
+    if (i < 0 || i >= (NSInteger)self.devices.count) return;
+    NSDictionary *d = self.devices[i];
+    NSString *udid = d[@"udid"] ?: @"";
+
+    if (!udid.length) {
+        UIAlertController *ac = [UIAlertController
+            alertControllerWithTitle:@"这条记录没有 UDID 原文"
+                             message:@"离线授权串必须绑定设备 UDID；这条是从远端名单同步来的，"
+                                     @"本机没存原文。让客户把 UDID 发来、重新签发一次即可。"
+                      preferredStyle:UIAlertControllerStyleAlert];
+        [ac addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
+        [self presentViewController:ac animated:YES completion:nil];
+        return;
+    }
+
+    uint32_t exp = (uint32_t)[d[@"exp"] unsignedIntValue];
+    NSString *ticket = KGAuthBuildOfflineTicket(KGCompiledSecret(), udid, exp);
+    if (!ticket.length) {
+        UIAlertController *ac = [UIAlertController
+            alertControllerWithTitle:@"生成失败" message:@"签名密钥异常，无法生成离线授权串。"
+                      preferredStyle:UIAlertControllerStyleAlert];
+        [ac addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
+        [self presentViewController:ac animated:YES completion:nil];
+        return;
+    }
+
+    [UIPasteboard generalPasteboard].string = ticket;
+    uint32_t cap = KGDayIndexFromNow(30);
+    BOOL capped = (exp == KG_AUTH_FOREVER || exp > cap);
+
+    UIAlertController *ac = [UIAlertController
+        alertControllerWithTitle:@"离线授权串已复制"
+                         message:[NSString stringWithFormat:
+        @"%@\n\n（全文已复制到剪贴板，直接粘给客户即可）\n\n"
+        @"让客户在控制 App 里点「粘贴离线授权」导入：\n"
+        @"· 不需要任何网络就能生效\n"
+        @"· 只对这台设备有效（已绑定它的 UDID）\n"
+        @"· 离线有效期最长 30 天%@\n"
+        @"· 客户一旦联网校验成功，会自动转成完整期限：%@",
+        KGAuthShortTicket(ticket),
+        capped ? @"（本单按 30 天算）" : @"（按你签的期限算）",
+        KGDateTextForDayIndex(exp)],
+         preferredStyle:UIAlertControllerStyleAlert];
+    [ac addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
     [self presentViewController:ac animated:YES completion:nil];
 }
 
@@ -731,20 +854,72 @@ static UITextField *KGField(NSString *placeholder, CGFloat fontSize, BOOL digits
     _listStatus.textColor = [UIColor secondaryLabelColor];
     __weak typeof(self) w = self;
     NSDictionary *map = [self localMap];
-    [KGAuthClient pushDevices:map secret:KGCompiledSecret() completion:^(BOOL ok, NSString *err) {
+    [self pushAllWithCompletion:^(BOOL ok, NSString *msg) {
         if (!w) return;
         if (ok) {
             w.remoteMap = map;
             w.lastSync = [[NSDate date] timeIntervalSince1970];
             [w refreshList];
+            [w refreshSyncStatus];
+            [w refreshGiteeStatus];
             w.listStatus.text = [NSString stringWithFormat:
-                @"✓ 已推送 %lu 台到远端 · 对方 30 分钟内生效/掉授权", (unsigned long)map.count];
+                @"✓ 已同步 %lu 台到 %@ · 对方 30 分钟内生效/掉授权",
+                (unsigned long)map.count, msg ?: @"远端"];
             w.listStatus.textColor = [UIColor systemGreenColor];
         } else {
-            w.listStatus.text = [NSString stringWithFormat:@"⚠️ 推送失败：%@", err ?: @"未知错误"];
+            w.listStatus.text = [NSString stringWithFormat:@"⚠️ 推送失败：%@", msg ?: @"未知错误"];
             w.listStatus.textColor = [UIColor systemOrangeColor];
         }
     }];
+}
+
+// v2.1.0: 把名单推到所有已配置的目标 (GitHub + Gitee), 全部成功才算成功
+// 两个目标都配了就同时推, 插件端无论走哪条链路拿到的都是同一份名单。
+- (void)pushAllWithCompletion:(void (^)(BOOL ok, NSString *msg))done {
+    NSDictionary *map = [self localMap];
+    NSString *secret = KGCompiledSecret();
+    BOOL ghOn = [KGAuthClient configured];
+    BOOL giteeOn = [KGAuthClient giteeConfigured];
+
+    if (!ghOn && !giteeOn) {
+        if (done) done(NO, @"还没配同步目标：至少填 GitHub Token，或 Gitee 令牌 + 仓库");
+        return;
+    }
+
+    __block NSInteger pending = (ghOn ? 1 : 0) + (giteeOn ? 1 : 0);
+    NSMutableArray *oks  = [NSMutableArray array];
+    NSMutableArray *errs = [NSMutableArray array];
+    __weak typeof(self) w = self;
+
+    void (^finish)(void) = ^{
+        pending--;
+        if (pending > 0) return;
+        typeof(self) s = w;
+        if (!s) return;
+        if (errs.count == 0) {
+            if (done) done(YES, [oks componentsJoinedByString:@" + "]);
+        } else {
+            NSString *m = [errs componentsJoinedByString:@"；"];
+            if (oks.count) m = [NSString stringWithFormat:@"%@（已成功：%@）", m,
+                                [oks componentsJoinedByString:@" + "]];
+            if (done) done(NO, m);
+        }
+    };
+
+    if (ghOn) {
+        [KGAuthClient pushDevices:map secret:secret completion:^(BOOL ok, NSString *err) {
+            if (ok) [oks addObject:@"GitHub"];
+            else [errs addObject:[NSString stringWithFormat:@"GitHub：%@", err ?: @"失败"]];
+            finish();
+        }];
+    }
+    if (giteeOn) {
+        [KGAuthClient pushToGitee:map secret:secret completion:^(BOOL ok, NSString *err) {
+            if (ok) [oks addObject:@"Gitee"];
+            else [errs addObject:[NSString stringWithFormat:@"Gitee：%@", err ?: @"失败"]];
+            finish();
+        }];
+    }
 }
 
 - (void)pullTapped {

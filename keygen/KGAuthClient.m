@@ -30,6 +30,36 @@ static NSString *KGPref(NSString *key, NSString *fallback) {
 }
 + (BOOL)configured { return self.token.length > 0; }
 
+#pragma mark - Gitee 配置 (v2.1.0)
+
+static NSString * const kKGGiteeTokenKey  = @"kg_gitee_token";
+static NSString * const kKGGiteeRepoKey   = @"kg_gitee_repo";
+static NSString * const kKGGiteeBranchKey = @"kg_gitee_branch";
+
++ (NSString *)giteeToken { return KGPref(kKGGiteeTokenKey, @""); }
++ (void)setGiteeToken:(NSString *)t {
+    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+    if (t.length) [d setObject:t forKey:kKGGiteeTokenKey]; else [d removeObjectForKey:kKGGiteeTokenKey];
+}
++ (NSString *)giteeRepo { return KGPref(kKGGiteeRepoKey, @""); }
++ (void)setGiteeRepo:(NSString *)r {
+    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+    if (r.length) [d setObject:r forKey:kKGGiteeRepoKey]; else [d removeObjectForKey:kKGGiteeRepoKey];
+}
++ (NSString *)giteeBranch { return KGPref(kKGGiteeBranchKey, @"master"); }
++ (void)setGiteeBranch:(NSString *)b {
+    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+    if (b.length) [d setObject:b forKey:kKGGiteeBranchKey]; else [d removeObjectForKey:kKGGiteeBranchKey];
+}
++ (BOOL)giteeConfigured { return self.giteeToken.length > 0 && self.giteeRepo.length > 0; }
+
++ (NSString *)giteeRawURL {
+    NSString *repo = self.giteeRepo;
+    if (!repo.length) return nil;
+    return [NSString stringWithFormat:@"https://gitee.com/%@/raw/%@/%@",
+            repo, self.giteeBranch, kKGFilePath];
+}
+
 #pragma mark - 底层同步请求 (后台队列调用, 最多阻塞 22 秒)
 
 + (NSDictionary *)syncRequest:(NSString *)method
@@ -228,6 +258,98 @@ static NSString *KGPref(NSString *key, NSString *fallback) {
         }
 
         dispatch_async(dispatch_get_main_queue(), ^{ done(ok, lastErr); });
+    });
+}
+
+#pragma mark - Gitee 推送 (v2.1.0)
+
++ (void)pushToGitee:(NSDictionary<NSString *, NSNumber *> *)devices
+             secret:(NSString *)secret
+         completion:(void (^)(BOOL ok, NSString *error))done {
+    NSString *tok  = self.giteeToken;
+    NSString *repo = self.giteeRepo;
+    NSString *br   = self.giteeBranch;
+    if (!tok.length || !repo.length) {
+        if (done) done(NO, @"未配置 Gitee 令牌或仓库");
+        return;
+    }
+    if (!br.length) br = @"master";
+
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSInteger ts = (NSInteger)[[NSDate date] timeIntervalSince1970];
+        NSData *json = KGAuthBuildJSON(secret, ts, devices ?: @{});
+        if (!json.length) {
+            dispatch_async(dispatch_get_main_queue(), ^{ if (done) done(NO, @"名单生成失败"); });
+            return;
+        }
+        NSString *b64 = [json base64EncodedStringWithOptions:0];
+        NSString *enc = [tok stringByAddingPercentEncodingWithAllowedCharacters:
+                             [NSCharacterSet URLQueryAllowedCharacterSet]];
+        NSString *base = [NSString stringWithFormat:
+            @"https://gitee.com/api/v5/repos/%@/contents/%@", repo, kKGFilePath];
+
+        // ① 取现有 sha (404 = 文件还不存在, 直接创建)
+        NSDictionary *g = [self syncRequest:@"GET"
+            url:[NSString stringWithFormat:@"%@?access_token=%@&ref=%@", base, enc, br]
+          token:@"" body:nil accept:@"application/json"];
+        NSInteger gs = [g[@"status"] integerValue];
+        NSData *gd = g[@"data"];
+        NSString *sha = nil;
+        if (gs == 200 && gd.length) {
+            id o = [NSJSONSerialization JSONObjectWithData:gd options:0 error:NULL];
+            if ([o isKindOfClass:[NSDictionary class]] &&
+                [o[@"sha"] isKindOfClass:[NSString class]])
+                sha = o[@"sha"];
+        } else if (gs != 404 && gs != 0) {
+            NSString *m = nil;
+            if (gd.length) {
+                id o = [NSJSONSerialization JSONObjectWithData:gd options:0 error:NULL];
+                if ([o isKindOfClass:[NSDictionary class]] && [o[@"message"] isKindOfClass:[NSString class]])
+                    m = o[@"message"];
+            }
+            NSString *msg = (gs == 401 || gs == 403)
+                ? @"Gitee 令牌无效/权限不足（需勾 projects 权限）"
+                : [NSString stringWithFormat:@"Gitee 读取失败(HTTP %ld)%@%@",
+                        (long)gs, m.length ? @"：" : @"", m ?: @""];
+            dispatch_async(dispatch_get_main_queue(), ^{ if (done) done(NO, msg); });
+            return;
+        }
+
+        // ② 上传 (access_token 同时在 query 与 body, 兼容两种解析)
+        NSMutableDictionary *b = [NSMutableDictionary dictionary];
+        b[@"access_token"] = tok;
+        b[@"content"] = b64;
+        b[@"message"] = @"update auth.json (SMSVideoBG)";
+        b[@"branch"] = br;
+        if (sha.length) b[@"sha"] = sha;
+        NSData *bd = [NSJSONSerialization dataWithJSONObject:b options:0 error:NULL];
+
+        NSDictionary *p = [self syncRequest:@"POST"
+            url:[NSString stringWithFormat:@"%@?access_token=%@", base, enc]
+          token:@"" body:bd accept:@"application/json"];
+        NSInteger ps = [p[@"status"] integerValue];
+        NSData *pd = p[@"data"];
+
+        if (ps == 200 || ps == 201) {
+            dispatch_async(dispatch_get_main_queue(), ^{ if (done) done(YES, nil); });
+            return;
+        }
+
+        NSString *m = nil;
+        if (pd.length) {
+            id o = [NSJSONSerialization JSONObjectWithData:pd options:0 error:NULL];
+            if ([o isKindOfClass:[NSDictionary class]]) {
+                if ([o[@"message"] isKindOfClass:[NSString class]]) m = o[@"message"];
+                else if ([o[@"error"] isKindOfClass:[NSString class]]) m = o[@"error"];
+            }
+        }
+        NSString *msg;
+        if (ps == 0)        msg = @"连不上 Gitee（检查网络）";
+        else if (ps == 401 || ps == 403) msg = @"Gitee 令牌无效/权限不足（需勾 projects 权限）";
+        else if (ps == 404) msg = @"Gitee 仓库或分支不存在（检查仓库名、分支名，仓库需为公开）";
+        else msg = [NSString stringWithFormat:@"Gitee 上传失败(HTTP %ld)%@%@",
+                        (long)ps, m.length ? @"：" : @"", m ?: @""];
+        dispatch_async(dispatch_get_main_queue(), ^{ if (done) done(NO, msg); });
     });
 }
 

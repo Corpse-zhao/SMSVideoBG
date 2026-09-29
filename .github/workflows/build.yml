@@ -43,11 +43,20 @@ jobs:
           # 仓库 Settings -> Secrets and variables -> Actions -> New repository secret
           # 名字 SVB_LICENSE_SECRET; 没配则用兜底值编译 (仅供自测, 无法防盗版)。
           SVB_LICENSE_SECRET: ${{ secrets.SVB_LICENSE_SECRET }}
+          # v10.1.0 可选的"国内直连首选源" —— Gitee(码云) 名单地址。
+          # 配了它, 客户手机不挂代理也能拉到名单; 没配则用自定义源 + GitHub 镜像。
+          # 形如 https://gitee.com/用户名/仓库名/raw/master/auth.json
+          SVB_GITEE_URL: ${{ secrets.SVB_GITEE_URL }}
         run: |
           if [ -z "$SVB_LICENSE_SECRET" ]; then
             echo "::warning::SVB_LICENSE_SECRET 未配置 —— 本次用内置兜底密钥编译 (任何人拿到源码都能签发激活码)"
           else
             echo "✓ 已从 Secret 注入授权密钥 (长度 ${#SVB_LICENSE_SECRET})"
+          fi
+          if [ -n "$SVB_GITEE_URL" ]; then
+            echo "✓ 已内置 Gitee 名单地址: $SVB_GITEE_URL"
+          else
+            echo "· 未配置 SVB_GITEE_URL —— 客户端可用自定义源, 或在授权页长按填 Gitee 地址"
           fi
           gmake package THEOS_PACKAGE_SCHEME=rootless FINALPACKAGE=1
 

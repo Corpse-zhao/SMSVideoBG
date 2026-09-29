@@ -153,3 +153,33 @@ NSDictionary<NSString *, NSNumber *> *KGAuthParseJSON(NSData *json, NSString *se
     if (![[sig lowercaseString] isEqualToString:expect]) return nil;
     return clean;
 }
+
+#pragma mark - 离线授权串 (v2.1.0)
+
+static NSString *KGAuthOfflinePayload(NSString *h32, uint32_t exp, NSInteger ts) {
+    return [NSString stringWithFormat:@"SVBGOFFLINE/v1|%@|%u|%ld",
+            h32, (unsigned)exp, (long)ts];
+}
+
+NSString *KGAuthBuildOfflineTicket(NSString *secret, NSString *udid, uint32_t dayIndex) {
+    if (!secret.length) return nil;
+    NSString *h32 = KGAuthHashForUDID(udid);
+    if (!h32.length) return nil;
+
+    NSInteger ts = (NSInteger)[[NSDate date] timeIntervalSince1970];
+    NSString *sig = KGAuthSignatureHex(KGAuthOfflinePayload(h32, dayIndex, ts), secret);
+    NSDictionary *d = @{ @"h": h32, @"e": @(dayIndex), @"t": @(ts), @"s": sig };
+    NSData *json = [NSJSONSerialization dataWithJSONObject:d
+                                                   options:NSJSONWritingSortedKeys
+                                                     error:NULL];
+    if (!json.length) return nil;
+    return [@"SVBOFFLINE1:" stringByAppendingString:[json base64EncodedStringWithOptions:0]];
+}
+
+NSString *KGAuthShortTicket(NSString *ticket) {
+    if (!ticket.length) return @"";
+    if (ticket.length <= 44) return ticket;
+    return [NSString stringWithFormat:@"%@…%@",
+            [ticket substringToIndex:26],
+            [ticket substringFromIndex:ticket.length - 12]];
+}

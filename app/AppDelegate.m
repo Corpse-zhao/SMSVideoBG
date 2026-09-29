@@ -429,6 +429,12 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
 
 #pragma mark - 滑杆单元格 (UISlider + 右侧数值)
 
+// v10.1.0: 通用长文本页 (授权诊断报告等)
+@interface SVBTextViewController : UIViewController
+@property (nonatomic, copy) NSString *headTitle;
+@property (nonatomic, copy) NSString *text;
+@end
+
 @interface SVBSliderCell : UITableViewCell
 @property (nonatomic, strong) UILabel *titleLabel;
 @property (nonatomic, strong) UILabel *valueLabel;
@@ -676,10 +682,97 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
     NSIndexPath *ip = [self.tableView indexPathForRowAtPoint:p];
     if (!ip) return;
     if (![self authOK]) {
-        if (ip.row == 2) [self editAuthSource];   // 未授权栏第 3 行
+        if (ip.row == 0)      [self svbShowDiagnose];   // 授权状态行 -> 授权诊断
+        else if (ip.row == 1) [self editGiteeSource];   // 本机 UDID 行 -> Gitee 名单地址
+        else if (ip.row == 2) [self editAuthSource];    // 立即联网校验行 -> 自定义源
+        else                  [self svbImportTicket];   // 粘贴离线授权行
         return;
     }
     if (ip.section == 3 && ip.row == 0) [self editAuthSource];   // 说明 -> 授权状态
+}
+
+// v10.1.0: 粘贴作者发来的离线授权串 (无需联网)
+- (void)svbImportTicket {
+    NSString *clip = [UIPasteboard generalPasteboard].string ?: @"";
+    UIAlertController *ac = [UIAlertController
+        alertControllerWithTitle:@"粘贴离线授权串"
+                         message:@"把作者发给你的一整段文本（以 SVBOFFLINE1: 开头）粘进来。\n"
+                                 @"不用联网立即生效；有效期最长 30 天，联网校验成功后自动转成完整期限。"
+                  preferredStyle:UIAlertControllerStyleAlert];
+    [ac addTextFieldWithConfigurationHandler:^(UITextField *tf) {
+        tf.text = [clip rangeOfString:@"SVBOFFLINE1:"].location != NSNotFound ? clip : @"";
+        tf.placeholder = @"SVBOFFLINE1:...";
+        tf.autocapitalizationType = UITextAutocapitalizationTypeNone;
+        tf.autocorrectionType = UITextAutocorrectionTypeNo;
+        tf.clearButtonMode = UITextFieldViewModeAlways;
+    }];
+    [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    [ac addAction:[UIAlertAction actionWithTitle:@"导入" style:UIAlertActionStyleDefault
+                                        handler:^(UIAlertAction *a) {
+        NSString *msg = nil;
+        BOOL ok = SVBAuthImportTicket(ac.textFields.firstObject.text, &msg);
+        SVBAuthInvalidateCache();
+        [self svbReloadAuthState];
+        [self.tableView reloadData];
+        [self svbAlert:ok ? @"导入成功" : @"导入失败" msg:msg ?: @""];
+    }]];
+    [self presentViewController:ac animated:YES completion:nil];
+}
+
+// v10.1.0: Gitee(码云) 名单地址 —— 国内网络直连首选
+- (void)editGiteeSource {
+    NSString *cur = SVBAuthGiteeURL();
+    UIAlertController *ac = [UIAlertController
+        alertControllerWithTitle:@"Gitee 名单地址"
+                         message:@"填作者提供的 Gitee raw 地址（形如 …/raw/main/auth.json）。\n"
+                                 @"Gitee 是国内站点，不挂代理也能拉通。留空＝不用 Gitee。"
+                  preferredStyle:UIAlertControllerStyleAlert];
+    [ac addTextFieldWithConfigurationHandler:^(UITextField *tf) {
+        tf.text = cur ?: @"";
+        tf.placeholder = @"https://gitee.com/用户名/仓库/raw/main/auth.json";
+        tf.keyboardType = UIKeyboardTypeURL;
+        tf.autocapitalizationType = UITextAutocapitalizationTypeNone;
+        tf.autocorrectionType = UITextAutocorrectionTypeNo;
+        tf.clearButtonMode = UITextFieldViewModeAlways;
+    }];
+    [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    [ac addAction:[UIAlertAction actionWithTitle:@"保存并校验" style:UIAlertActionStyleDefault
+                                        handler:^(UIAlertAction *a) {
+        SVBAuthSetGiteeURL(ac.textFields.firstObject.text);
+        [self svbAuthSync];
+        UIAlertController *ok = [UIAlertController
+            alertControllerWithTitle:@"已保存"
+                             message:[SVBAuthGiteeURL() length]
+                                     ? @"已把 Gitee 地址加入拉取列表。"
+                                     : @"已清除 Gitee 地址。"
+                      preferredStyle:UIAlertControllerStyleAlert];
+        [ok addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
+        [self presentViewController:ok animated:YES completion:nil];
+    }]];
+    [self presentViewController:ac animated:YES completion:nil];
+}
+
+// v10.1.0: 授权诊断 —— 逐个源实测, 直接看清哪一环断了
+- (void)svbShowDiagnose {
+    UIAlertController *wait = [UIAlertController
+        alertControllerWithTitle:@"正在诊断…"
+                         message:@"正在逐个源实测连通性，约十几秒。"
+                  preferredStyle:UIAlertControllerStyleAlert];
+    [self presentViewController:wait animated:YES completion:nil];
+    __weak typeof(self) w = self;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSString *rep = SVBAuthDiagnose();
+        dispatch_async(dispatch_get_main_queue(), ^{
+            typeof(self) s = w;
+            if (!s) return;
+            [s dismissViewControllerAnimated:YES completion:^{
+                SVBTextViewController *vc = [[SVBTextViewController alloc] init];
+                vc.headTitle = @"授权诊断";
+                vc.text = rep;
+                [s.navigationController pushViewController:vc animated:YES];
+            }];
+        });
+    });
 }
 
 - (void)editAuthSource {
@@ -727,7 +820,7 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
 }
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
-    if (![self authOK]) return 3;  // 授权状态 / 本机 UDID / 立即联网校验
+    if (![self authOK]) return 4;  // 授权状态 / 本机 UDID / 立即联网校验 / 粘贴离线授权
     if (section == 0) return 1;
     if (section == 1) return (NSInteger)_defs.count;
     if (section == 2) return 2; // 切后台自动清理 / 注入诊断横幅 (v9.9.11)
@@ -744,11 +837,11 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
 
 - (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
     if (![self authOK])
-        return @"本插件按设备授权。把上面「本机 UDID」那一行点一下复制，发给作者；"
-                "作者签发后本机联网（点「立即联网校验」）即可生效。\n\n"
-                "未授权时，信息 App 里的视频背景不会生效，设置项也已全部隐藏。\n"
-                "作者删除你这条 UDID 记录后，本机最多 30 分钟掉授权（需联网）。\n\n"
-                "如果反复校验不过，长按「立即联网校验」那一行可以填写自定义授权服务地址。";
+        return @"【方式一 · 联网】点上面「本机 UDID」那一行复制，发给作者；作者签发后点「立即联网校验」即可生效。\n"
+                "作者删除你这条 UDID 记录后，本机最多 30 分钟掉授权。\n\n"
+                "【方式二 · 不联网】把作者发来的一整段授权串，点最后一行「粘贴离线授权」导入，"
+                "不用连网立刻生效（有效期最长 30 天，联网校验成功后自动转成完整期限）。\n\n"
+                "如果联网校验一直不过，长按任意一行可以：查看「授权诊断」、填写「Gitee 名单地址」或「自定义授权服务地址」。";
     if (section == 1)
         return @"点按某一行可为该界面导入/选用素材并单独设置不透明度/模糊度/音量。每个界面对应素材目录下一个独立的文件夹，用 Filza 直接放入视频同样生效。\n\n「对话详情」= 点进某个对话后上下聊天的那个界面（不是列表）。「未导入素材」的界面不会显示视频背景，导入并打开开关后生效。";
     if (section == 2)
@@ -797,7 +890,7 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
         c.imageView.image = SVBBadgeIcon(@"iphone.gen3",
             [UIColor colorWithRed:0.25 green:0.55 blue:1.00 alpha:1],
             [UIColor colorWithRed:0.40 green:0.80 blue:1.00 alpha:1]);
-    } else {
+    } else if (row == 2) {
         NSTimeInterval ts = SVBAuthLastSyncTime();
         NSDateFormatter *df = [[NSDateFormatter alloc] init];
         df.dateFormat = @"MM-dd HH:mm";
@@ -809,8 +902,18 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
         c.imageView.image = SVBBadgeIcon(@"arrow.triangle.2.circlepath",
             [UIColor colorWithRed:0.30 green:0.62 blue:1.00 alpha:1],
             [UIColor colorWithRed:0.55 green:0.45 blue:1.00 alpha:1]);
+    } else {
+        // v10.1.0: 完全不需要联网的兜底 —— 粘贴作者发的离线授权串
+        c.textLabel.text = @"粘贴离线授权";
+        c.detailTextLabel.text = SVBAuthOfflineTicketInfo();
+        c.detailTextLabel.font = [UIFont systemFontOfSize:13.5];
+        c.detailTextLabel.textColor = SVBAuthHasOfflineTicket(NULL)
+            ? SVBAccent() : [UIColor secondaryLabelColor];
+        c.imageView.image = SVBBadgeIcon(@"doc.on.clipboard",
+            [UIColor colorWithRed:0.45 green:0.75 blue:0.35 alpha:1],
+            [UIColor colorWithRed:0.70 green:0.85 blue:0.40 alpha:1]);
     }
-    SVBApplyCardStyle(c, row, 3);
+    SVBApplyCardStyle(c, row, 4);
     return c;
 }
 
@@ -1018,6 +1121,7 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
     if (![self authOK]) {
         if (indexPath.row == 1) [self svbCopyUDID];
         else if (indexPath.row == 2) [self svbAuthSync];
+        else if (indexPath.row == 3) [self svbImportTicket];
         return;
     }
     if (indexPath.section == 2 && indexPath.row == 0) {
@@ -1596,8 +1700,34 @@ static void SVBAppPickImage(UIViewController *host, void (^done)(UIImage *image)
 - (void)tableLongPressed:(UILongPressGestureRecognizer *)gr {
     if (gr.state != UIGestureRecognizerStateBegan) return;
     NSIndexPath *ip = [self.tableView indexPathForRowAtPoint:[gr locationInView:self.tableView]];
-    if (!ip || ip.section != 1) return;
-    [self editAuthSource];
+    if (!ip) return;
+    if (ip.section == 1) [self editAuthSource];        // 同步区 -> 自定义授权服务地址
+    else if (ip.section == 2) [self editGiteeSource];  // 排查区 -> Gitee 名单地址
+}
+
+// v10.1.0: Gitee(码云) 名单地址 —— 国内网络直连首选
+- (void)editGiteeSource {
+    NSString *cur = SVBAuthGiteeURL();
+    UIAlertController *ac = [UIAlertController
+        alertControllerWithTitle:@"Gitee 名单地址"
+                         message:@"填作者提供的 Gitee raw 地址（形如 …/raw/main/auth.json）。\n"
+                                 @"Gitee 是国内站点，不挂代理也能拉通。留空＝不用 Gitee。"
+                  preferredStyle:UIAlertControllerStyleAlert];
+    [ac addTextFieldWithConfigurationHandler:^(UITextField *tf) {
+        tf.text = cur ?: @"";
+        tf.placeholder = @"https://gitee.com/用户名/仓库/raw/main/auth.json";
+        tf.keyboardType = UIKeyboardTypeURL;
+        tf.autocapitalizationType = UITextAutocapitalizationTypeNone;
+        tf.autocorrectionType = UITextAutocorrectionTypeNo;
+        tf.clearButtonMode = UITextFieldViewModeAlways;
+    }];
+    [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    [ac addAction:[UIAlertAction actionWithTitle:@"保存并校验" style:UIAlertActionStyleDefault
+                                        handler:^(UIAlertAction *a) {
+        SVBAuthSetGiteeURL(ac.textFields.firstObject.text);
+        [self syncNow];
+    }]];
+    [self presentViewController:ac animated:YES completion:nil];
 }
 
 - (void)editAuthSource {
@@ -1650,23 +1780,29 @@ static void SVBAppPickImage(UIViewController *host, void (^done)(UIImage *image)
     });
 }
 
-- (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView { return 2; }
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView { return 3; }
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
-    return section == 0 ? 2 : 1;
+    if (section == 0) return 2;   // 本机 UDID / 授权状态
+    if (section == 1) return 2;   // 立即联网校验 / 粘贴离线授权
+    return 1;                     // 授权诊断
 }
 
 - (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
-    return section == 0 ? @"设备" : @"同步";
+    if (section == 0) return @"设备";
+    if (section == 1) return @"同步";
+    return @"排查";
 }
 
 - (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
-    if (section != 1) return nil;
-    return @"① 点上面「本机 UDID」复制, 发给作者;\n"
-            "② 作者在签发 App 里输入该 UDID 点「签发授权」;\n"
-            "③ 本机联网后自动生效 (打开本页会立即同步一次)。\n\n"
-            "未授权 / 已过期时, 信息 App 里的视频背景不会生效。\n"
-            "作者删除你这条 UDID 记录后, 本机最多 30 分钟掉授权 (需联网)。";
+    if (section == 0) return nil;
+    if (section == 1)
+        return @"【联网】点「立即联网校验」从作者名单拉取授权；作者删掉你这条 UDID 后，本机最多 30 分钟掉授权。\n\n"
+                "【不联网】点「粘贴离线授权」导入作者发来的一整段授权串，不用任何网络立即生效"
+                "（有效期最长 30 天，成功联网校验一次后会自动转成完整期限的在线授权）。\n\n"
+                "两条路可以同时用：平时走联网，网络不通时用离线串顶着。";
+    return @"「授权诊断」会逐个源实测连通性，直接告诉你是网络拉不通、UDID 不在作者名单里，还是名单被改坏了。\n\n"
+            "长按这一行可填写 Gitee 名单地址（国内直连首选）；长按「立即联网校验」可填自定义授权服务地址。";
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
@@ -1708,18 +1844,46 @@ static void SVBAppPickImage(UIViewController *host, void (^done)(UIImage *image)
     }
 
     // section 1: 同步
-    NSTimeInterval ts = SVBAuthLastSyncTime();
-    NSDateFormatter *df = [[NSDateFormatter alloc] init];
-    df.dateFormat = @"MM-dd HH:mm";
-    c.textLabel.text = _syncing ? @"正在同步…" : @"立即联网校验";
-    c.detailTextLabel.text = [NSString stringWithFormat:@"名单 %ld 台 · %@",
-        (long)SVBAuthCachedCount(),
-        ts > 0 ? [df stringFromDate:[NSDate dateWithTimeIntervalSince1970:ts]] : @"未同步"];
+    if (indexPath.section == 1) {
+        if (indexPath.row == 0) {
+            NSTimeInterval ts = SVBAuthLastSyncTime();
+            NSDateFormatter *df = [[NSDateFormatter alloc] init];
+            df.dateFormat = @"MM-dd HH:mm";
+            c.textLabel.text = _syncing ? @"正在同步…" : @"立即联网校验";
+            c.detailTextLabel.text = [NSString stringWithFormat:@"名单 %ld 台 · %@",
+                (long)SVBAuthCachedCount(),
+                ts > 0 ? [df stringFromDate:[NSDate dateWithTimeIntervalSince1970:ts]] : @"未同步"];
+            c.detailTextLabel.font = [UIFont systemFontOfSize:13.5];
+            c.detailTextLabel.textColor = [UIColor secondaryLabelColor];
+            c.imageView.image = SVBBadgeIcon(@"arrow.triangle.2.circlepath",
+                [UIColor colorWithRed:0.30 green:0.62 blue:1.00 alpha:1],
+                [UIColor colorWithRed:0.55 green:0.45 blue:1.00 alpha:1]);
+            c.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+            SVBApplyCardStyle(c, 0, 2);
+            return c;
+        }
+        // v10.1.0: 不需要联网的兜底
+        c.textLabel.text = @"粘贴离线授权";
+        c.detailTextLabel.text = SVBAuthOfflineTicketInfo();
+        c.detailTextLabel.font = [UIFont systemFontOfSize:13.5];
+        c.detailTextLabel.textColor = SVBAuthHasOfflineTicket(NULL)
+            ? SVBAccent() : [UIColor secondaryLabelColor];
+        c.imageView.image = SVBBadgeIcon(@"doc.on.clipboard",
+            [UIColor colorWithRed:0.45 green:0.75 blue:0.35 alpha:1],
+            [UIColor colorWithRed:0.70 green:0.85 blue:0.40 alpha:1]);
+        c.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+        SVBApplyCardStyle(c, 1, 2);
+        return c;
+    }
+
+    // section 2: 排查 —— 逐个源实测
+    c.textLabel.text = @"授权诊断";
+    c.detailTextLabel.text = @"逐个源实测连通性";
     c.detailTextLabel.font = [UIFont systemFontOfSize:13.5];
     c.detailTextLabel.textColor = [UIColor secondaryLabelColor];
-    c.imageView.image = SVBBadgeIcon(@"arrow.triangle.2.circlepath",
-        [UIColor colorWithRed:0.30 green:0.62 blue:1.00 alpha:1],
-        [UIColor colorWithRed:0.55 green:0.45 blue:1.00 alpha:1]);
+    c.imageView.image = SVBBadgeIcon(@"stethoscope",
+        [UIColor colorWithRed:0.55 green:0.45 blue:0.90 alpha:1],
+        [UIColor colorWithRed:0.75 green:0.55 blue:1.00 alpha:1]);
     c.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
     SVBApplyCardStyle(c, 0, 1);
     return c;
@@ -1743,7 +1907,62 @@ static void SVBAppPickImage(UIViewController *host, void (^done)(UIImage *image)
             udid, SVBAuthUDIDSource()]];
         return;
     }
-    [self syncNow];
+    if (indexPath.section == 1) {
+        if (indexPath.row == 0) [self syncNow];
+        else [self importTicket];
+        return;
+    }
+    [self showDiagnose];
+}
+
+// v10.1.0: 粘贴离线授权串
+- (void)importTicket {
+    NSString *clip = [UIPasteboard generalPasteboard].string ?: @"";
+    UIAlertController *ac = [UIAlertController
+        alertControllerWithTitle:@"粘贴离线授权串"
+                         message:@"把作者发给你的一整段文本（以 SVBOFFLINE1: 开头）粘进来。\n"
+                                 @"不用联网立即生效；有效期最长 30 天，联网校验成功后自动转成完整期限。"
+                  preferredStyle:UIAlertControllerStyleAlert];
+    [ac addTextFieldWithConfigurationHandler:^(UITextField *tf) {
+        tf.text = [clip rangeOfString:@"SVBOFFLINE1:"].location != NSNotFound ? clip : @"";
+        tf.placeholder = @"SVBOFFLINE1:...";
+        tf.autocapitalizationType = UITextAutocapitalizationTypeNone;
+        tf.autocorrectionType = UITextAutocorrectionTypeNo;
+        tf.clearButtonMode = UITextFieldViewModeAlways;
+    }];
+    [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    [ac addAction:[UIAlertAction actionWithTitle:@"导入" style:UIAlertActionStyleDefault
+                                        handler:^(UIAlertAction *a) {
+        NSString *msg = nil;
+        BOOL ok = SVBAuthImportTicket(ac.textFields.firstObject.text, &msg);
+        SVBAuthInvalidateCache();
+        [self reloadAuth];
+        [self alert:ok ? @"导入成功" : @"导入失败" msg:msg ?: @""];
+    }]];
+    [self presentViewController:ac animated:YES completion:nil];
+}
+
+// v10.1.0: 逐源实测诊断
+- (void)showDiagnose {
+    UIAlertController *wait = [UIAlertController
+        alertControllerWithTitle:@"正在诊断…"
+                         message:@"正在逐个源实测连通性，约十几秒。"
+                  preferredStyle:UIAlertControllerStyleAlert];
+    [self presentViewController:wait animated:YES completion:nil];
+    __weak typeof(self) w = self;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSString *rep = SVBAuthDiagnose();
+        dispatch_async(dispatch_get_main_queue(), ^{
+            typeof(self) s = w;
+            if (!s) return;
+            [s dismissViewControllerAnimated:YES completion:^{
+                SVBTextViewController *vc = [[SVBTextViewController alloc] init];
+                vc.headTitle = @"授权诊断";
+                vc.text = rep;
+                [s.navigationController pushViewController:vc animated:YES];
+            }];
+        });
+    });
 }
 
 - (void)alert:(NSString *)title msg:(NSString *)msg {
@@ -1903,6 +2122,43 @@ static void SVBAppPickImage(UIViewController *host, void (^done)(UIImage *image)
         [r appendFormat:@"读取崩溃日志失败: %@ / %@\n", e.name, e.reason];
     }
     return r;
+}
+
+@end
+
+#pragma mark - 通用长文本页
+
+@implementation SVBTextViewController
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.title = _headTitle.length ? _headTitle : @"报告";
+    self.view.backgroundColor = [UIColor systemGroupedBackgroundColor];
+
+    UITextView *tv = [[UITextView alloc] initWithFrame:self.view.bounds];
+    tv.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    tv.editable = NO;
+    tv.selectable = YES;
+    tv.alwaysBounceVertical = YES;
+    tv.backgroundColor = [UIColor systemGroupedBackgroundColor];
+    tv.textContainerInset = UIEdgeInsetsMake(14, 12, 28, 12);
+    tv.font = [UIFont monospacedSystemFontOfSize:12.5 weight:UIFontWeightRegular];
+    tv.textColor = [UIColor labelColor];
+    tv.text = _text ?: @"";
+    [self.view addSubview:tv];
+
+    self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc]
+        initWithTitle:@"复制" style:UIBarButtonItemStylePlain
+               target:self action:@selector(svbCopyAll)];
+}
+
+- (void)svbCopyAll {
+    [UIPasteboard generalPasteboard].string = _text ?: @"";
+    UIAlertController *ac = [UIAlertController
+        alertControllerWithTitle:@"已复制" message:@"内容已复制到剪贴板。"
+                 preferredStyle:UIAlertControllerStyleAlert];
+    [ac addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
+    [self presentViewController:ac animated:YES completion:nil];
 }
 
 @end

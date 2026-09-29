@@ -21,11 +21,25 @@ SVB_LICENSE_SECRET = SVBG-LICENSE-FALLBACK-INSECURE-SET-CI-SECRET
 endif
 LICENSE_CFLAGS = -DSVB_LICENSE_SECRET='"$(SVB_LICENSE_SECRET)"'
 
+# ------------------------------------------------------------
+# 内置 Gitee(码云) 名单地址 (v10.1.0) —— 可选的"国内直连首选源"
+#   配置后编译进插件: 客户端零配置也能走 Gitee 拉名单(国内不用挂代理)。
+#     - CI: GitHub 仓库 Settings -> Secrets -> SVB_GITEE_URL
+#           例 https://gitee.com/你的用户名/仓库名/raw/master/auth.json
+#     - 未配置时: 插件只在自定义源 + GitHub 镜像里找; 客户端也可在
+#       授权页长按自行填写该地址。
+# ------------------------------------------------------------
+ifeq ($(strip $(SVB_GITEE_URL)),)
+GITEE_CFLAGS =
+else
+GITEE_CFLAGS = -DSVB_GITEE_URL='"$(SVB_GITEE_URL)"'
+endif
+
 # 实例 1: 主插件 (注入信息 App, 视频背景渲染)
 TWEAK_NAME = SMSVideoBG
 SMSVideoBG_FILES = Tweak.x SVBCommon.m SVBAuth.m
 SMSVideoBG_FRAMEWORKS = UIKit AVFoundation CoreMedia
-SMSVideoBG_CFLAGS = -fobjc-arc -fno-threadsafe-statics -Wno-deprecated-declarations $(LICENSE_CFLAGS)
+SMSVideoBG_CFLAGS = -fobjc-arc -fno-threadsafe-statics -Wno-deprecated-declarations $(LICENSE_CFLAGS) $(GITEE_CFLAGS)
 
 include $(THEOS_MAKE_PATH)/tweak.mk
 
@@ -34,7 +48,7 @@ include $(THEOS_MAKE_PATH)/tweak.mk
 APPLICATION_NAME = SMSVideoBGApp
 SMSVideoBGApp_FILES = app/main.m app/AppDelegate.m SVBCommon.m SVBAuth.m
 SMSVideoBGApp_FRAMEWORKS = UIKit AVFoundation AVKit CoreMedia
-SMSVideoBGApp_CFLAGS = -fobjc-arc -fno-threadsafe-statics -Wno-deprecated-declarations $(LICENSE_CFLAGS)
+SMSVideoBGApp_CFLAGS = -fobjc-arc -fno-threadsafe-statics -Wno-deprecated-declarations $(LICENSE_CFLAGS) $(GITEE_CFLAGS)
 SMSVideoBGApp_INSTALL_PATH = /Applications
 
 include $(THEOS_MAKE_PATH)/application.mk

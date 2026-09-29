@@ -19,6 +19,18 @@
 //     到期 dayIndex = 自 2020-01-01 UTC 起的天数; 4294967295 = 永久
 //     签名原文 = "SVBAUTH/v1|<ts>|<H32=dayIndex 升序逗号连接>"
 //     签名算法 = HMAC-SHA256(secret, 原文) 全 32 字节小写十六进制
+//
+//   v10.1.0 增补 —— 为客户侧"国内网络零依赖"兜底:
+//     A. 国内直连源: Gitee(码云) raw 匿名可读, 国内手机直连稳定;
+//        地址走配置键 auth_gitee, 未配置时退编译期 SVB_GITEE_URL。
+//     B. 离线授权串: 作者在签发 App 生成一段文本发给客户, 客户在控制 App
+//        粘贴导入 -> 立即授权, 全程不需要任何网络。
+//        串格式: "SVBOFFLINE1:" + base64({"h":H32,"e":到期dayIndex,"t":ts,"s":sig})
+//        签名原文 = "SVBGOFFLINE/v1|<H32>|<e>|<t>", 同样 HMAC-SHA256。
+//        导入时的规则: ① h 必须等于本机指纹(防止一串通用); ② 验签;
+//        ③ 有效期强制截断到 30 天内(离线授权最长续 30 天, 防断网永久白嫖)。
+//        一旦成功联网校验且在线名单非空, 就改以在线名单为准 —— 作者删掉
+//        UDID 仍然会掉授权, 离线串不会把它救回来。
 // ============================================================
 
 #define SVB_AUTH_FOREVER 4294967295u
@@ -61,14 +73,36 @@ void SVBAuthRefreshIfNeeded(BOOL force);     // force=YES 立即拉一次
 void SVBAuthInvalidateCache(void);
 
 // ---- 自定义授权服务地址 (v10.0.2) ----
-// 内置多源: 自定义(若有) + ghfast.top / gh-proxy.com / ghproxy.net 三个国内可直连镜像
-//           + api.github.com + raw.githubusercontent.com, 并发拉取取最新一份。
+// 内置多源: 自定义(若有) + Gitee(若配) + ghfast.top / gh-proxy.com / ghproxy.net
+//           三个加速镜像 + api.github.com + raw.githubusercontent.com,
+//           全部并发拉取, 取名单自带 ts 最新的一份。
 // 想换成自建托管点(如腾讯云 COS)时, 把完整 URL 填进来即可, 无需改代码。
 NSString *SVBAuthCustomSourceURL(void);            // nil = 用内置多源
 void SVBAuthSetCustomSourceURL(NSString *url);     // 传 nil/空串 = 恢复内置多源
 NSInteger SVBAuthCachedCount(void);          // 缓存名单里的台数
 NSTimeInterval SVBAuthLastSyncTime(void);    // 上次成功同步时间 (0 = 从未)
 BOOL SVBAuthCachedHasSelf(NSString **expText);  // 本机命中缓存名单? 回传到期文本
+
+// ---- Gitee(码云) 名单地址 (v10.1.0, 国内直连首选) ----
+// 完整 raw 地址, 形如 https://gitee.com/<用户名>/<仓库名>/raw/<分支>/auth.json
+// 匿名可读(仓库需公开), 国内手机直连稳定, 不受 GitHub 被墙影响。
+NSString *SVBAuthGiteeURL(void);                   // nil = 未配置
+void SVBAuthSetGiteeURL(NSString *url);            // 传 nil/空串 = 清除
+
+// ---- 离线授权串 (v10.1.0, 完全不依赖网络) ----
+// 作者在签发 App 里点「生成离线授权串」-> 复制发给客户
+// -> 客户在控制 App「粘贴离线授权」-> 立即生效, 全程不需要网络。
+// 有效期最长 30 天; 成功联网校验后自动转为在线授权(以作者名单为准)。
+BOOL SVBAuthImportTicket(NSString *text, NSString **message);  // 导入, message 回传结果文案
+void SVBAuthClearTicket(void);                                 // 清除已导入的离线授权
+BOOL SVBAuthHasOfflineTicket(NSString **expText);              // 本地有有效离线授权? 回传到期文本
+NSString *SVBAuthOfflineTicketInfo(void);                      // 人话描述 (无则"无")
+
+// ---- 诊断 (v10.1.0) ----
+// 同步逐个源探测一遍, 返回人话报告: 本机 UDID/指纹、缓存状态、每个源的结果
+// (HTTP 码 / 错误 / 耗时 / 是否验签通过 / 名单台数 / 是否含本机)。
+// 会阻塞数秒, 请在后台线程调用。
+NSString *SVBAuthDiagnose(void);
 
 // ---- 日期工具 (与签发 App 对齐) ----
 uint32_t SVBAuthDayIndexNow(void);
