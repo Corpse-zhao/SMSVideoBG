@@ -683,8 +683,10 @@ static char SVBDetectedCtxKey;
 // 消息气泡本体: 系统每次给气泡上色都改成透明 (滚动复用/新消息即时生效)
 %hook CKBalloonView
 - (void)setBackgroundColor:(UIColor *)color {
-    if (SVBBubbleSweepActive()) { %orig([UIColor clearColor]); return; }
     %orig;
+    // 先让系统把色赋上, 再覆盖成透明; color 已是透明时不再赋值, 避免递归
+    if (SVBBubbleSweepActive() && color && ![color isEqual:[UIColor clearColor]])
+        self.backgroundColor = [UIColor clearColor];
 }
 - (void)didMoveToSuperview {
     %orig;
