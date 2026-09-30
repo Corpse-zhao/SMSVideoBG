@@ -562,10 +562,10 @@ static void SVBMapBalloonText(UIView *balloon) {
 //       再用我们自己的 UIView/UILabel 在同一位置重画需要看得见的东西。
 //       用 alpha 而不是 hidden —— 视图仍参与布局, 我们才能读到它的 frame 做映射。
 //
-// 底部输入框采用用户拍板方案: 整块隐藏, 不再映射内容 (视频完全透出)。
-// 代价: 该界面内无法再打字 (点输入框不会有反应) —— 这是「完全通透」的必然取舍,
-//       需要打字时切到别的界面或临时关掉对话详情开关即可。
-// 导航栏则重画返回按钮 + 联系人名, 返回可点 (走原生 pop, 不改系统行为)。
+// 顶部导航栏: 整块 alpha=0, 再用自己的视图重画「返回按钮 + 联系人名 + 号码」。
+// 底部 (v10.6.2 改): **不再整块隐藏** —— 用户反馈要看到并用到底部输入框、
+//       上传照片按钮、以及下面那一排功能键。现在只清掉容器自身的白底与内部
+//       bar 背景层, 控件原样保留、可点可打字; 视频从控件缝隙里透出来。
 
 static NSMutableArray<UIView *> *SVBHiddenChrome;      // 被藏掉的 chrome 容器
 static NSMutableArray<UIView *> *SVBMappedChrome;      // 我们自己画的映射视图
@@ -573,6 +573,11 @@ static NSMutableArray<UIView *> *SVBMappedChrome;      // 我们自己画的映�
 static char SVBChromeAlphaKey;
 static char SVBChromeHiddenKey;
 static char SVBChromeMappedKey;
+
+// v10.6.2: 只清「白底」但**保留控件**的底条容器 (底部输入框那一条)
+static NSMutableArray<UIView *> *SVBTranslucentChrome;
+static char SVBTransBgKey;
+static char SVBTransLayerBgKey;
 
 // 返回按钮的点击目标: UIAction 的 identifier 是 readonly 且 actionWithTitle:image:
 // 传 nil 会撞 -Wnonnull (CI 开了 -Werror), 干脆用一个常驻辅助对象 + target-action,
@@ -706,18 +711,106 @@ static void SVBScanBands(UIView *root, UIView *space, NSInteger depth,
     }
 }
 
-// 从顶条子树里抓「最长的一段文字」当标题 (联系人名 / 群名 / Apple)
-static void SVBPickTitleText(UIView *v, NSInteger d, NSString **best, UIFont **font) {
-    if (!v || d > 6) return;
-    if ([v isKindOfClass:[UILabel class]]) {
-        UILabel *l = (UILabel *)v;
-        NSString *t = l.text;
-        if (t.length && (!*best || t.length > (*best).length)) {
-            *best = t;
-            if (font) *font = l.font;
+// v10.6.2: 判断一段文字像不像电话号码 (纯数字 + +-() 空格点, 至少 5 位)。
+// 用来把聊天页副标题里的号码挑出来 —— 「iMessage」「SMS」这类会被字母判掉。
+static BOOL SVBLooksLikePhone(NSString *t) {
+    if (t.length < 5 || t.length > 28) return NO;
+    NSInteger digits = 0, others = 0;
+    for (NSUInteger i = 0; i < t.length; i++) {
+        unichar c = [t characterAtIndex:i];
+        if (c >= '0' && c <= '9') digits++;
+        else if (c == '+' || c == '-' || c == ' ' || c == '(' || c == ')' || c == '.') others++;
+        else return NO;
+    }
+    return digits >= 5 && others <= 8;
+}
+
+// v10.6.2: 从顶条子树里抓「名字 + 号码」两段文字。
+//   名字 = 字号最大的那条 (联系人名 / 群名 / Apple)
+//   号码 = 其余里最像电话号码的; 挑不到就退而取字号最小的那条 (iOS 副标题位)
+static void SVBPickTopTexts(UIView *top, NSString **name, UIFont **nameFont,
+                            NSString **sub, UIFont **subFont) {
+    if (!top) return;
+    NSMutableArray<NSString *> *texts = [NSMutableArray array];
+    NSMutableArray<NSNumber *> *sizes = [NSMutableArray array];
+    NSMutableArray<UIView *> *stack = [NSMutableArray arrayWithObject:top];
+    NSInteger guard = 0;
+    while (stack.count && guard++ < 600) {          // 广度优先, 带硬上限防跑飞
+        UIView *v = stack.firstObject;
+        [stack removeObjectAtIndex:0];
+        if ([v isKindOfClass:[UILabel class]]) {
+            UILabel *l = (UILabel *)v;
+            if (l.text.length) {
+                [texts addObject:l.text];
+                [sizes addObject:@(l.font ? l.font.pointSize : 0.0)];
+            }
+        }
+        [stack addObjectsFromArray:v.subviews];
+    }
+    if (!texts.count) return;
+
+    NSUInteger nameIdx = 0;
+    CGFloat bestSz = -1.0;
+    for (NSUInteger i = 0; i < texts.count; i++) {
+        CGFloat sz = sizes[i].doubleValue;
+        if (sz > bestSz) { bestSz = sz; nameIdx = i; }
+    }
+    *name = texts[nameIdx];
+    *nameFont = [UIFont systemFontOfSize:(bestSz > 0 ? bestSz : 17.0)];
+
+    NSUInteger subIdx = NSNotFound;
+    for (NSUInteger i = 0; i < texts.count; i++) {          // 先找像号码的
+        if (i == nameIdx) continue;
+        if (SVBLooksLikePhone(texts[i])) { subIdx = i; break; }
+    }
+    if (subIdx == NSNotFound) {                             // 退而取字号最小的
+        CGFloat minSz = 1e9;
+        for (NSUInteger i = 0; i < texts.count; i++) {
+            if (i == nameIdx) continue;
+            CGFloat sz = sizes[i].doubleValue;
+            if (sz < minSz) { minSz = sz; subIdx = i; }
         }
     }
-    for (UIView *s in v.subviews) SVBPickTitleText(s, d + 1, best, font);
+    if (subIdx != NSNotFound) {
+        *sub = texts[subIdx];
+        CGFloat ss = sizes[subIdx].doubleValue;
+        *subFont = [UIFont systemFontOfSize:(ss > 0 ? ss : 11.0)];
+    }
+}
+
+// v10.6.2b: 把子树里所有 label 文字拼起来 (诊断用, 带长度上限)
+static NSString *SVBTextDump(UIView *top, NSInteger maxLen) {
+    if (!top) return @"(无)";
+    NSMutableArray<NSString *> *a = [NSMutableArray array];
+    NSMutableArray<UIView *> *stack = [NSMutableArray arrayWithObject:top];
+    NSInteger guard = 0;
+    while (stack.count && guard++ < 600) {
+        UIView *v = stack.firstObject;
+        [stack removeObjectAtIndex:0];
+        if ([v isKindOfClass:[UILabel class]]) {
+            NSString *t = ((UILabel *)v).text;
+            if (t.length) [a addObject:t];
+        }
+        [stack addObjectsFromArray:v.subviews];
+    }
+    NSString *joined = a.count ? [a componentsJoinedByString:@" | "] : @"(无)";
+    if ((NSInteger)joined.length > maxLen)
+        joined = [[joined substringToIndex:maxLen] stringByAppendingString:@"…"];
+    return joined;
+}
+
+// v10.6.2b: 在子树里找第一段「像电话号码」的文字 (副标题不在顶条里时的兜底)
+static NSString *SVBFindPhoneText(UIView *v, NSInteger d) {
+    if (!v || d > 8) return nil;
+    if ([v isKindOfClass:[UILabel class]]) {
+        NSString *t = ((UILabel *)v).text;
+        if (t.length && SVBLooksLikePhone(t)) return t;
+    }
+    for (UIView *s2 in v.subviews) {
+        NSString *r = SVBFindPhoneText(s2, d + 1);
+        if (r) return r;
+    }
+    return nil;
 }
 
 // 把 chrome 容器藏掉 (alpha=0 而非 hidden, 保证它仍参与布局 —— 我们要读它的 frame)
@@ -735,10 +828,129 @@ static void SVBHideChromeView(UIView *v) {
     v.alpha = 0.0;
 }
 
+// v10.6.2: 取「所有窗口」—— 三条路并集去重。
+// 【根因】`UIApplication.sharedApplication.windows` 在 scene 化的 App (iOS 13+) 里
+// 可能返回**空数组**。v10.5.2 的 window 扫描就栽在这: 窗口列表为空 => 实际只扫了
+// vc.view => 而 UINavigationBar 是 UINavigationController 的**兄弟视图**,
+// 根本不在 CKChatController.view 里 => 顶部导航栏(那条白)永远扫不到。
+// (底部之所以被处理到, 是因为走了 SVBScanChromeVCs 按 VC 类名找 CKMessageEntryView,
+//  与窗口列表无关 —— 这也解释了「列表页好了、对话详情顶部没好」。)
+static NSArray<UIWindow *> *SVBAllWindows(UIView *anchor) {
+    NSMutableArray<UIWindow *> *out = [NSMutableArray array];
+    @try { if (anchor && anchor.window && ![out containsObject:anchor.window])
+                [out addObject:anchor.window]; } @catch (NSException *e) {}
+    @try {
+        for (UIWindow *w in UIApplication.sharedApplication.windows)
+            if (w && ![out containsObject:w]) [out addObject:w];
+    } @catch (NSException *e) {}
+    @try {
+        for (UIScene *sc in UIApplication.sharedApplication.connectedScenes) {
+            if (![sc isKindOfClass:[UIWindowScene class]]) continue;
+            for (UIWindow *w in ((UIWindowScene *)sc).windows)
+                if (w && ![out containsObject:w]) [out addObject:w];
+        }
+    } @catch (NSException *e) {}
+    return out;
+}
+
+// v10.6.2: 清除视图内部的「bar 背景层 / 材质模糊」——只碰纯装饰, 不动输入框与按钮。
+static void SVBClearBarBackgroundsInside(UIView *v, NSInteger d) {
+    if (!v || d > 6) return;
+    @try {
+        NSString *cls = NSStringFromClass([v class]);
+        if ([cls hasPrefix:@"_UIBarBackground"] || [cls containsString:@"BarBackground"]) {
+            v.hidden = YES;
+            return;
+        }
+    } @catch (NSException *e) {}
+    for (UIView *s2 in v.subviews) SVBClearBarBackgroundsInside(s2, d + 1);
+}
+
+// v10.6.2: 底条「只去白底、保留控件」。用户要能看见并用到底部输入框 / 上传照片 /
+// 那一排功能键, 所以不能再 alpha=0。原值缓存以便离开页面时还原。
+static void SVBTranslucentChromeView(UIView *v) {
+    if (!v || !v.superview) return;
+    if (!SVBTranslucentChrome) SVBTranslucentChrome = [NSMutableArray new];
+    if (!objc_getAssociatedObject(v, &SVBTransBgKey)) {
+        objc_setAssociatedObject(v, &SVBTransBgKey, v.backgroundColor ?: (id)[NSNull null],
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        UIColor *lb = v.layer.backgroundColor ? [UIColor colorWithCGColor:v.layer.backgroundColor] : nil;
+        objc_setAssociatedObject(v, &SVBTransLayerBgKey, lb ?: (id)[NSNull null],
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        if (![SVBTranslucentChrome containsObject:v]) [SVBTranslucentChrome addObject:v];
+    }
+    v.backgroundColor = [UIColor clearColor];
+    v.layer.backgroundColor = NULL;
+    SVBClearBarBackgroundsInside(v, 0);
+}
+
+// v10.6.2: frame 是否落在「顶部条带 / 底部条带」(全宽 + 条状, 不是整屏)
+static BOOL SVBIsChromeBand(CGRect f, CGFloat W, CGFloat H, CGFloat safeTop, CGFloat safeBot) {
+    if (f.size.width < W * 0.92) return NO;
+    if (f.size.height < 6.0 || f.size.height > H * 0.42) return NO;
+    if (f.origin.y <= safeTop + 8.0) return YES;
+    if (CGRectGetMaxY(f) <= safeTop + 140.0) return YES;
+    if (f.origin.y >= H - (safeBot + 160.0)) return YES;
+    return NO;
+}
+
+// v10.6.2: 深扫 —— 与 SVBScanBands 的关键区别是**不跳过列表子树**。
+// 顶部那条白很可能挂在 transcript 的 collection view 里, 而 SVBScanBands
+// 遇到 UICollectionView 会整棵 skip -> 永远找不到。这里只对「具名装饰层」
+// (CKGradientView / *BarBackground*) 和「条带内纯容器的平铺白底」动手,
+// cell 一律不碰 (SIGABRT 史)。不在上下条带的子树直接剪掉。
+static void SVBSweepDeepChrome(UIView *root, UIView *space, NSInteger depth) {
+    if (!root || depth > 20) return;
+    CGRect sb = space.bounds;
+    CGFloat W = sb.size.width, H = sb.size.height;
+    if (W < 1 || H < 1) return;
+    CGFloat safeTop = space.safeAreaInsets.top;    if (safeTop < 1) safeTop = 44.0;
+    CGFloat safeBot = space.safeAreaInsets.bottom; if (safeBot < 1) safeBot = 34.0;
+    CGRect topZone = CGRectMake(0, 0, W, safeTop + 150.0);
+    CGRect botZone = CGRectMake(0, H - (safeBot + 170.0), W, safeBot + 170.0);
+    for (UIView *sub in root.subviews) {
+        if (!sub || sub.hidden) continue;
+        if ([sub isKindOfClass:[SVBVideoBackgroundView class]]) continue;
+        if (SVBIsSystemManagedCellBg(sub)) continue;
+        NSString *low = NSStringFromClass([sub class]).lowercaseString;
+        if ([low containsString:@"keyboard"]) continue;
+        CGRect f = [sub convertRect:sub.bounds toView:space];
+        if (!CGRectIntersectsRect(f, topZone) && !CGRectIntersectsRect(f, botZone)) continue;
+        BOOL cell = [sub isKindOfClass:[UICollectionViewCell class]] ||
+                    [sub isKindOfClass:[UITableViewCell class]];
+        if (!cell) {
+            NSString *cls = NSStringFromClass([sub class]);
+            BOOL band = SVBIsChromeBand(f, W, H, safeTop, safeBot);
+            if (band && ([cls containsString:@"CKGradientView"] ||
+                         [cls hasPrefix:@"_UIBarBackground"] ||
+                         [cls containsString:@"BarBackground"])) {
+                SVBHideChromeView(sub);      // 具名装饰层: 条带里就藏
+                continue;
+            }
+            if (band) {
+                BOOL keep = [sub isKindOfClass:[UIControl class]] ||
+                            [sub isKindOfClass:[UILabel class]] ||
+                            [sub isKindOfClass:[UIImageView class]] ||
+                            [sub isKindOfClass:[UITextField class]] ||
+                            [sub isKindOfClass:[UITextView class]] ||
+                            [sub isKindOfClass:[UIVisualEffectView class]] ||
+                            [sub isKindOfClass:[UIScrollView class]];
+                if (!keep) {                 // 纯容器的平铺白底: 只清底色, 子控件全留
+                    if (sub.backgroundColor && ![sub.backgroundColor isEqual:[UIColor clearColor]])
+                        sub.backgroundColor = [UIColor clearColor];
+                    if (sub.layer.backgroundColor) sub.layer.backgroundColor = NULL;
+                }
+            }
+        }
+        SVBSweepDeepChrome(sub, space, depth + 1);
+    }
+}
+
 #pragma mark - 顶部条映射 (返回按钮 + 名字)
 
 static void SVBMapChatTop(UIViewController *vc, UIView *topBand,
-                          NSString *titleText, UIFont *titleFont) {
+                          NSString *titleText, UIFont *titleFont,
+                          NSString *subText, UIFont *subFont) {
     UIView *host = topBand.superview;
     if (!host) return;
     UIView *layer = objc_getAssociatedObject(vc, &SVBChromeMappedKey);
@@ -761,6 +973,19 @@ static void SVBMapChatTop(UIViewController *vc, UIView *topBand,
     if (!CGRectEqualToRect(layer.frame, lf)) layer.frame = lf;
     layer.backgroundColor = [UIColor clearColor];
 
+    // v10.6.2b: 导航栏的 frame 从 y=0 起算 (**含状态栏**), 直接按整条高度居中会把
+    // 标题/返回键塞进灵动岛与状态栏底下 —— 用户实拍就是「返回键看不见」。
+    // 先算出「安全带」(安全区顶边在 layer 坐标系里的 y), 所有内容只在安全带内居中。
+    CGFloat safeT = topBand.safeAreaInsets.top;
+    if (safeT < 1) safeT = vc.view.safeAreaInsets.top;
+    if (safeT < 1) safeT = 44.0;
+    CGFloat contentTop = safeT - lf.origin.y;
+    if (contentTop < 0) contentTop = 0;
+    if (contentTop > lf.size.height - 30.0) contentTop = 0;   // 数值不合理就不偏移
+    CGFloat contentH = lf.size.height - contentTop;
+    CGFloat ccx = lf.size.width / 2.0;
+    CGFloat ccy = contentTop + contentH / 2.0;
+
     BOOL dark = (vc.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark);
     UIColor *fg = dark ? [UIColor whiteColor] : [UIColor blackColor];
 
@@ -775,10 +1000,32 @@ static void SVBMapChatTop(UIViewController *vc, UIView *topBand,
     title.text = titleText ?: @"";
     title.textColor = fg;
     title.font = titleFont ?: [UIFont boldSystemFontOfSize:17];
-    CGSize need = [title sizeThatFits:CGSizeMake(MAX(40.0, lf.size.width - 140.0), CGFLOAT_MAX)];
-    title.frame = CGRectMake(floor((lf.size.width - need.width) / 2.0),
-                             floor((lf.size.height - need.height) / 2.0 + lf.size.height * 0.16),
+    CGFloat maxW = MAX(40.0, lf.size.width - 140.0);
+    CGSize need = [title sizeThatFits:CGSizeMake(maxW, CGFLOAT_MAX)];
+    BOOL hasSub = (subText.length > 0);
+    CGFloat titleTop = hasSub ? (ccy - need.height - 0.5) : (ccy - need.height / 2.0);
+    title.frame = CGRectMake(floor(ccx - need.width / 2.0), floor(titleTop),
                              need.width, need.height);
+
+    // ---- 副行 (对方号码) ----
+    UILabel *subLine = (UILabel *)[layer viewWithTag:0x53564253];   // 'SVBS'
+    if (hasSub) {
+        if (!subLine) {
+            subLine = [UILabel new];
+            subLine.tag = 0x53564253;
+            subLine.textAlignment = NSTextAlignmentCenter;
+            [layer addSubview:subLine];
+        }
+        subLine.hidden = NO;
+        subLine.text = subText;
+        subLine.textColor = fg;
+        subLine.font = subFont ?: [UIFont systemFontOfSize:11];
+        CGSize n2 = [subLine sizeThatFits:CGSizeMake(maxW, CGFLOAT_MAX)];
+        subLine.frame = CGRectMake(floor(ccx - n2.width / 2.0), floor(ccy + 0.5),
+                                   n2.width, n2.height);
+    } else if (subLine) {
+        subLine.hidden = YES;
+    }
 
     // ---- 返回按钮 (‹) ----
     // 用辅助对象转发 block (UIAction.identifier 只读, 且 actionWithTitle:image: 传 nil
@@ -792,7 +1039,8 @@ static void SVBMapChatTop(UIViewController *vc, UIView *topBand,
     [back setTitle:@"‹" forState:UIControlStateNormal];
     [back setTitleColor:fg forState:UIControlStateNormal];
     back.titleLabel.font = [UIFont systemFontOfSize:30 weight:UIFontWeightRegular];
-    back.frame = CGRectMake(6, 0, 46, lf.size.height);
+    // v10.6.2b: 返回键只在安全带 (状态栏以下) 内撑满, 否则会顶到灵动岛里
+    back.frame = CGRectMake(4, contentTop, 58, contentH);
     __weak UIViewController *wvc = vc;
     objc_setAssociatedObject(back, &SVBChromeActionBlockKey, ^{
         UIViewController *s = wvc;
@@ -814,6 +1062,18 @@ static void SVBClearMappedChrome(void) {
         if (v.superview) [v removeFromSuperview];
     }
     [SVBMappedChrome removeAllObjects];
+    // v10.6.2: 还原「只去了白底」的底条容器 (底条不再 alpha=0)
+    for (UIView *v in [SVBTranslucentChrome copy]) {
+        if (!v.superview) continue;
+        id bg = objc_getAssociatedObject(v, &SVBTransBgKey);
+        id lb = objc_getAssociatedObject(v, &SVBTransLayerBgKey);
+        v.backgroundColor = ([bg isKindOfClass:[UIColor class]] ? (UIColor *)bg : nil);
+        v.layer.backgroundColor = ([lb isKindOfClass:[UIColor class]]
+                                   ? ((UIColor *)lb).CGColor : NULL);
+        objc_setAssociatedObject(v, &SVBTransBgKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(v, &SVBTransLayerBgKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    [SVBTranslucentChrome removeAllObjects];
     for (UIView *v in [SVBHiddenChrome copy]) {
         if (!v.superview) continue;
         NSNumber *a = objc_getAssociatedObject(v, &SVBChromeAlphaKey);
@@ -841,10 +1101,21 @@ static void SVBDoChatChrome(UIViewController *vc) {
     // v10.5.0 本来是从 window 扫的, v10.5.1 改成只扫 vc.view 反而把这个覆盖丢了。
     // 纯键盘窗口跳过 (键盘子树本来就一律跳过)。
     @try {
-        for (UIWindow *w in UIApplication.sharedApplication.windows) {
+        for (UIWindow *w in SVBAllWindows(vc.view)) {
             NSString *wcls = NSStringFromClass([w class]).lowercaseString;
             if ([wcls containsString:@"keyboard"]) continue;
             SVBScanBands(w, w, 0, tops, bottoms, masks);
+        }
+    } @catch (NSException *e) {}
+
+    // v10.6.2: 深扫兜底 —— 不跳过列表子树, 专杀条带里的渐变遮罩/bar 背景/平铺白底。
+    // (顶部那条白很可能挂在 transcript 的 collection view 里, 几何扫描会整棵 skip)
+    @try {
+        SVBSweepDeepChrome(vc.view, vc.view, 0);
+        for (UIWindow *w in SVBAllWindows(vc.view)) {
+            NSString *wcls = NSStringFromClass([w class]).lowercaseString;
+            if ([wcls containsString:@"keyboard"]) continue;
+            SVBSweepDeepChrome(w, w, 0);
         }
     } @catch (NSException *e) {}
 
@@ -853,7 +1124,7 @@ static void SVBDoChatChrome(UIViewController *vc) {
     // 而键盘窗口在上面已被我们跳过, 几何扫不到。
     @try {
         SVBScanChromeVCs(vc, 0, bottoms);
-        for (UIWindow *w in UIApplication.sharedApplication.windows) {
+        for (UIWindow *w in SVBAllWindows(vc.view)) {
             NSString *wcls = NSStringFromClass([w class]).lowercaseString;
             if ([wcls containsString:@"keyboard"]) continue;
             UIViewController *rvc = w.rootViewController;
@@ -873,21 +1144,43 @@ static void SVBDoChatChrome(UIViewController *vc) {
     // 标题先抓后藏 (alpha 不影响读 text)
     NSString *titleText = nil;
     UIFont *titleFont = nil;
+    NSString *subText = nil;
+    UIFont *subFont = nil;
     if (top) {
-        @try { SVBPickTitleText(top, 0, &titleText, &titleFont); } @catch (NSException *e) {}
+        @try {
+            SVBPickTopTexts(top, &titleText, &titleFont, &subText, &subFont);
+        } @catch (NSException *e) {}
     }
     if (!titleText.length) {
         NSString *t = vc.title;
         if (!t.length) t = vc.navigationItem.title;
         if (t.length) titleText = t;
     }
+    // v10.6.2b: 号码兜底 —— 顶条里找不到像电话号码的副标题时, 再去导航栏里找一遍
+    if (!subText.length) {
+        @try {
+            NSString *num = SVBFindPhoneText(top, 0);
+            if (!num.length) {
+                UINavigationBar *nb = vc.navigationController.navigationBar;
+                if (nb && nb != top) num = SVBFindPhoneText(nb, 0);
+            }
+            if (num.length) {
+                subText = num;
+                subFont = [UIFont systemFontOfSize:11];
+            }
+        } @catch (NSException *e) {}
+    }
 
-    for (UIView *v in tops)    SVBHideChromeView(v);
-    for (UIView *v in bottoms) SVBHideChromeView(v);
-    for (UIView *v in masks)   SVBHideChromeView(v);
+    for (UIView *v in tops)  SVBHideChromeView(v);
+    for (UIView *v in masks) SVBHideChromeView(v);
+    // v10.6.2: 底条**不再 alpha=0** —— 用户要看到并用到底部输入框 / 上传照片 /
+    // 下面那一排功能键。改成「只清掉容器自身白底 + 内部 bar 背景层」, 控件原样保留。
+    for (UIView *v in bottoms) SVBTranslucentChromeView(v);
 
     if (top) {
-        @try { SVBMapChatTop(vc, top, titleText, titleFont); } @catch (NSException *e) {}
+        @try {
+            SVBMapChatTop(vc, top, titleText, titleFont, subText, subFont);
+        } @catch (NSException *e) {}
     }
 
     // v10.5.2: 诊断 —— 把本轮命中写进日志 (节流 1.5s)。万一还没生效, 下次诊断报告里
@@ -908,6 +1201,14 @@ static void SVBDoChatChrome(UIViewController *vc) {
             [[SVBManager shared] log:@"chat chrome 命中 %lu/%lu/%lu -> %@",
                 (unsigned long)tops.count, (unsigned long)bottoms.count,
                 (unsigned long)masks.count, desc];
+            // v10.6.2: 带上「名字/号码」实际取到什么 (定位号码映射用)
+            [[SVBManager shared] log:@"chat chrome 文字: 名=%@ / 号=%@",
+                titleText.length ? titleText : @"(无)",
+                subText.length ? subText : @"(无)"];
+            [[SVBManager shared] log:@"chat chrome 顶条文字候选: %@", SVBTextDump(top, 150)];
+            UINavigationBar *nbLog = vc.navigationController.navigationBar;
+            if (nbLog && nbLog != top)
+                [[SVBManager shared] log:@"chat chrome 导航栏文字候选: %@", SVBTextDump(nbLog, 150)];
         }
     } @catch (NSException *e) {}
 }
@@ -923,7 +1224,7 @@ static void SVBApplyChatChrome(UIViewController *vc) {
             sLastEnterLog = nowTs;
             [[SVBManager shared] log:@"chat chrome 进入: vc=%@ active=%d windows=%lu",
                 NSStringFromClass([vc class]), (int)active,
-                (unsigned long)UIApplication.sharedApplication.windows.count];
+                (unsigned long)SVBAllWindows(vc.view).count];
         }
     } @catch (NSException *e) {}
     if (!active) { SVBClearMappedChrome(); return; }
