@@ -22,7 +22,7 @@
 //   同时保留 jbroot / Documents 等共享根作为兜底, 用户放哪都能被扫到。
 // ============================================================
 
-#define SVB_VERSION @"10.5.1"
+#define SVB_VERSION @"10.5.0"
 #define SVB_SUITE @"com.nvb.smsvideobg"
 #define SVB_DARWIN_NOTE "com.nvb.smsvideobg/prefs.changed"
 #define SVB_MEDIA_DIR_NAME @"SMSVideoBG"
@@ -171,9 +171,6 @@ NSArray<NSArray<NSString *> *> *SVBContextDefinitions(void);
 - (void)recoverVideoPlaybackForce:(BOOL)force;
 // 屏幕上全部视频背景视图 (自愈/诊断用)
 - (NSArray<SVBVideoBackgroundView *> *)allVideoBackgroundViews;
-// v10.4.1: 本进程当前是否有「挂载且未隐藏」的视频背景视图 (0.5s 缓存) ——
-// 滚动清扫 gate: 没有可见背景时绝不清白卡, 避免页面露黑底
-- (BOOL)hasVisibleBackgroundViews;
 
 #pragma mark - v9.9.11 切后台自动清理
 

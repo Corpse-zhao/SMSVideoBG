@@ -705,7 +705,7 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
     [UIPasteboard generalPasteboard].string = udid;
     [self svbAlert:@"UDID 已复制"
                msg:[NSString stringWithFormat:
-        @"%@\n\n识别方式：%@\n把它发给作者，作者会回你一段以 SVBOFFLINE1: 开头的授权串。\n\n"
+        @"%@\n\n识别方式：%@\n把它发给作者，作者会回你一段以 VIDEOBGOFFLINE1: 开头的授权串。\n\n"
         @"拿到后回到本页点「粘贴离线授权」导入即可 —— 不用联网、不需要梯子。",
         udid, SVBAuthUDIDSource()]];
 }
@@ -874,12 +874,12 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
     NSString *clip = [UIPasteboard generalPasteboard].string ?: @"";
     UIAlertController *ac = [UIAlertController
         alertControllerWithTitle:@"粘贴离线授权串"
-                         message:@"把作者发给你的一整段文本（以 SVBOFFLINE1: 开头）粘进来。\n"
+                         message:@"把作者发给你的一整段文本（以 VIDEOBGOFFLINE1: 开头）粘进来。\n"
                                  @"不用联网立即生效，有效期按作者签发的天数计。"
                   preferredStyle:UIAlertControllerStyleAlert];
     [ac addTextFieldWithConfigurationHandler:^(UITextField *tf) {
-        tf.text = [clip rangeOfString:@"SVBOFFLINE1:"].location != NSNotFound ? clip : @"";
-        tf.placeholder = @"SVBOFFLINE1:...";
+        tf.text = [clip rangeOfString:@"VIDEOBGOFFLINE1:"].location != NSNotFound ? clip : @"";
+        tf.placeholder = @"VIDEOBGOFFLINE1:...";
         tf.autocapitalizationType = UITextAutocapitalizationTypeNone;
         tf.autocorrectionType = UITextAutocorrectionTypeNo;
         tf.clearButtonMode = UITextFieldViewModeAlways;
@@ -937,7 +937,7 @@ static void SVBAppImportFromLibrary(UIViewController *host, NSString *ctx) {
 - (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
     if (![self authOK]) {
         return @"① 点「本机 UDID」那一行复制，发给作者；\n"
-                "② 作者会回你一段以 SVBOFFLINE1: 开头的授权串；\n"
+                "② 作者会回你一段以 VIDEOBGOFFLINE1: 开头的授权串；\n"
                 "③ 点「粘贴离线授权」把它导入，立刻生效。\n\n"
                 "本机不发起任何网络请求，不需要代理 / 梯子。有效期按作者签发的内容计，"
                 "到期找作者要一段新的即可。\n\n"
@@ -1867,7 +1867,7 @@ static void SVBAppPickImage(UIViewController *host, void (^done)(UIImage *image)
 - (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
     if (section == 0) return nil;
     if (section == 1)
-        return @"把作者发来的授权串（以 SVBOFFLINE1: 开头）点「粘贴离线授权」导入即可，立刻生效。\n"
+        return @"把作者发来的授权串（以 VIDEOBGOFFLINE1: 开头）点「粘贴离线授权」导入即可，立刻生效。\n"
                 "授权串只对一台设备有效（已绑定本机指纹），有效期按作者签发的天数计，到期找作者要一段新的。\n\n"
                 "本机不发起任何网络请求 —— 不需要代理 / 梯子。";
     return @"「授权诊断」是纯本机自检（UDID / 指纹 / 授权串验签），不联网，秒出结果。";
@@ -1972,7 +1972,7 @@ static void SVBAppPickImage(UIViewController *host, void (^done)(UIImage *image)
     [UIPasteboard generalPasteboard].string = udid;
     [self alert:@"UDID 已复制"
              msg:[NSString stringWithFormat:
-        @"%@\n\n识别方式：%@\n把这一整串发给作者，作者会回你一段以 SVBOFFLINE1: 开头的授权串。\n\n"
+        @"%@\n\n识别方式：%@\n把这一整串发给作者，作者会回你一段以 VIDEOBGOFFLINE1: 开头的授权串。\n\n"
         @"拿到后回到本页点「粘贴离线授权」导入即可（不用联网）。",
         udid, SVBAuthUDIDSource()]];
 }
@@ -1982,12 +1982,12 @@ static void SVBAppPickImage(UIViewController *host, void (^done)(UIImage *image)
     NSString *clip = [UIPasteboard generalPasteboard].string ?: @"";
     UIAlertController *ac = [UIAlertController
         alertControllerWithTitle:@"粘贴离线授权串"
-                         message:@"把作者发来的一整段文本（以 SVBOFFLINE1: 开头）粘进来。\n"
+                         message:@"把作者发来的一整段文本（以 VIDEOBGOFFLINE1: 开头）粘进来。\n"
                                  @"不用联网立即生效，有效期按作者签发的天数计。"
                   preferredStyle:UIAlertControllerStyleAlert];
     [ac addTextFieldWithConfigurationHandler:^(UITextField *tf) {
-        tf.text = [clip rangeOfString:@"SVBOFFLINE1:"].location != NSNotFound ? clip : @"";
-        tf.placeholder = @"SVBOFFLINE1:...";
+        tf.text = [clip rangeOfString:@"VIDEOBGOFFLINE1:"].location != NSNotFound ? clip : @"";
+        tf.placeholder = @"VIDEOBGOFFLINE1:...";
         tf.autocapitalizationType = UITextAutocapitalizationTypeNone;
         tf.autocorrectionType = UITextAutocorrectionTypeNo;
         tf.clearButtonMode = UITextFieldViewModeAlways;
@@ -2123,7 +2123,7 @@ static NSString *SVBGenerateDiagnoseReport(void) {
     } else {
         [r appendString:@"未检测到任何心跳 ==> 插件没有被加载进任何进程。\n"];
         [r appendString:@"处理顺序: 1) 上滑彻底关闭信息App 再打开; 2) 仍无 -> 注销(respring)一次;\n"];
-        [r appendString:@"3) 打开信息App 后看窗口顶部有没有出现诊断横幅 -> 有横幅说明注入管线正常; 无横幅说明 dylib 完全没被加载。\n"];
+        [r appendString:@"3) 打开信息App 看窗口顶部有没有出现诊断横幅 -> 有横幅说明注入管线正常; 无横幅说明 dylib 完全没被加载。\n"];
     }
 
     [r appendString:@"\n--- 判读要点 (v1.3) ---\n"];

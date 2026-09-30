@@ -8,18 +8,25 @@ INSTALL_TARGET_PROCESSES = MobileSMS
 include $(THEOS)/makefiles/common.mk
 
 # ------------------------------------------------------------
-# 授权签名密钥 (v1.9.0)
+# 授权签名密钥 (v10.5.0: 两个插件统一)
 #   源码是公开仓库, 密钥只注入到编译产物里:
-#     - CI: GitHub 仓库 Settings -> Secrets -> SVB_LICENSE_SECRET  (build.yml 传入)
-#     - 本地: export SVB_LICENSE_SECRET=... 或 gmake SVB_LICENSE_SECRET=...
+#     - CI: GitHub 仓库 Settings -> Secrets -> VIDEOBG_LICENSE_SECRET
+#           (信息版仓库与备忘录版仓库必须配**同一个值**)
+#     - 本地: export VIDEOBG_LICENSE_SECRET=... 或 gmake VIDEOBG_LICENSE_SECRET=...
+#   兼容旧名: 新名没配时自动回退读 SVB_LICENSE_SECRET。
 #   未注入时回退到内置兜底值 —— 兜底值在源码里可见, 仅供本地自测,
 #   正式分发必须配置 Secret, 否则任何人拿到源码就能自己签发激活码。
-#   签发端用同一密钥: tools/license_gen.py (读同名环境变量)
+#   ★ 两边密钥相同 + 指纹算法相同 => 同一台设备算出同一个 H32 =>
+#     靠授权串里的「产品位」决定这个码给哪个插件用 (all / sms / memos)。
 # ------------------------------------------------------------
-ifeq ($(strip $(SVB_LICENSE_SECRET)),)
-SVB_LICENSE_SECRET = SVBG-LICENSE-FALLBACK-INSECURE-SET-CI-SECRET
+LICENSE_SECRET_RAW = $(VIDEOBG_LICENSE_SECRET)
+ifeq ($(strip $(LICENSE_SECRET_RAW)),)
+LICENSE_SECRET_RAW = $(SVB_LICENSE_SECRET)
 endif
-LICENSE_CFLAGS = -DSVB_LICENSE_SECRET='"$(SVB_LICENSE_SECRET)"'
+ifeq ($(strip $(LICENSE_SECRET_RAW)),)
+LICENSE_SECRET_RAW = VIDEOBG-LICENSE-FALLBACK-INSECURE-SET-CI-SECRET
+endif
+LICENSE_CFLAGS = -DVIDEOBG_LICENSE_SECRET='"$(LICENSE_SECRET_RAW)"'
 
 # v10.3.0: 授权只走「离线授权串」, 插件端零网络请求 —— 原来的 Gitee/镜像名单
 # 地址注入位(GITEE_CFLAGS)已随在线名单一起删除。

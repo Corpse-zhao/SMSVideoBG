@@ -485,8 +485,6 @@ BOOL SVBDirWritablePath(NSString *dir) {
 - (void)detachBackground:(SVBVideoBackgroundView *)bg fromViewController:(UIViewController *)vc;
 - (void)clearBackgroundsOfView:(UIView *)view depth:(NSInteger)depth;
 - (void)deepChromePass:(UIView *)view depth:(NSInteger)depth ctx:(NSString *)ctx;
-- (void)clearBarChromeBackground:(UIView *)v depth:(NSInteger)d;              // v10.5.1
-- (void)sweepBottomBandBackgrounds:(UIView *)root space:(UIView *)space depth:(NSInteger)d; // v10.5.1
 - (void)bubblePass:(UIView *)view depth:(NSInteger)depth inCell:(BOOL)inCell ctx:(NSString *)ctx sysBg:(BOOL)sysBg;
 - (void)dumpVisibleResidue:(UIView *)view ctx:(NSString *)ctx;   // v1.7.12
 - (void)collectResidue:(UIView *)v depth:(NSInteger)depth effAlpha:(CGFloat)ea into:(NSMutableString *)out; // v1.7.12
@@ -1366,13 +1364,6 @@ static BOOL SVBCopyInto(NSString *srcPath, NSString *dir, NSString *name, NSErro
 #pragma mark - 背景应用
 
 // 收集视图树里的 UIToolbar (垃圾信息「全部已读/全部删除」、最近删除「全部删除/全部恢复」等底部操作栏)
-// v10.5.1: 列表页 (垃圾信息 / 最近删除) 底部工具栏「整条白」的根因是工具栏内部的
-// _UIBarBackground 背景子视图 (材质/颜色)。只设 UIToolbarAppearance 是拦不住它的
-// (系统在布局/滚动时会重新铺), 所以要把它本身藏掉。它是纯背景层, 没有交互,
-// hidden 掉不影响按钮 —— 这与「绝不能整体隐藏工具栏」是两码事。
-static char SVBBarBgOrigHiddenKey;
-static NSMutableArray<UIView *> *SVBHiddenBarBgs;
-
 static void SVBCollectToolbars(UIView *view, NSMutableArray<UIToolbar *> *out_, NSInteger depth) {
     if (depth > 8) return;
     for (UIView *sub in view.subviews) {
@@ -1446,18 +1437,7 @@ static void SVBCollectToolbars(UIView *view, NSMutableArray<UIToolbar *> *out_, 
                 if ([tb respondsToSelector:@selector(setCompactAppearance:)])
                     tb.compactAppearance = tap;
                 tb.backgroundColor = [UIColor clearColor];
-                // v10.5.1: 光设 appearance 拦不住系统重铺的 _UIBarBackground -> 直接藏背景层
-                [self clearBarChromeBackground:tb depth:0];
             }
-        } @catch (NSException *e) {}
-
-        // v10.5.1: 底部条带全宽容器的底色 (白不来自 toolbar 时的兜底)。
-        // vc.view 与它所在的 window 各扫一遍 (工具栏有时挂在窗口级容器上)。
-        @try {
-            [self sweepBottomBandBackgrounds:vc.view space:vc.view depth:0];
-            UIWindow *vw = vc.view.window;
-            if (vw && vw != vc.view)
-                [self sweepBottomBandBackgrounds:vw space:vw depth:0];
         } @catch (NSException *e) {}
 
         // v1.7.2: 深度透明化 (对话详情顶部头像区/输入条/底部栏模糊层)。
@@ -1629,65 +1609,6 @@ static void SVBCollectToolbars(UIView *view, NSMutableArray<UIToolbar *> *out_, 
             }
         }
         [self deepChromePass:sub depth:depth + 1 ctx:ctx];
-    }
-}
-
-// v10.5.1: 清除一个视图内部的「bar 背景层」。
-// - _UIBarBackground : UINavigationBar / UIToolbar 的标准背景子视图 -> 直接藏
-// - UIVisualEffectView : 材质模糊 -> 拆 effect
-// 注意只清背景/材质, 不动工具栏里的按钮 (UIBarButtonItem 不在这些子视图里)。
-- (void)clearBarChromeBackground:(UIView *)v depth:(NSInteger)d {
-    if (!v || d > 8) return;
-    @try {
-        NSString *cls = NSStringFromClass([v class]);
-        if ([cls hasPrefix:@"_UIBarBackground"] || [cls containsString:@"BarBackground"]) {
-            if (!v.hidden) {
-                if (!SVBHiddenBarBgs) SVBHiddenBarBgs = [NSMutableArray new];
-                if (!objc_getAssociatedObject(v, &SVBBarBgOrigHiddenKey)) {
-                    objc_setAssociatedObject(v, &SVBBarBgOrigHiddenKey, @(v.hidden),
-                                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-                    [SVBHiddenBarBgs addObject:v];
-                }
-                v.hidden = YES;      // 纯背景层: 藏掉不影响按钮, 也不影响布局
-            }
-            return;
-        }
-        if ([v isKindOfClass:[UIVisualEffectView class]]) {
-            UIVisualEffectView *ev = (UIVisualEffectView *)v;
-            if (ev.effect) ev.effect = nil;
-            if (v.backgroundColor && ![v.backgroundColor isEqual:[UIColor clearColor]])
-                v.backgroundColor = [UIColor clearColor];
-        }
-    } @catch (NSException *e) {}
-    for (UIView *s2 in v.subviews) [self clearBarChromeBackground:s2 depth:d + 1];
-}
-
-// v10.5.1: 扫「底部条带的全宽条状容器」, 把容器自身的底色清掉 (覆盖白不来自
-// UIToolbar/_UIBarBackground 的情况)。列表 (CollectionView/TableView) 整棵跳过,
-// 所以不会碰到底部的 cell / 消息内容。
-- (void)sweepBottomBandBackgrounds:(UIView *)root space:(UIView *)space depth:(NSInteger)d {
-    if (!root || !space || d > 6) return;
-    CGRect sb = space.bounds;
-    CGFloat W = sb.size.width, H = sb.size.height;
-    if (W < 1 || H < 1) return;
-    CGFloat safeBot = space.safeAreaInsets.bottom;
-    if (safeBot < 1) safeBot = 34.0;
-    CGFloat bottomStart = H - (safeBot + 112.0);
-    for (UIView *sub in root.subviews) {
-        if ([sub isKindOfClass:[SVBVideoBackgroundView class]]) continue;
-        if ([sub isKindOfClass:[UICollectionView class]] ||
-            [sub isKindOfClass:[UITableView class]]) continue;    // 列表内部不碰
-        NSString *low = NSStringFromClass([sub class]).lowercaseString;
-        if ([low containsString:@"keyboard"] || [low containsString:@"input"]) continue;
-        CGRect f = [sub convertRect:sub.bounds toView:space];
-        if (f.size.width >= W * 0.92 && f.size.height >= 20.0 &&
-            f.size.height <= H * 0.30 && f.origin.y >= bottomStart) {
-            if (sub.backgroundColor && ![sub.backgroundColor isEqual:[UIColor clearColor]])
-                sub.backgroundColor = [UIColor clearColor];
-            [self clearBarChromeBackground:sub depth:0];
-            continue;
-        }
-        [self sweepBottomBandBackgrounds:sub space:space depth:d + 1];
     }
 }
 
@@ -2176,24 +2097,6 @@ static NSMutableDictionary<NSString *, NSDate *> *sSVBPlayerMtimes = nil;
         for (UIWindow *w in UIApplication.sharedApplication.windows) [self collectVideoViewsIn:w into:out];
     } @catch (NSException *e) {}
     return out;
-}
-
-// v10.4.1: 本进程是否有「挂载且未隐藏」的背景视图 (0.5s 缓存 —— cell/decoration
-// 赋色钩子会高频调用, 缓存挡住全树遍历开销)。滚动清扫 gate 专用。
-static CFAbsoluteTime sSVBSweepCheckLast = 0;
-static BOOL sSVBSweepCheckResult = NO;
-- (BOOL)hasVisibleBackgroundViews {
-    @try {
-        CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-        if (now - sSVBSweepCheckLast < 0.5) return sSVBSweepCheckResult;
-        BOOL found = NO;
-        for (SVBVideoBackgroundView *v in [self allVideoBackgroundViews]) {
-            if (!v.hidden) { found = YES; break; }
-        }
-        sSVBSweepCheckLast = now;
-        sSVBSweepCheckResult = found;
-        return found;
-    } @catch (NSException *e) { return NO; }
 }
 
 - (void)pauseAllPlayers {
