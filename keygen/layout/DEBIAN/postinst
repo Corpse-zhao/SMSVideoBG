@@ -1,0 +1,10 @@
+#!/bin/bash
+# 授权签发 App 安装后处理: 授权给 mobile + 注册图标 (尽力而为)
+for p in "/var/jb/Applications/SVBKeyGen.app" "/Applications/SVBKeyGen.app"; do
+  if [ -d "$p" ]; then
+    chown -R mobile:mobile "$p" 2>/dev/null || true
+    chmod -R u+rwX "$p" 2>/dev/null || true
+    uicache -p "$p" >/dev/null 2>&1 || true
+  fi
+done
+exit 0

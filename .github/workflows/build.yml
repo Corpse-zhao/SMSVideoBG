@@ -1,0 +1,88 @@
+name: Build SMSVideoBG
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    # 必须用 macOS 运行器: Apple 原生 clang + ld64 产出正确的 arm64e 新 ABI 与
+    # LC_DYLD_CHAINED_FIXUPS。Linux 工具链的 arm64e 注入系统进程时 objc readClass
+    # 直接 SIGBUS (NotesVideoBG v2.2-v3.1 崩溃根因)。
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Theos
+        uses: actions/checkout@v4
+        with:
+          repository: theos/theos
+          ref: master
+          submodules: recursive
+          path: theos
+
+      - name: Install iOS SDK
+        uses: actions/checkout@v4
+        with:
+          repository: theos/sdks
+          sparse-checkout: iPhoneOS14.5.sdk
+          path: theos/sdks
+
+      - name: Install dependencies
+        run: |
+          brew install make xz ldid
+          gmake --version | head -1
+          ldid -V || true
+
+      - name: Build package
+        env:
+          THEOS: ${{ github.workspace }}/theos
+          # v1.9.0 授权签名密钥: 只在这里注入, 不写进公开源码。
+          # 仓库 Settings -> Secrets and variables -> Actions -> New repository secret
+          # 名字 SVB_LICENSE_SECRET; 没配则用兜底值编译 (仅供自测, 无法防盗版)。
+          SVB_LICENSE_SECRET: ${{ secrets.SVB_LICENSE_SECRET }}
+          # v10.3.0: 插件端已无任何在线名单/网络校验 —— 授权只走离线授权串,
+          # 因此原来的 SVB_GITEE_URL 注入位已删除。
+        run: |
+          if [ -z "$SVB_LICENSE_SECRET" ]; then
+            echo "::warning::SVB_LICENSE_SECRET 未配置 —— 本次用内置兜底密钥编译 (任何人拿到源码都能签发激活码)"
+          else
+            echo "✓ 已从 Secret 注入授权密钥 (长度 ${#SVB_LICENSE_SECRET})"
+          fi
+          gmake package THEOS_PACKAGE_SCHEME=rootless FINALPACKAGE=1
+
+      - name: Verify package contents (filter / control / arch)
+        run: python3 tools/inspect_deb.py packages/*.deb || true
+
+      # v1.9.1: 确认授权密钥真的注入进了二进制 (只打印哈希前缀, 不泄露明文)
+      - name: Verify license secret injected
+        env:
+          SVB_LICENSE_SECRET: ${{ secrets.SVB_LICENSE_SECRET }}
+        run: |
+          if [ -z "$SVB_LICENSE_SECRET" ]; then
+            echo "::warning::SVB_LICENSE_SECRET 未配置, 使用兜底密钥"
+            exit 0
+          fi
+          printf 'secret sha256[:8] = '; printf '%s' "$SVB_LICENSE_SECRET" | shasum -a 256 | cut -c1-8
+          ok=1
+          for f in .theos/obj/SMSVideoBG.dylib .theos/obj/SMSVideoBGApp; do
+            if [ -f "$f" ]; then
+              if grep -q "$SVB_LICENSE_SECRET" "$f"; then echo "OK  $f 已注入密钥"; else echo "FAIL $f 未见密钥"; ok=0; fi
+            fi
+          done
+          [ "$ok" = "1" ] || { echo "::error::授权密钥未能注入二进制"; exit 1; }
+
+      - name: Diagnose Mach-O slices (log load commands per arch)
+        run: |
+          if [ -f .theos/obj/SMSVideoBG.dylib ]; then python3 tools/macho_dump.py .theos/obj/SMSVideoBG.dylib; fi
+          if [ -f .theos/obj/SMSVideoBGApp ]; then python3 tools/macho_dump.py .theos/obj/SMSVideoBGApp; fi
+          ls .theos/obj/ 2>/dev/null | head
+
+      - name: Upload .deb artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SMSVideoBG-deb
+          path: packages/*.deb
+          if-no-files-found: error
