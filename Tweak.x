@@ -1116,29 +1116,43 @@ static void SVBContentUnionInSpace(UIView *v, NSInteger d, UIView *space,
     for (UIView *s in v.subviews) SVBContentUnionInSpace(s, d + 1, space, u, has);
 }
 
-// v10.6.7b 【核心】把输入栏**钉在屏幕底部 + 水平居中**。
-// 【为什么不再"按宿主容器算"】宿主容器的高度/内边距不固定, 算出来的位置总是差一截 ——
-// 用户实拍实测: 输入栏中心在 266.5pt (屏幕中心 215pt, 偏右 51.5pt),
-// 下沿在 848pt (home 指示条 919pt, 偏高约 42pt)。而且老实现**根本没做水平居中**。
-// 【现在的做法】直接在**屏幕(窗口)坐标系**里算目标, 参照物是"看得见的东西":
-//   ① SVBContentUnionInSpace 取文字框 + 麦克风这类叶子元素的联合框;
-//   ② 水平: 中心 x == 屏宽 / 2;
-//   ③ 垂直: 下沿 == 屏高 - 底部安全区 - 8 (正好是系统原生那一条的位置);
-//   ④ 键盘弹出时 (宿主不再贴屏底) **不动垂直** —— 否则会钻到键盘后面;
-//      没越界就不上移 (防抖动);
-//   ⑤ 只下移 / 只小幅度修正, 位移过大 (异常几何) 宁可不做。
-// 公式幂等 (center 不受 transform 影响) => 系统怎么重排都自愈, 不累积漂移。
+// v10.6.9 【核心】把输入栏**钉在屏幕底部 + 水平居中**。
+// 【历史】
+//   v10.6.7 按「宿主容器高度」算 => 总差一截, 且**没做水平居中**(只算了 ty)。
+//   v10.6.8 改成在屏幕坐标系里按"看得见的东西"算 => 位置对了, 但**开始横跳**:
+//     ⚠️ 因为内容框是 convertRect 到 space 取的, 而这条转换**会经过 entry 自己的
+//        transform** —— 那个 transform 正是我们上一次施加的位移。
+//        第 1 次: 内容中心 266.5 -> tx = -51.5 -> 应用 -51.5
+//        第 2 次: 内容已被挪到 215 -> tx = 0   -> 应用 0 (弹回原位)
+//        第 3 次: 又回到 266.5 ...            -> 无限自激振荡
+// 【v10.6.9 的修法】让"内容框"与我们的 transform **彻底解耦**:
+//   ① 内容框改在 **entry 自己的坐标系** 里取 (SVBContentUnionInSpace 的 space 传 entry),
+//      convertRect 到 entry 不会经过 entry 自身的 transform => 恒稳;
+//   ② 用 entry.center (**不受 transform 影响的那个值**) 反推出"未施加位移时"的屏幕框;
+//   ③ 再把内容框相对 entry.bounds 的偏移搬过去, 得到"未施加位移时"的内容屏幕框;
+//   ④ 于是 tx/ty 只跟系统布局有关, 跟我们挪过多少无关 => 公式**重新幂等**, 不再横跳。
+// 目标: 水平中心 == 屏宽/2; 下沿 == 屏高 - 底部安全区 - 8 (系统原生那一条的位置)。
+// 键盘弹出时 (宿主不再贴屏底) 不动垂直 —— 否则会钻到键盘后面。
 // 返回 YES 表示已钉住; NO 表示几何不可信 (调用方可走兜底逻辑)。
 static BOOL SVBPinEntryToBottom(UIView *entry, UIView *space) {
-    if (!entry || !space) return NO;
+    if (!entry || !space || !entry.superview) return NO;
     CGFloat W = space.bounds.size.width, Hh = space.bounds.size.height;
     if (W < 60.0 || Hh < 60.0) return NO;
-    CGRect vis = [space convertRect:entry.bounds fromView:entry];
-    if (vis.size.height < 10.0) return NO;
-    BOOL hasC = NO; CGRect content = CGRectZero;
-    SVBContentUnionInSpace(entry, 0, space, &content, &hasC);
-    if (!hasC) content = vis;
-    if (content.size.width < 20.0) return NO;
+    CGRect eb = entry.bounds;
+    if (eb.size.height < 10.0 || eb.size.width < 10.0) return NO;
+    // ① 内容框: 取在 **entry 自己的坐标系** 里 (不含我们的 transform)
+    BOOL hasC = NO; CGRect cInEntry = CGRectZero;
+    SVBContentUnionInSpace(entry, 0, entry, &cInEntry, &hasC);
+    if (!hasC || cInEntry.size.width < 20.0) cInEntry = eb;
+    // ② entry.center 不受 transform 影响 => 用它反推"未施加位移时"的屏幕框
+    CGPoint ctr = [space convertPoint:entry.center fromView:entry.superview];
+    CGRect raw = CGRectMake(ctr.x - eb.size.width / 2.0,
+                            ctr.y - eb.size.height / 2.0,
+                            eb.size.width, eb.size.height);
+    // ③ 把内容框相对 entry.bounds 的偏移搬过去
+    CGRect content = CGRectMake(raw.origin.x + (cInEntry.origin.x - eb.origin.x),
+                                raw.origin.y + (cInEntry.origin.y - eb.origin.y),
+                                cInEntry.size.width, cInEntry.size.height);
     CGFloat safeBot = space.safeAreaInsets.bottom;
     if (safeBot < 1.0) safeBot = 34.0;
     if (safeBot > 80.0) safeBot = 34.0;
@@ -1172,7 +1186,9 @@ static BOOL SVBPinEntryToBottom(UIView *entry, UIView *space) {
         if (![SVBShiftedViews containsObject:entry]) [SVBShiftedViews addObject:entry];
     }
     CGAffineTransform want = CGAffineTransformTranslate(base, tx, ty);
-    if (!CGAffineTransformEqualToTransform(entry.transform, want))
+    // v10.6.9: 加 0.5pt 死区 —— 浮点噪声引起的"差之毫厘"不再触发赋值, 杜绝微抖
+    CGAffineTransform cur = entry.transform;
+    if (fabs(cur.tx - want.tx) > 0.5 || fabs(cur.ty - want.ty) > 0.5)
         entry.transform = want;
     return YES;
 }
@@ -1551,20 +1567,10 @@ static void SVBDoChatChrome(UIViewController *vc) {
     // v10.6.7 【关键改动】不再用「一次性写死的位移」——
     // 键盘开合会让系统重排 inputAccessoryView, 抽屉高度也跟着变, 写死的位移会残留
     // (用户报的「收起键盘后输入框位置下移」)。改成每次重算的**底部锚定**(幂等)。
-    if (entryView && !SVBPinEntryToBottom(entryView, vc.view.window ?: vc.view)) {
-        // 兜底: 找不到紧贴的宿主容器时, 才退回「按抽屉高度下移」的老行为
-        if (trayH > 8.0) {
-            if (!SVBShiftedViews) SVBShiftedViews = [NSMutableArray new];
-            if (!objc_getAssociatedObject(entryView, &SVBOrigTfKey)) {
-                objc_setAssociatedObject(entryView, &SVBOrigTfKey,
-                    [NSValue valueWithCGAffineTransform:entryView.transform],
-                    OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-                if (![SVBShiftedViews containsObject:entryView])
-                    [SVBShiftedViews addObject:entryView];
-            }
-            entryView.transform = CGAffineTransformMakeTranslation(0, trayH);
-        }
-    }
+    // v10.6.9: 【横跳的第二个来源】老兜底会写一个**完全不同**的位移 (0, 抽屉高),
+    // 而钉底写的是 (tx, ty)。两个值一旦交替生效, 输入栏就在"原位"和"居中"之间跳。
+    // 所以这里一律只走 SVBPinEntryToBottom —— 钉不住就保持原样(宁可不动, 也不要跳)。
+    if (entryView) SVBPinEntryToBottom(entryView, vc.view.window ?: vc.view);
 
     // v10.6.3: 系统导航栏的返回键/标题此刻是否真的可见 -> 决定自绘层要不要画
     BOOL sysOk = NO;
