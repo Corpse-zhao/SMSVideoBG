@@ -581,6 +581,8 @@ static char SVBTransLayerBgKey;
 static char SVBIconTrayKey;                 // v10.6.3: 标记「底部 App 抽屉」视图
 static NSMutableArray<UIView *> *SVBShiftedViews;   // v10.6.5: 被 transform 下移过的输入栏
 static char SVBShiftKey;                          // v10.6.5: 存原始 transform 以便还原
+static char SVBOrigTfKey;                         // v10.6.7: 输入栏原始 transform (还原用)
+static BOOL sSVBChromeBusy = NO;                  // v10.6.7: chrome 处理重入保护
 
 // 返回按钮的点击目标: UIAction 的 identifier 是 readonly 且 actionWithTitle:image:
 // 传 nil 会撞 -Wnonnull (CI 开了 -Werror), 干脆用一个常驻辅助对象 + target-action,
@@ -891,6 +893,17 @@ static BOOL SVBNavContentVisible(UIView *nav) {
 static void SVBHideChromeView(UIView *v) {
     if (!v || !v.superview) return;
     if (!SVBHiddenChrome) SVBHiddenChrome = [NSMutableArray new];
+    // v10.6.7: 系统会重建 bar 背景视图 (尤其导航栏) —— 把已脱离层级的旧记录剔掉,
+    // 否则数组会一直攥着这些视图不放 (内存 + 还原时遍历变慢)。
+    if (SVBHiddenChrome.count > 64) {
+        for (NSInteger i = (NSInteger)SVBHiddenChrome.count - 1; i >= 0; i--) {
+            UIView *old = SVBHiddenChrome[(NSUInteger)i];
+            if (old.superview) continue;
+            objc_setAssociatedObject(old, &SVBChromeAlphaKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            objc_setAssociatedObject(old, &SVBChromeHiddenKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            [SVBHiddenChrome removeObjectAtIndex:(NSUInteger)i];
+        }
+    }
     // 只在首次藏时记录原值 (重复调用不能覆盖, 否则恢复时拿到的是 0)
     if (!objc_getAssociatedObject(v, &SVBChromeAlphaKey)) {
         objc_setAssociatedObject(v, &SVBChromeAlphaKey, @(v.alpha),
@@ -1044,6 +1057,71 @@ static void SVBDeepProcessBottom(UIView *v, UIView *space, NSInteger depth,
         }
         SVBDeepProcessBottom(sub, space, depth + 1, entryOut, trayHOut, trayCntOut);
     }
+}
+
+// v10.6.7: 从输入栏往上找「紧贴它的那个宿主容器」。
+// 为什么需要: 输入栏的祖先里可能有一整屏的容器 (UIInputSetContainerView) ——
+// 把输入框钉到那种容器的底部会直接钻到键盘后面; 只有**紧贴**输入栏的那个宿主
+// (高度 ≈ 输入栏 + 抽屉) 才是正确的定位参照。
+// 判据: 候选高度落在 [h-1, h+300] 之间, 最多往上找 4 层。
+static UIView *SVBAccessoryHost(UIView *entry) {
+    if (!entry) return nil;
+    CGFloat h = entry.bounds.size.height;
+    if (h < 1.0) return nil;
+    UIView *sv = entry.superview;
+    NSInteger guard = 0;
+    while (sv && guard++ < 4) {
+        CGFloat H = sv.bounds.size.height;
+        if (H > 1.0 && H >= h - 1.0 && H <= h + 300.0) return sv;
+        sv = sv.superview;
+    }
+    return nil;
+}
+
+// v10.6.7 【核心修法②】把输入栏**钉在宿主容器的底部居中**。
+// 【为什么废掉上一版的写法】v10.6.5/10.6.6 是把「抽屉高度」一次性写进 transform。
+// 但键盘弹出/收起时系统会重排 inputAccessoryView, 抽屉高度也会跟着变 ——
+// 写死的位移会残留下来, 用户看到的就是「开合键盘后输入框位置下移」。
+// 【现在的做法】每次重新算, 不做任何记忆:
+//   ① 用 [host convertRect:entry.bounds fromView:entry] 拿输入栏的**实际视觉框**
+//      (这已经包含 transform, 也顺带处理了 host 不是直接父视图的坐标系问题);
+//   ② 目标下沿 = 宿主高度 - 底部安全区 (避开 home 指示条);
+//   ③ 差值就是这次需要的 ty。
+// 公式是**幂等**的 (center 不受 transform 影响 => 反复调用结果一致),
+// 所以系统怎么重排都能自愈, 不会再累积漂移。
+// 返回 YES 表示已按底部锚定; NO 表示找不到宿主容器 (调用方可走老的兜底逻辑)。
+static BOOL SVBPinEntryToBottom(UIView *entry) {
+    if (!entry) return NO;
+    UIView *host = SVBAccessoryHost(entry);
+    if (!host) return NO;
+    CGFloat h = entry.bounds.size.height;
+    CGFloat H = host.bounds.size.height;
+    if (h < 20.0 || h > 260.0) return NO;         // 不像输入栏就不碰
+    if (H < h - 1.0) return NO;
+    CGRect vis = [host convertRect:entry.bounds fromView:entry];
+    if (vis.size.height < 1.0) return NO;
+    CGFloat safeBot = host.safeAreaInsets.bottom;
+    if (safeBot < 0.0) safeBot = 0.0;
+    if (safeBot > H - h) safeBot = 0.0;           // 数值不合理就不扣安全区
+    CGFloat ty = (H - safeBot) - CGRectGetMaxY(vis);
+    if (ty < -1.0) ty = 0.0;                      // 已经比目标更低就不再上移(防抖)
+    if (ty > 240.0) return NO;                    // 异常几何: 宁可不做
+    // 原始 transform 只记一次, 离开页面时还原
+    NSValue *ov = objc_getAssociatedObject(entry, &SVBOrigTfKey);
+    CGAffineTransform base = CGAffineTransformIdentity;
+    if (ov) {
+        base = ov.CGAffineTransformValue;
+    } else {
+        base = entry.transform;
+        objc_setAssociatedObject(entry, &SVBOrigTfKey,
+            [NSValue valueWithCGAffineTransform:base], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        if (!SVBShiftedViews) SVBShiftedViews = [NSMutableArray new];
+        if (![SVBShiftedViews containsObject:entry]) [SVBShiftedViews addObject:entry];
+    }
+    CGAffineTransform want = CGAffineTransformTranslate(base, 0, ty);
+    if (!CGAffineTransformEqualToTransform(entry.transform, want))
+        entry.transform = want;
+    return YES;
 }
 
 // v10.6.2: frame 是否落在「顶部条带 / 底部条带」(全宽 + 条状, 不是整屏)
@@ -1259,11 +1337,13 @@ static void SVBClearMappedChrome(void) {
         objc_setAssociatedObject(v, &SVBChromeHiddenKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
     [SVBHiddenChrome removeAllObjects];
-    // v10.6.5: 还原被下移过的输入栏
+    // v10.6.7: 还原被下移过的输入栏 (原值存在 SVBOrigTfKey)
     for (UIView *v in [SVBShiftedViews copy]) {
         if (!v.superview) continue;
-        NSValue *iv = objc_getAssociatedObject(v, &SVBShiftKey);
+        NSValue *iv = objc_getAssociatedObject(v, &SVBOrigTfKey)
+                   ?: objc_getAssociatedObject(v, &SVBShiftKey);
         if (iv) v.transform = iv.CGAffineTransformValue;
+        objc_setAssociatedObject(v, &SVBOrigTfKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         objc_setAssociatedObject(v, &SVBShiftKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
     [SVBShiftedViews removeAllObjects];
@@ -1415,18 +1495,22 @@ static void SVBDoChatChrome(UIViewController *vc) {
         SVBTranslucentChromeView(v);
         SVBDeepProcessBottom(v, vc.view, 0, &entryView, &trayH, &trayCntHidden);
     }
-    // v10.6.5: 输入栏下移到最底下。用 transform 而不是改 frame/约束 ——
-    // transform 独立于 Auto Layout, 系统重排时不会被覆盖。
-    if (entryView && trayH > 8.0) {
-        if (!SVBShiftedViews) SVBShiftedViews = [NSMutableArray new];
-        if (!objc_getAssociatedObject(entryView, &SVBShiftKey)) {
-            objc_setAssociatedObject(entryView, &SVBShiftKey,
-                [NSValue valueWithCGAffineTransform:entryView.transform],
-                OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-            if (![SVBShiftedViews containsObject:entryView])
-                [SVBShiftedViews addObject:entryView];
+    // v10.6.7 【关键改动】不再用「一次性写死的位移」——
+    // 键盘开合会让系统重排 inputAccessoryView, 抽屉高度也跟着变, 写死的位移会残留
+    // (用户报的「收起键盘后输入框位置下移」)。改成每次重算的**底部锚定**(幂等)。
+    if (entryView && !SVBPinEntryToBottom(entryView)) {
+        // 兜底: 找不到紧贴的宿主容器时, 才退回「按抽屉高度下移」的老行为
+        if (trayH > 8.0) {
+            if (!SVBShiftedViews) SVBShiftedViews = [NSMutableArray new];
+            if (!objc_getAssociatedObject(entryView, &SVBOrigTfKey)) {
+                objc_setAssociatedObject(entryView, &SVBOrigTfKey,
+                    [NSValue valueWithCGAffineTransform:entryView.transform],
+                    OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                if (![SVBShiftedViews containsObject:entryView])
+                    [SVBShiftedViews addObject:entryView];
+            }
+            entryView.transform = CGAffineTransformMakeTranslation(0, trayH);
         }
-        entryView.transform = CGAffineTransformMakeTranslation(0, trayH);
     }
 
     // v10.6.3: 系统导航栏的返回键/标题此刻是否真的可见 -> 决定自绘层要不要画
@@ -1509,6 +1593,26 @@ static void SVBDoChatChrome(UIViewController *vc) {
     } @catch (NSException *e) {}
 }
 
+// v10.6.7 【核心修法①】布局驱动的 chrome 补扫。
+// 【为什么还要加这个】固定时刻的补扫 (0.0s / 0.05s / ...) 天生会错过一帧:
+// 导航栏背景、列表分区底、输入栏白底都是**系统在布局时**铺上去的,
+// 铺上去的时刻不固定 (push 转场结束、标题异步刷新、消息数据到位、键盘收发…),
+// 于是用户总能看到「先白一下, 等一下才消失」。
+// 改成「谁的布局动了, 就立刻再处理一次」, 白底在铺上去的**同一帧**就被抹掉。
+// 两道闸: 0.04s 节流 (防布局风暴) + 重入保护 (防"处理 -> 触发布局 -> 又处理")。
+static void SVBChatChromeKick(UIViewController *vc) {
+    if (!vc || !vc.view) return;
+    if (!SVBBubbleSweepActive()) return;
+    if (sSVBChromeBusy) return;
+    static NSTimeInterval lastKick = 0;
+    NSTimeInterval now = [NSDate date].timeIntervalSince1970;
+    if (now - lastKick < 0.04) return;
+    lastKick = now;
+    sSVBChromeBusy = YES;
+    @try { SVBDoChatChrome(vc); } @catch (NSException *e) {}
+    sSVBChromeBusy = NO;
+}
+
 // 入口: 进对话时调用一次; 与气泡一样做延迟补扫 (系统重建 chrome 后再藏)
 static void SVBApplyChatChrome(UIViewController *vc) {
     // v10.6.4: 原来是 `!vc.view.window` 就直接 return —— 但 push 转场的 viewWillAppear
@@ -1531,13 +1635,15 @@ static void SVBApplyChatChrome(UIViewController *vc) {
     if (!active) { SVBClearMappedChrome(); return; }
     if (!SVBHiddenChrome) SVBHiddenChrome = [NSMutableArray new];
     if (!SVBMappedChrome) SVBMappedChrome = [NSMutableArray new];
-    @try { SVBDoChatChrome(vc); } @catch (NSException *e) {}
+    SVBChatChromeKick(vc);
     __weak UIViewController *wvc = vc;
     // v10.6.4: 补扫点 8 -> 16 个, 并且把第一个点前移到 **0.0s**(立刻来一发)。
     // 旧版第一个点是 0.25s 且那时导航栏往往还没建好 => 用户感知「过一秒才消失」。
-    NSTimeInterval delays[16] = {0.0, 0.05, 0.12, 0.2, 0.3, 0.45, 0.6, 0.8,
-                                 1.05, 1.35, 1.75, 2.2, 2.8, 3.6, 4.8, 6.5};
-    for (int i = 0; i < 16; i++) {
+    // v10.6.7: 16 -> 24 个点, 前 2 秒基本每 0.1s 一发 (布局驱动之外的兜底)
+    NSTimeInterval delays[24] = {0.0, 0.04, 0.09, 0.14, 0.2, 0.27, 0.35, 0.44,
+                                 0.55, 0.68, 0.82, 0.98, 1.16, 1.36, 1.6, 1.9,
+                                 2.3, 2.8, 3.5, 4.4, 5.5, 7.0, 9.0, 12.0};
+    for (int i = 0; i < 24; i++) {
         NSTimeInterval t = delays[i];
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(t * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
@@ -1546,7 +1652,7 @@ static void SVBApplyChatChrome(UIViewController *vc) {
                 if (!s || !s.isViewLoaded) return;
                 if (!s.view.window && !s.view.superview) return;   // v10.6.4: 同放宽策略
                 if (!SVBBubbleSweepActive()) { SVBClearMappedChrome(); return; }
-                SVBDoChatChrome(s);
+                SVBChatChromeKick(s);
             } @catch (NSException *e) {}
         });
     }
@@ -1712,6 +1818,12 @@ static char SVBDetectedCtxKey;
 
 // 对话详情
 %hook CKTranscriptController
+// v10.6.7: 同上 —— 老实现的聊天页也走布局驱动
+- (void)viewDidLayoutSubviews {
+    %orig;
+    SVB_SMS_GUARD()
+    SVBChatChromeKick(self);
+}
 - (void)viewWillAppear:(BOOL)animated {
     %orig;
     SVB_SMS_GUARD()
@@ -1784,6 +1896,12 @@ static char SVBDetectedCtxKey;
 
 // iOS 15/16 聊天页实现
 %hook CKChatController
+// v10.6.7: 布局驱动 —— 聊天页每次布局都立刻补一次, 白底不再"等一下才消失"
+- (void)viewDidLayoutSubviews {
+    %orig;
+    SVB_SMS_GUARD()
+    SVBChatChromeKick(self);
+}
 - (void)viewWillAppear:(BOOL)animated {
     %orig;
     SVB_SMS_GUARD()
@@ -1816,6 +1934,19 @@ static char SVBDetectedCtxKey;
 // 直接在输入栏 VC 自己的 viewWillAppear / viewDidAppear 里清, 赶在首帧之前。
 // (Logos 对不存在的类会静默跳过, 所以写死这个类名不会崩, 只是不生效。)
 %hook CKMessageEntryView
+// v10.6.7: 输入栏每次布局后立刻「清白底 + 重新钉回底部居中」。
+// 光在 viewWillAppear 清一次不够 —— 键盘开合/系统重排都会让它重铺白底并换位置。
+- (void)viewDidLayoutSubviews {
+    %orig;
+    SVB_SMS_GUARD()
+    if (!SVBBubbleSweepActive()) return;
+    @try {
+        SVBTranslucentChromeView(self.view);
+        UIView *host = self.view.superview;
+        if (host) SVBDeepProcessBottom(host, host, 0, NULL, NULL, NULL);
+        SVBPinEntryToBottom(self.view);
+    } @catch (NSException *e) {}
+}
 - (void)viewWillAppear:(BOOL)animated {
     %orig;
     SVB_SMS_GUARD()
@@ -2071,6 +2202,38 @@ static void SVBScrollSweepIfNeeded(UIScrollView *sv) {
     @try {
         if ([self isKindOfClass:[UICollectionView class]] ||
             [self isKindOfClass:[UITableView class]]) SVBScrollSweepIfNeeded(self);
+    } @catch (NSException *e) {}
+}
+%end
+
+// ------------------------------------------------------------------
+// v10.6.7: 「进对话详情白底要等一下才消失」的**收口**。
+// 顶部那条白的真身是导航栏自己的背景层 (_UIBarBackground), 它由**系统在导航栏
+// 布局时**铺上去 —— push 转场结束、标题/号码异步刷新都会重铺一次。
+// 固定时刻的补扫只能等下一拍 (用户看到先白一下), 所以这里直接钩导航栏的
+// layoutSubviews: 系统铺完, 我们在**同一帧**把它藏掉, 一帧都不给留。
+// 安全: 只处理**直接子视图**里名字带 BarBackground 的层, 且必须"无内容"才藏 ——
+// 导航栏的内容层 (UINavigationBarContentView, 装着返回键 + 标题 + 号码) 名字
+// 不含 BarBackground, 天然不会被碰到。
+// ------------------------------------------------------------------
+%hook UINavigationBar
+- (void)layoutSubviews {
+    %orig;
+    @try {
+        if (!SVBIsSMSProcess()) return;
+        if (!SVBBubbleSweepActive()) return;
+        for (UIView *sub in self.subviews) {
+            if (!sub || sub.hidden) continue;
+            if ([sub isKindOfClass:[SVBVideoBackgroundView class]]) continue;
+            NSString *cls = NSStringFromClass([sub class]);
+            if (![cls hasPrefix:@"_UIBarBackground"] && ![cls containsString:@"BarBackground"])
+                continue;
+            // 用 SVBNavContentVisible 而不是 SVBTopHasContent:
+            // 背景层里可能有 UIImageView (阴影/细线) 或毛玻璃, 用「有没有图」判会误判成"有内容"
+            // 从而只清白底、留下白 —— 这里只认 UIControl / 有文字的 UILabel 才是内容。
+            if (SVBNavContentVisible(sub)) SVBTranslucentChromeView(sub);
+            else                           SVBHideChromeView(sub);
+        }
     } @catch (NSException *e) {}
 }
 %end
