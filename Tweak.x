@@ -1128,21 +1128,65 @@ static void SVBCollectLeaves(UIView *v, NSInteger d, UIView *space,
     for (UIView *s in v.subviews) SVBCollectLeaves(s, d + 1, space, buf, n, cap);
 }
 
-// v10.6.10: 找**最宽的输入框本体** (UITextField / UITextView) —— 用户看到的那条"胶囊"。
-// 逐层全扫 (不因命中就停), 免得输入框内部还有子控件时把它自己漏掉。
-static void SVBFindWidestField(UIView *v, NSInteger d, UIView *space,
-                               CGRect *best, CGFloat *bw) {
-    if (!v || d > 8) return;
+// v10.6.11: 收集子树里**所有** UITextField / UITextView (逐层全扫, 不因命中就停)。
+static void SVBCollectFields(UIView *v, NSInteger d, NSMutableArray *out) {
+    if (!v || d > 10 || out.count > 24) return;
     @try {
         if (v.hidden || v.alpha < 0.05) return;
         if ([v isKindOfClass:[SVBVideoBackgroundView class]]) return;
         if ([v isKindOfClass:[UITextField class]] ||
-            [v isKindOfClass:[UITextView class]]) {
-            CGRect r = [space convertRect:v.bounds fromView:v];
-            if (r.size.width > *bw) { *bw = r.size.width; *best = r; }
-        }
+            [v isKindOfClass:[UITextView class]])
+            [out addObject:v];
     } @catch (NSException *e) {}
-    for (UIView *s in v.subviews) SVBFindWidestField(s, d + 1, space, best, bw);
+    for (UIView *s in v.subviews) SVBCollectFields(s, d + 1, out);
+}
+
+// v10.6.11 【核心】找「胶囊」—— 用户**实际看到**的那条输入框。
+// 【v10.6.10 为什么还是没居中】实测截图: 胶囊在 x=131..425 (宽 294, 中心 278,
+// 屏心 215 => 偏右 63pt), 但代码找到的"最宽输入框本体"是**居中的** (midX≈215)
+// => tx 算成 0, 什么都没挪。也就是说 **输入框本体的 frame ≠ 胶囊**:
+//    它要么是条全宽的隐形文字视图, 要么胶囊只是它的背景层。
+// 规则:
+//   ① 收集所有 UITextField/UITextView;
+//   ② 优先取宽度落在 [100, W*0.85] 的最宽者 —— 不占满整条, 往往就是胶囊里的字框;
+//   ③ 否则取最宽者, 再**往上走**找第一个宽度落在 [100, W*0.85] 的祖先 (胶囊容器);
+//   ④ 都没有 => 退回最宽的那个字框本身。
+static NSString *gSVBLastFields = nil;      // 诊断: 所有字框的类名+框
+
+static CGRect SVBCapsuleFrame(UIView *entry, UIView *space, UIView **capOut) {
+    CGFloat W = space.bounds.size.width;
+    NSMutableArray *fs = [NSMutableArray array];
+    SVBCollectFields(entry, 0, fs);
+    UIView *best = nil, *narrow = nil;
+    CGFloat bw = 0.0, bnw = 0.0;
+    for (UIView *f in fs) {
+        if (!f.window) continue;
+        CGFloat w = f.bounds.size.width;
+        if (w > bw) { bw = w; best = f; }
+        if (w >= 100.0 && w <= W * 0.85 && w > bnw) { bnw = w; narrow = f; }
+    }
+    UIView *cap = narrow ?: best;
+    if (!cap) { gSVBLastFields = nil; return CGRectZero; }
+    if (!narrow && best) {                   // 只有全宽字框 => 往上找胶囊容器
+        UIView *a = best.superview;
+        for (NSInteger i = 0; a && i < 6 && a != entry; i++) {
+            CGFloat w = a.bounds.size.width;
+            if (w >= 100.0 && w <= W * 0.85) { cap = a; break; }
+            a = a.superview;
+        }
+    }
+    if (capOut) *capOut = cap;
+    NSMutableString *desc = [NSMutableString string];
+    for (UIView *f in fs) {
+        @try {
+            CGRect r = [space convertRect:f.bounds fromView:f];
+            [desc appendFormat:@"%@(%.0f,%.0f %.0fx%.0f) ",
+                NSStringFromClass([f class]),
+                r.origin.x, r.origin.y, r.size.width, r.size.height];
+        } @catch (NSException *e) {}
+    }
+    gSVBLastFields = [desc copy];
+    return [space convertRect:cap.bounds fromView:cap];
 }
 
 // v10.6.10: 钉底诊断用 (在 SVBDoChatChrome 里打一行, 一眼看出算得对不对)
@@ -1166,7 +1210,8 @@ static __unsafe_unretained NSString *gSVBLastHost = nil;
 //     水平中心被拉偏 (239 vs 胶囊的 266.5), 下沿被拉低 (890 vs 胶囊的 848)
 //     => tx 只算出 -24 (该 -51.5)、ty 算成 0 (该 +42) => 用户看到「还是不居中」。
 // 【v10.6.10 的修法】内容框**只取输入行**:
-//   ① SVBFindWidestField 先找到最宽的 UITextField/UITextView (就是那条"胶囊");
+//   ① v10.6.11 SVBCapsuleFrame 找「胶囊」= 宽度落在 [100, W*0.85] 的字框/容器
+//      (v10.6.10 拿"最宽字框"当胶囊是错的 —— 实测最宽字框居中, tx 算成 0, 什么都没挪);
 //   ② 只 union 与它**同一行**的元素 (垂直中心差 <= 行高/2 + 14) —— 抽屉在下一行 => 排除;
 //   ③ 万一这一行几乎占满屏宽 (居中它没意义), 退化成**只居中输入框本体**;
 //   ④ 删掉 v10.6.9 那条 `ty < 0 就归零` 的非对称钳位 (它也是"该下移却没下移"的帮凶),
@@ -1183,9 +1228,10 @@ static BOOL SVBPinEntryToBottom(UIView *entry, UIView *space) {
     // ① 叶子元素清单: 取在 **entry 自己的坐标系** 里 (不含我们的 transform)
     SVBLeaf leaves[64]; NSInteger n = 0;
     SVBCollectLeaves(entry, 0, entry, leaves, &n, 64);
-    // ② 输入框本体 (最宽的 UITextField / UITextView) —— 用户看到的那条"胶囊"
-    CGRect field = CGRectZero; CGFloat fw = 0.0;
-    SVBFindWidestField(entry, 0, entry, &field, &fw);
+    // ② 胶囊 = 用户**实际看到**的那条输入框 (不能直接拿最宽字框当胶囊, 见函数注释)
+    UIView *capView = nil;
+    CGRect field = SVBCapsuleFrame(entry, entry, &capView);
+    CGFloat fw = field.size.width;
     // ③ 只取与输入框**同一行**的元素 —— 下面那排抽屉图标在另一行, 直接排除
     BOOL hasC = NO; CGRect cInEntry = CGRectZero;
     NSInteger mode = 0;                       // 0=输入行 1=输入框本体 2=整个 entry
@@ -1750,15 +1796,20 @@ static void SVBDoChatChrome(UIViewController *vc) {
                         wl.bounds.size.width, wl.bounds.size.height,
                         wl.safeAreaInsets.bottom,
                         (int)(CGRectGetMaxY(cv) >= wl.bounds.size.height - 60.0)];
-                    // v10.6.10: 把"算出来的内容框/输入框/tx/ty"直接打出来, 一眼看出对不对
-                    [[SVBManager shared] log:@"chat chrome 钉底值: 内容框=(%.0f,%.0f %.0fx%.0f) 输入框=(%.0f,%.0f %.0fx%.0f) 叶=%d 模式=%d tx=%.0f ty=%.0f 贴底=%d 宿主=%@",
+                    // v10.6.10/11: 把"算出来的内容框/胶囊/tx/ty/当前transform"直接打出来
+                    [[SVBManager shared] log:@"chat chrome 钉底值: 内容框=(%.0f,%.0f %.0fx%.0f) 胶囊=(%.0f,%.0f %.0fx%.0f) 叶=%d 模式=%d tx=%.0f ty=%.0f tf=(%.1f,%.1f) 贴底=%d 宿主=%@",
                         gSVBLastContent.origin.x, gSVBLastContent.origin.y,
                         gSVBLastContent.size.width, gSVBLastContent.size.height,
                         gSVBLastField.origin.x, gSVBLastField.origin.y,
                         gSVBLastField.size.width, gSVBLastField.size.height,
                         (int)gSVBLastLeaf, (int)gSVBLastMode,
-                        gSVBLastTx, gSVBLastTy, (int)gSVBLastDocked,
+                        gSVBLastTx, gSVBLastTy,
+                        entryView.transform.tx, entryView.transform.ty,
+                        (int)gSVBLastDocked,
                         gSVBLastHost ?: @"(无)"];
+                    // v10.6.11: 把所有字框的框打出来 —— 验证"胶囊"到底锚到了谁
+                    [[SVBManager shared] log:@"chat chrome 字框清单: %@",
+                        gSVBLastFields ?: @"(无)"];
                 }
             } @catch (NSException *e) {}
         }
