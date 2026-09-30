@@ -830,8 +830,7 @@ BOOL SVBDirWritablePath(NSString *dir) {
     NSString *bid = SVBHostBundleIdentifier();
     NSString *host = [bid isEqualToString:SVB_SMS_BUNDLE_ID] ? @"信息App"
                    : ([bid isEqualToString:SVB_APP_BUNDLE_ID] ? @"控制App"
-                   : ([bid isEqualToString:@"com.apple.mobilenotes"] ? @"备忘录(注入探针)"
-                   : (bid.length ? bid : @"未知进程")));
+                   : (bid.length ? bid : @"未知进程"));
     NSMutableString *s = [NSMutableString string];
     [s appendFormat:@"SMSVideoBG v%@ · 已注入【%@】pid %d\n", SVB_VERSION, host, (int)getpid()];
     [s appendString:[self rootsSummaryForContext:ctx ?: SVBContextAll]];
@@ -2098,24 +2097,6 @@ static NSMutableDictionary<NSString *, NSDate *> *sSVBPlayerMtimes = nil;
         for (UIWindow *w in UIApplication.sharedApplication.windows) [self collectVideoViewsIn:w into:out];
     } @catch (NSException *e) {}
     return out;
-}
-
-// v10.4.1: 本进程是否有「挂载且未隐藏」的背景视图 (0.5s 缓存 —— cell/decoration
-// 赋色钩子会高频调用, 缓存挡住全树遍历开销)。滚动清扫 gate 专用。
-static CFAbsoluteTime sSVBSweepCheckLast = 0;
-static BOOL sSVBSweepCheckResult = NO;
-- (BOOL)hasVisibleBackgroundViews {
-    @try {
-        CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-        if (now - sSVBSweepCheckLast < 0.5) return sSVBSweepCheckResult;
-        BOOL found = NO;
-        for (SVBVideoBackgroundView *v in [self allVideoBackgroundViews]) {
-            if (!v.hidden) { found = YES; break; }
-        }
-        sSVBSweepCheckLast = now;
-        sSVBSweepCheckResult = found;
-        return found;
-    } @catch (NSException *e) { return NO; }
 }
 
 - (void)pauseAllPlayers {
