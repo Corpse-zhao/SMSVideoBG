@@ -34,17 +34,6 @@ NSString * const SVBContextJunk     = @"junk";
 NSString * const SVBContextDeleted  = @"deleted";
 NSString * const SVBContextChat     = @"chat";
 
-// v11.0.0 备忘录语境 (IC* 私有类, com.apple.mobilenotes)
-NSString * const SVBContextNBody     = @"n_body";
-NSString * const SVBContextNEdit     = @"n_edit";    // v11.0.4
-NSString * const SVBContextNList     = @"n_list";
-NSString * const SVBContextNFolder   = @"n_folder";
-NSString * const SVBContextNGallery  = @"n_gallery";
-NSString * const SVBContextNSearch   = @"n_search";
-NSString * const SVBContextNPopup    = @"n_popup";   // v11.0.4
-NSString * const SVBContextNRecent   = @"n_recent";
-NSString * const SVBContextNInternal = @"n_internal";
-
 // v10.4.0: 运维文件全部改成点前缀 —— Filza 默认不显示, 素材文件夹里只剩视频。
 // 旧名字 (_config.plist 等) 保留为「迁移源」: 启动时自动改名为新名字。
 static NSString * const SVBConfigFileName    = @".svb_config.plist";
@@ -57,8 +46,6 @@ static NSString * const SVBProbeFileName     = @".svb_probe";
 static NSString * const SVBProbeFileNameOld  = @"_app_probe";
 // 诊断日志最长保留天数 (超过自动删除 —— 用户要求「诊断报告不要一直保留」)
 static const NSTimeInterval SVBLogMaxAgeDays = 3.0;
-
-static BOOL SVBDirWritable(NSString *dir);   // 前向声明 (v11.0.0 双容器同步先用后定义)
 
 // ---- v9.9.11 前后台自愈 / 切后台自动清理 的共享状态 ----
 static volatile BOOL sSVBInBackground = NO;       // 宿主当前是否在后台
@@ -86,25 +73,6 @@ NSArray<NSArray<NSString *> *> *SVBContextDefinitions(void) {
               @[SVBContextChat,    @"对话详情",     @"点进某个会话后的聊天界面"] ];
 }
 
-NSArray<NSArray<NSString *> *> *SVBNotesContextDefinitions(void) {
-    // v11.0.4: 全部按用户真机页面重命名 (控制App 列表按名称字数排序显示)
-    return @[ @[SVBContextNFolder,   @"首页",       @"打开备忘录看到的第一屏(文件夹列表)"],
-              @[SVBContextNEdit,     @"笔记",       @"右下角新建笔记按钮进入的编辑界面"],
-              @[SVBContextNList,     @"文件夹",     @"点进 所有iCloud/备忘录/各文件夹 后的备忘录列表"],
-              @[SVBContextNBody,     @"内部页",     @"点开某条备忘录后的浏览界面"],
-              @[SVBContextNSearch,   @"搜索一下",   @"顶部搜索框点进去的搜索页"],
-              @[SVBContextNRecent,   @"最近删除",   @"最近删除列表"],
-              @[SVBContextNPopup,    @"多多创新",   @"左下角新建文件夹等弹出的面板(面板多大背景就铺多大)"],
-              @[SVBContextNGallery,  @"画廊",       @"备忘录缩略图画廊视图"],
-              @[SVBContextNInternal, @"其它内部页", @"其余近似全屏的备忘录页面(兜底)"] ];
-}
-
-NSArray<NSArray<NSString *> *> *SVBAllContextDefinitions(void) {
-    NSMutableArray *a = [[SVBContextDefinitions() mutableCopy] init];
-    [a addObjectsFromArray:SVBNotesContextDefinitions()];
-    return a;
-}
-
 NSString *SVBJBMediaDirectory(void) {
     return [@"/var/jb/Library/" stringByAppendingString:SVB_MEDIA_DIR_NAME];
 }
@@ -122,10 +90,6 @@ NSString *SVBHostBundleIdentifier(void) {
 
 static BOOL SVBIsControlApp(void) {
     return [SVBHostBundleIdentifier() isEqualToString:SVB_APP_BUNDLE_ID];
-}
-
-BOOL SVBIsNotesHostProcess(void) {
-    return [SVBHostBundleIdentifier() isEqualToString:SVB_NOTES_BUNDLE_ID];
 }
 
 NSString *SVBAppContainerMediaDirectory(void) {
@@ -163,37 +127,10 @@ NSString *SVBFindAppDataContainer(NSString *bundleId) {
     return nil;
 }
 
-// v11.0.4: 容器识别修复 —— 信息App 进程里 FindAppDataContainer 可能因沙盒枚举
-// 失败 (真机实锤: 横幅显示「宿主App容器」且只有一根)。宿主进程改按自身容器推断:
-// 等于自己容器根 = 自己; 其它 Containers 路径 = 对方。控制 App 保持定位对比。
 NSString *SVBRootLabel(NSString *root) {
     if (!root.length) return @"?";
-    if ([root hasPrefix:SVB_MEDIA_FRIENDLY_PARENT]) {
-        return [root.lastPathComponent isEqualToString:@"备忘录"] ? @"备忘录App容器" : SVB_AUTHOR_NAME;
-    }
-    if ([root containsString:@"/Containers/Data/Application"]) {
-        if (SVBIsControlApp()) {
-            static NSString *smsC = nil, *notesC = nil;
-            if (!smsC) {
-                NSString *c = SVBFindAppDataContainer(SVB_SMS_BUNDLE_ID);
-                if (c.length) smsC = [[c stringByAppendingPathComponent:@"Library"]
-                                       stringByAppendingPathComponent:SVB_MEDIA_DIR_NAME];
-            }
-            if (!notesC) {
-                NSString *nc = SVBFindAppDataContainer(SVB_NOTES_BUNDLE_ID);
-                if (nc.length) notesC = [[nc stringByAppendingPathComponent:@"Library"]
-                                          stringByAppendingPathComponent:SVB_MEDIA_DIR_NAME];
-            }
-            if (smsC && [root isEqualToString:smsC]) return @"信息App容器";
-            if (notesC && [root isEqualToString:notesC]) return @"备忘录App容器";
-            return @"宿主App容器";
-        }
-        // 宿主进程: 自身容器根 = 自己, 其余 = 对方
-        NSString *selfRoot = SVBAppContainerMediaDirectory();
-        if (selfRoot.length && [root isEqualToString:selfRoot])
-            return SVBIsNotesHostProcess() ? @"备忘录App容器" : @"信息App容器";
-        return SVBIsNotesHostProcess() ? @"信息App容器" : @"备忘录App容器";
-    }
+    if ([root hasPrefix:SVB_MEDIA_FRIENDLY_PARENT]) return SVB_AUTHOR_NAME;
+    if ([root containsString:@"/Containers/Data/Application"]) return @"信息App容器";
     if ([root hasPrefix:@"/var/jb"] || [root containsString:@"/var/jb/"]) return @"jbroot";
     if ([root hasPrefix:@"/var/mobile/Documents"]) return @"共享文档";
     if ([root containsString:@"/var/mobile"]) return @"家目录";
@@ -201,25 +138,6 @@ NSString *SVBRootLabel(NSString *root) {
 }
 
 static NSArray<NSString *> *sSVBRoots = nil;
-static BOOL sSVBRootsCalculating = NO;   // v11.0.5: 重入保护
-
-// v11.0.4: 宿主进程读对方容器路径 (先运行时枚举, 失败回退控制App 记录的配置)
-// v11.0.5: 【紧急】不经过 configValueForKey —— 它内部会再查素材根
-// (effectiveConfig -> configReadPaths -> SVBRootCandidates) 形成无限递归,
-// 栈溢出导致信息/备忘录启动即崩 (真机实锤)。改读 NSUserDefaults suite
-// (控制App 的 setConfigValue prefs 通道已写入, 同一 suite 宿主可直接读)。
-static NSString *SVBOtherHostContainer(NSString *otherBid) {
-    NSString *oc = SVBFindAppDataContainer(otherBid);
-    if (oc.length) return oc;
-    @try {
-        NSString *key = [otherBid isEqualToString:SVB_SMS_BUNDLE_ID] ? @"svb_sms_container"
-                                                                     : @"svb_notes_container";
-        NSUserDefaults *p = [[NSUserDefaults alloc] initWithSuiteName:SVB_SUITE];
-        NSString *v = [p stringForKey:key];
-        if (v.length) return v;
-    } @catch (NSException *e) {}
-    return nil;
-}
 
 void SVBRefreshMediaRoots(void) {
     sSVBRoots = nil;
@@ -240,77 +158,24 @@ static NSArray<NSString *> *SVBLegacyRoots(void) {
 // v10.3.0: 单一素材根 —— 信息App 数据容器(mobile 侧定位容器, tweak 侧=自身家目录,
 // 两者指向同一物理目录)。导入/读取/删除全部只看这里, 路径精确唯一。
 // jbroot 不再作为日常读取根 (沙盒宿主读不到), 只当"定位不到容器"时的应急落点。
-// v11.0.0: 双宿主素材根 ——
-//   控制App 进程: [信息App 容器根, 备忘录App 容器根] 两个都进候选 (读=聚合, 写=齐写)
-//   v11.0.2: 宿主进程 = 自身容器根 + 另一个宿主的容器根 (越权环境互读)。
-//   此前备忘录进程只有自己容器一根, 素材全在信息容器里 -> 备忘录「素材=0 全不生效」
-//   (真机实锤), 且完全依赖控制 App 的跨容器同步跑没跑过。现在直接聚合读双容器。
 NSArray<NSString *> *SVBRootCandidates(void) {
-    // v11.0.5: 重入保护 —— 根定位过程中任何代码再查根, 直接给当前缓存/兜底,
-    // 绝不再进计算 (v11.0.4b 的无限递归 = 信息/备忘录启动即崩, 血的教训)
-    if (sSVBRootsCalculating)
-        return sSVBRoots ?: (@[SVBJBMediaDirectory()]);
-    // v11.0.4: 双根缓存永久有效; 单根 (定位对方容器失败) 10 秒后允许重算
-    static double sSVBSingleRootAt = 0;
-    if (sSVBRoots) {
-        if (sSVBRoots.count >= 2) return sSVBRoots;
-        if ([NSDate date].timeIntervalSince1970 - sSVBSingleRootAt < 10.0) return sSVBRoots;
-    }
-    sSVBRootsCalculating = YES;
-    @try {
+    if (sSVBRoots) return sSVBRoots;
     NSMutableArray<NSString *> *a = [NSMutableArray array];
-    NSString *primary = nil;
 
+    NSString *primary = nil;
     if (SVBIsControlApp()) {
         NSString *c = SVBFindAppDataContainer(SVB_SMS_BUNDLE_ID);
         if (c.length)
             primary = [[c stringByAppendingPathComponent:@"Library"]
                        stringByAppendingPathComponent:SVB_MEDIA_DIR_NAME];
-        if (primary.length) [a addObject:primary];
-        NSString *nc = SVBFindAppDataContainer(SVB_NOTES_BUNDLE_ID);
-        if (nc.length) {
-            NSString *nroot = [[nc stringByAppendingPathComponent:@"Library"]
-                                stringByAppendingPathComponent:SVB_MEDIA_DIR_NAME];
-            if (![nroot isEqualToString:primary] && ![a containsObject:nroot]) [a addObject:nroot];
-        }
     } else {
         primary = SVBAppContainerMediaDirectory();
-        if (primary.length) [a addObject:primary];
-        // v11.0.2: 另一个宿主的数据容器 (备忘录进程->信息容器, 信息进程->备忘录容器)
-        // v11.0.4: 运行时枚举失败时回退配置记录 (信息App 沙盒枚举不到对方容器, 实锤)
-        NSString *otherBid = SVBIsNotesHostProcess() ? SVB_SMS_BUNDLE_ID : SVB_NOTES_BUNDLE_ID;
-        if (![SVBHostBundleIdentifier() isEqualToString:SVB_APP_BUNDLE_ID]) {
-            NSString *oc = SVBOtherHostContainer(otherBid);
-            if (oc.length) {
-                NSString *oroot = [[oc stringByAppendingPathComponent:@"Library"]
-                                    stringByAppendingPathComponent:SVB_MEDIA_DIR_NAME];
-                if (![oroot isEqualToString:primary] && ![a containsObject:oroot])
-                    [a addObject:oroot];
-            }
-        }
     }
-        if (!a.count) [a addObject:SVBJBMediaDirectory()];   // 应急兜底(仅定位不到容器时)
+    if (primary.length) [a addObject:primary];
+    if (!a.count) [a addObject:SVBJBMediaDirectory()];   // 应急兜底(仅定位不到容器时)
 
-        sSVBRoots = [a copy];
-        if (sSVBRoots.count < 2) sSVBSingleRootAt = [NSDate date].timeIntervalSince1970;
-        else                     sSVBSingleRootAt = 0;
-        return sSVBRoots;
-    } @finally {
-        sSVBRootsCalculating = NO;
-    }
-}
-
-// v11.0.4: 控制 App 把双容器路径写进配置 —— 宿主进程沙盒枚举失败时 (真机实锤:
-// 信息App 枚举不到备忘录容器, 横幅只有一根) 的后备定位来源
-void SVBRecordContainerPaths(void) {
-    @try {
-        if (!SVBIsControlApp()) return;
-        SVBManager *m = [SVBManager shared];
-        NSString *sms = SVBFindAppDataContainer(SVB_SMS_BUNDLE_ID);
-        NSString *notes = SVBFindAppDataContainer(SVB_NOTES_BUNDLE_ID);
-        if (sms.length) [m setConfigValue:sms forKey:@"svb_sms_container"];
-        if (notes.length) [m setConfigValue:notes forKey:@"svb_notes_container"];
-    } @catch (NSException *e) {}
+    sSVBRoots = [a copy];
+    return sSVBRoots;
 }
 
 // ---- v10.4.0 运维文件治理 (在插件 %ctor 与控制App 启动时各跑一次) ----
@@ -356,7 +221,7 @@ void SVBCleanupHousekeeping(void) {
             }
 
             // ③ 摊平界面子目录: 里面的视频上移到素材根, 空目录删除
-            for (NSArray<NSString *> *def in SVBAllContextDefinitions()) {
+            for (NSArray<NSString *> *def in SVBContextDefinitions()) {
                 NSString *sub = [root stringByAppendingPathComponent:def[0]];
                 if (![fm fileExistsAtPath:sub]) continue;
                 NSDictionary *at = [fm attributesOfItemAtPath:sub error:nil];
@@ -398,58 +263,10 @@ NSString *SVBMediaFriendlyRoot(void) {
     return [SVB_MEDIA_FRIENDLY_PARENT stringByAppendingPathComponent:SVB_AUTHOR_NAME];
 }
 
-// v11.0.0: 备忘录素材友好路径 (软链 -> 备忘录App 容器素材根)
-NSString *SVBNotesFriendlyRoot(void) {
-    return [SVB_MEDIA_FRIENDLY_PARENT stringByAppendingPathComponent:@"备忘录"];
-}
-
-// v11.0.0: 备忘录语境 (n_ 前缀) 的素材跳转走「备忘录」软链, 其余仍走「板栗仁」
+// v10.4.0: 不再按界面分子目录 —— 所有界面共用这一个文件夹。
+// ctx 参数保留只为兼容旧调用点, 一律返回素材根本身。
 NSString *SVBMediaFriendlyPathForContext(NSString *ctx) {
-    if ([ctx hasPrefix:@"n_"]) return SVBNotesFriendlyRoot();
     return SVBMediaFriendlyRoot();
-}
-
-// v11.0.0: 双容器素材同步 —— 把每个可写根里的视频补拷到其它可写根 (聚合并集)。
-// 场景: 用户用 Filza 只往「板栗仁」(信息容器) 里丢了视频, 备忘录进程读不到
-// 信息容器 —— 启动时把缺失的文件补拷到备忘录容器, 反向同理。
-// 返回补拷的文件数。只在存在 >=2 个可写根时干活 (宿主进程只有一个根, 调了也是空转)。
-NSInteger SVBSyncMediaAcrossRoots(void) {
-    NSInteger copied = 0;
-    @try {
-        NSFileManager *fm = [NSFileManager defaultManager];
-        NSMutableArray<NSString *> *roots = [NSMutableArray array];
-        for (NSString *root in SVBRootCandidates())
-            if (SVBDirWritable(root)) [roots addObject:root];
-        if (roots.count < 2) return 0;
-
-        // 聚合所有根里的视频文件名 (并集)
-        NSMutableSet<NSString *> *all = [NSMutableSet set];
-        for (NSString *root in roots)
-            for (NSString *f in [fm contentsOfDirectoryAtPath:root error:nil])
-                if ([f hasPrefix:@"."] || [f hasPrefix:@"_"]) continue;
-                else if ([@[@"mp4", @"mov", @"m4v", @"3gp", @"mkv", @"webm"]
-                          containsObject:f.pathExtension.lowercaseString])
-                    [all addObject:f];
-
-        for (NSString *root in roots) {
-            for (NSString *f in all) {
-                NSString *dst = [root stringByAppendingPathComponent:f];
-                if ([fm fileExistsAtPath:dst]) continue;
-                // 从其它根找一份源
-                NSString *src = nil;
-                for (NSString *other in roots) {
-                    if ([other isEqualToString:root]) continue;
-                    NSString *p = [other stringByAppendingPathComponent:f];
-                    if ([fm fileExistsAtPath:p]) { src = p; break; }
-                }
-                if (!src) continue;
-                if ([fm copyItemAtPath:src toPath:dst error:nil]) copied++;
-            }
-        }
-        if (copied)
-            [[SVBManager shared] log:@"双容器素材同步: 补拷 %ld 个文件", (long)copied];
-    } @catch (NSException *e) {}
-    return copied;
 }
 
 // 把「统一路径」做成指向真实素材根的软链。
@@ -470,7 +287,7 @@ static NSInteger SVBAdoptFriendlyDirIfReal(NSString *link, NSString *target) {
     NSArray<NSString *> *scanDirs = @[];
     {
         NSMutableArray<NSString *> *dirs = [NSMutableArray array];
-        for (NSArray<NSString *> *def in SVBAllContextDefinitions()) {
+        for (NSArray<NSString *> *def in SVBContextDefinitions()) {
             NSString *d = [link stringByAppendingPathComponent:def[0]];
             if ([fm fileExistsAtPath:d]) [dirs addObject:d];
         }
@@ -494,43 +311,6 @@ static NSString *SVBFriendlyBackupStamp(void) {
     NSDateFormatter *df = [[NSDateFormatter alloc] init];
     df.dateFormat = @"yyyyMMdd-HHmmss";
     return [df stringFromDate:[NSDate date]] ?: @"bak";
-}
-
-// v11.0.0: 顺手维护「备忘录」软链 (指向备忘录App 容器素材根)。
-// 信息App 的软链由 SVBEnsureFriendlyMediaPath 主体负责; 这里只处理备忘录:
-//   定位得到备忘录容器 -> 软链指向它 (存在但指错/是真目录则先搬视频再重建);
-//   定位不到 -> 什么都不做 (不报错, 备忘录功能照样可用, 只是 Filza 没入口)。
-static void SVBEnsureNotesFriendlyLink(NSMutableString *extra) {
-    @try {
-        NSFileManager *fm = [NSFileManager defaultManager];
-        NSString *nc = SVBFindAppDataContainer(SVB_NOTES_BUNDLE_ID);
-        if (!nc.length) return;
-        NSString *target = [[nc stringByAppendingPathComponent:@"Library"]
-                             stringByAppendingPathComponent:SVB_MEDIA_DIR_NAME];
-        if (![target containsString:@"/Containers/Data/Application"]) return;
-        [fm createDirectoryAtPath:target withIntermediateDirectories:YES attributes:nil error:nil];
-
-        NSString *parent = SVB_MEDIA_FRIENDLY_PARENT;
-        if (![fm fileExistsAtPath:parent])
-            [fm createDirectoryAtPath:parent withIntermediateDirectories:YES attributes:nil error:nil];
-        NSString *link = SVBNotesFriendlyRoot();
-
-        NSDictionary *attr = [fm attributesOfItemAtPath:link error:nil];
-        NSString *type = attr[NSFileType];
-        if ([type isEqualToString:NSFileTypeSymbolicLink]) {
-            NSString *dest = [fm destinationOfSymbolicLinkAtPath:link error:nil];
-            if ([dest isEqualToString:target]) return;
-            [fm removeItemAtPath:link error:nil];
-        } else if (type) {
-            // 真目录/普通文件占位: 视频搬进真实根, 原路径改名备份 (绝不删用户文件)
-            NSInteger n = SVBAdoptFriendlyDirIfReal(link, target);
-            NSString *bak = [NSString stringWithFormat:@"%@_旧目录备份_%@", link, SVBFriendlyBackupStamp()];
-            [fm moveItemAtPath:link toPath:bak error:nil];
-            if (extra && n)
-                [extra appendFormat:@"\n「备忘录」路径原有 %ld 个视频已搬进备忘录素材目录。", (long)n];
-        }
-        [fm createSymbolicLinkAtPath:link withDestinationPath:target error:nil];
-    } @catch (NSException *e) {}
 }
 
 BOOL SVBEnsureFriendlyMediaPath(NSString **detail) {
@@ -568,11 +348,7 @@ BOOL SVBEnsureFriendlyMediaPath(NSString **detail) {
         } else if ([type isEqualToString:NSFileTypeSymbolicLink]) {
             NSString *dest = [fm destinationOfSymbolicLinkAtPath:link error:nil];
             if ([dest isEqualToString:target]) {
-                // v11.0.0: 信息软链已就绪也顺手维护备忘录软链 + 双容器同步
-                NSMutableString *extra = [NSMutableString string];
-                SVBEnsureNotesFriendlyLink(extra);
-                SVBSyncMediaAcrossRoots();
-                if (detail) *detail = [NSString stringWithFormat:@"%@\n(软链 -> 信息App 素材目录, 已就绪)%@", link, extra];
+                if (detail) *detail = [NSString stringWithFormat:@"%@\n(软链 -> 信息App 素材目录, 已就绪)", link];
                 return YES;
             }
             if (![fm removeItemAtPath:link error:nil]) {   // 指向别处(旧容器 UUID) -> 重建
@@ -608,12 +384,7 @@ BOOL SVBEnsureFriendlyMediaPath(NSString **detail) {
              ofItemAtPath:parent error:nil];
 
         if (detail) {
-            // v11.0.0: 顺手维护备忘录软链 + 双容器素材同步
-            NSMutableString *extra = [NSMutableString string];
-            SVBEnsureNotesFriendlyLink(extra);
-            SVBSyncMediaAcrossRoots();
             NSString *base = [NSString stringWithFormat:@"%@\n(软链 -> 信息App 素材目录, 已就绪)", link];
-            base = [base stringByAppendingString:extra];
             *detail = note.length ? [NSString stringWithFormat:@"%@\n\n%@", base, note] : base;
         }
         return YES;
@@ -849,12 +620,6 @@ BOOL SVBDirWritablePath(NSString *dir) {
     return v ? [v boolValue] : YES; // 默认开
 }
 
-// v11.0.0: 备忘录总开关 (默认关 —— 装好插件备忘录保持原样, 用户到控制App 打开)
-- (BOOL)notesMasterEnabled {
-    id v = [self configValueForKey:@"notes_master_enabled"];
-    return v ? [v boolValue] : NO;
-}
-
 // v1.8.5: 自定义 App 显示名 (SpringBoard 的 SBApplication.displayName 钩子读这个)
 - (NSString *)appDisplayName {
     id v = [self configValueForKey:@"app_display_name"];
@@ -1027,19 +792,14 @@ BOOL SVBDirWritablePath(NSString *dir) {
     NSMutableString *s = [NSMutableString string];
     NSFileManager *fm = [NSFileManager defaultManager];
     NSInteger idx = 0;
-    // v11.0.2: 统计口径修正 —— v10.4 起素材全部摊平在素材根目录下 (不再分界面
-    // 子目录), 此前按「根/ctx」子目录数文件恒等于 0 (真机实锤: 有素材也显示素材=0)。
-    // 现在统计根目录下的视频文件数。
     for (NSString *root in SVBRootCandidates()) {
         idx++;
         BOOL ex = [fm fileExistsAtPath:root];
-        NSArray *items = ex ? [fm contentsOfDirectoryAtPath:root error:nil] : nil;
+        NSArray *items = ex ? [fm contentsOfDirectoryAtPath:[root stringByAppendingPathComponent:ctx ?: SVBContextAll]
+                                                      error:nil] : nil;
         NSUInteger n = 0;
-        for (NSString *f in items) {
-            if ([f hasPrefix:@"."] || [f hasPrefix:@"_"]) continue;
-            if ([self isMovieFile:f]) n++;
-        }
-        [s appendFormat:@"根%ld %@ 在=%@ 可读=%@ 视频=%lu\n", (long)idx,
+        for (NSString *f in items) if (![f hasPrefix:@"."] && ![f hasPrefix:@"_"]) n++;
+        [s appendFormat:@"根%ld %@ 在=%@ 可读=%@ 素材=%lu\n", (long)idx,
             SVBRootLabel(root), ex ? @"是" : @"否",
             [fm isReadableFileAtPath:root] ? @"是" : @"否", (unsigned long)n];
     }
@@ -1049,16 +809,6 @@ BOOL SVBDirWritablePath(NSString *dir) {
 - (BOOL)debugBannerEnabled {
     id v = [self configValueForKey:@"debug_banner"];
     return v ? [v boolValue] : YES; // 默认显示, 方便确认注入是否成功
-}
-
-// v11.0.2: 语境键 -> 中文界面名 (横幅显示用)。信息/备忘录两张定义表都查。
-NSString *SVBContextDisplayName(NSString *ctx) {
-    if (!ctx.length) return ctx;
-    for (NSArray<NSString *> *def in SVBContextDefinitions())
-        if ([def[0] isEqualToString:ctx]) return def[1];
-    for (NSArray<NSString *> *def in SVBNotesContextDefinitions())
-        if ([def[0] isEqualToString:ctx]) return def[1];
-    return ctx;
 }
 
 // 注入横幅文案: 一眼看清「插件有没有进信息App」+「素材到底读没读到」
@@ -1078,21 +828,17 @@ NSString *SVBContextDisplayName(NSString *ctx) {
     }
 
     NSString *bid = SVBHostBundleIdentifier();
-    // v11.0.0: 备忘录从「注入探针」转正为正式宿主
-    BOOL isNotes = [bid isEqualToString:SVB_NOTES_BUNDLE_ID];
     NSString *host = [bid isEqualToString:SVB_SMS_BUNDLE_ID] ? @"信息App"
                    : ([bid isEqualToString:SVB_APP_BUNDLE_ID] ? @"控制App"
-                   : (isNotes ? @"备忘录App"
+                   : ([bid isEqualToString:@"com.apple.mobilenotes"] ? @"备忘录(注入探针)"
                    : (bid.length ? bid : @"未知进程")));
     NSMutableString *s = [NSMutableString string];
     [s appendFormat:@"SMSVideoBG v%@ · 已注入【%@】pid %d\n", SVB_VERSION, host, (int)getpid()];
     [s appendString:[self rootsSummaryForContext:ctx ?: SVBContextAll]];
-    // v11.0.0: 备忘录进程看备忘录总开关, 其它进程看信息总开关
-    BOOL master = isNotes ? [self notesMasterEnabled] : [self masterEnabled];
-    BOOL on = master && [self isEnabledForContext:ctx ?: SVBContextAll];
+    BOOL on = [self masterEnabled] && [self isEnabledForContext:ctx ?: SVBContextAll];
     BOOL has = [self activeVideoPathForContext:ctx ?: SVBContextAll].length > 0;
     [s appendFormat:@"界面[%@] 开关=%@ 素材=%@ 生效=%@\n",
-        SVBContextDisplayName(ctx ?: SVBContextAll), on ? @"开" : @"关", has ? @"有" : @"无",
+        ctx ?: SVBContextAll, on ? @"开" : @"关", has ? @"有" : @"无",
         (on && has) ? @"是✓" : @"否✗"];
     [s appendString:@"（点本横幅可隐藏；控制App 里可关闭）"];
     return s;
@@ -1152,20 +898,6 @@ NSString *SVBContextDisplayName(NSString *ctx) {
             NSString *probe = [dir stringByAppendingPathComponent:SVBProbeFileName];
             BOOL ok = [@"ok" writeToFile:probe atomically:YES encoding:NSUTF8StringEncoding error:nil];
             [r appendFormat:@"  跨容器写入探针: %@\n", ok ? @"成功 ✓ (素材可直送信息App)" : @"失败 ✗ (权限不足)"];
-        }
-
-        // v11.0.0: 备忘录App 数据容器 (双宿主第二素材根)
-        [r appendString:@"\n--- 备忘录App 数据容器 (v11.0.0 第二素材根) ---\n"];
-        NSString *nc = SVBFindAppDataContainer(SVB_NOTES_BUNDLE_ID);
-        if (!nc.length) {
-            [r appendString:@"未定位到 com.apple.mobilenotes 数据容器 ❌\n"];
-            [r appendString:@"  -> 备忘录视频背景将没有素材可读 (先打开一次「备忘录」App)。\n"];
-        } else {
-            [r appendFormat:@"container: %@\n", nc];
-            NSString *ndir = [[nc stringByAppendingPathComponent:@"Library"]
-                               stringByAppendingPathComponent:SVB_MEDIA_DIR_NAME];
-            [r appendFormat:@"素材根: %@\n  exists=%d writable=%d\n", ndir,
-                (int)[fm fileExistsAtPath:ndir], (int)SVBDirWritable(ndir)];
         }
     } @catch (NSException *e) {
         [r appendFormat:@"注入自检异常: %@\n", e.reason];
@@ -1301,7 +1033,7 @@ NSString *SVBContextDisplayName(NSString *ctx) {
             if ([root isEqualToString:primary]) continue;
             // v10.4.0b: 搬移而不是复制 —— 旧根副本必须搬空, 否则每次启动又复制回来
             // (表现为「素材删掉了, 切后台再打开又回来了」)
-            for (NSArray<NSString *> *def in SVBAllContextDefinitions()) {
+            for (NSArray<NSString *> *def in SVBContextDefinitions()) {
                 NSString *srcDir = [root stringByAppendingPathComponent:def[0]];
                 if (![fm fileExistsAtPath:srcDir]) continue;
                 for (NSString *f in [self listFilesInDir:srcDir]) {
@@ -1334,7 +1066,7 @@ NSString *SVBContextDisplayName(NSString *ctx) {
         // 搬空后顺手清掉遗留根里的空子目录 (旧版按界面子目录)
         for (NSString *root in srcRoots) {
             if ([root isEqualToString:primary]) continue;
-            for (NSArray<NSString *> *def in SVBAllContextDefinitions()) {
+            for (NSArray<NSString *> *def in SVBContextDefinitions()) {
                 NSString *d = [root stringByAppendingPathComponent:def[0]];
                 NSArray *left = [fm contentsOfDirectoryAtPath:d error:nil];
                 if (left && left.count == 0) [fm removeItemAtPath:d error:nil];
@@ -1347,7 +1079,7 @@ NSString *SVBContextDisplayName(NSString *ctx) {
 
         // v10.4.0: 顺带清掉「指向已不存在文件」的选中素材配置 ——
         // 素材删光后 App 不应再显示旧素材名/继续铺背景
-        for (NSArray<NSString *> *def in SVBAllContextDefinitions()) {
+        for (NSArray<NSString *> *def in SVBContextDefinitions()) {
             NSString *key = [def[0] stringByAppendingString:@"_video"];
             NSString *sel = [self configValueForKey:key];
             if (sel.length && ![self videosForContext:def[0]].count)
@@ -1509,7 +1241,7 @@ static BOOL SVBCopyInto(NSString *srcPath, NSString *dir, NSString *name, NSErro
     void (^addRoot)(NSString *) = ^(NSString *root) {
         if (!root.length) return;
         [dirs addObject:root];
-        for (NSArray<NSString *> *def in SVBAllContextDefinitions())
+        for (NSArray<NSString *> *def in SVBContextDefinitions())
             [dirs addObject:[root stringByAppendingPathComponent:def[0]]];
     };
     for (NSString *root in [self mediaRoots]) addRoot(root);
@@ -1592,10 +1324,7 @@ static BOOL SVBCopyInto(NSString *srcPath, NSString *dir, NSString *name, NSErro
         if (!path) return nil;
 
         AVPlayer *p = self.players[ctx];
-        // v11.0.3: 缓存命中额外自检 —— 播放器/当前item 已失败的不复用 (自动重建),
-        // 配合 recover 只恢复可见语境, 不可见语境的坏 player 进页面时在这里自愈
-        if (p && !force && p.status != AVPlayerStatusFailed &&
-            [self.playerPaths[ctx] isEqualToString:path]) return p;
+        if (p && !force && [self.playerPaths[ctx] isEqualToString:path]) return p;
 
         // 清理旧播放器 (looper 必须先 disable, 否则它会继续往队列塞副本)
         AVPlayerLooper *oldLooper = self.loopers[ctx];
@@ -1660,9 +1389,7 @@ static void SVBCollectToolbars(UIView *view, NSMutableArray<UIToolbar *> *out_, 
 
         // v1.9.0: 授权门禁 —— 所有挂背景的路径都汇聚到这里, 未激活/过期一律不挂
         // (这样无论从哪个钩子进来都拦得住, 不需要在 Tweak.x 各处补判断)
-        // v11.0.0: 总闸按宿主分流 —— 备忘录进程认 notes_master_enabled, 其余认 master_enabled
-        BOOL master = SVBIsNotesHostProcess() ? [self notesMasterEnabled] : [self masterEnabled];
-        BOOL on = SVBIsLicensed() && master && [self isEnabledForContext:ctx] &&
+        BOOL on = SVBIsLicensed() && [self masterEnabled] && [self isEnabledForContext:ctx] &&
                   [self activeVideoPathForContext:ctx].length > 0;
 
         SVBVideoBackgroundView *bg = objc_getAssociatedObject(vc, &SVBBGKey);
@@ -1740,48 +1467,8 @@ static void SVBCollectToolbars(UIView *view, NSMutableArray<UIToolbar *> *out_, 
     }
 }
 
-// v11.0.4: 弹窗面板背景 (备忘录「多多创新」) —— 把视频铺进 UIAlertController
-// 的内容容器 (面板多大铺多大, 圆角/遮罩随面板走)。hook 侧传 self (UIAlertController)。
-- (void)applyPopupBackgroundToAlertController:(UIAlertController *)vc context:(NSString *)ctx {
-    @try {
-        if (!vc.isViewLoaded || !vc.view) return;
-        objc_setAssociatedObject(vc, &SVBAppliedCtxKey, ctx, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-
-        BOOL on = SVBIsLicensed() && [self notesMasterEnabled] && [self isEnabledForContext:ctx] &&
-                  [self activeVideoPathForContext:ctx].length > 0;
-        SVBVideoBackgroundView *bg = objc_getAssociatedObject(vc, &SVBBGKey);
-        if (!on) {
-            if (bg) { [bg removeFromSuperview]; objc_setAssociatedObject(vc, &SVBBGKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC); }
-            return;
-        }
-
-        // 定位面板容器 (alert 样式 = 居中小框; sheet 样式 = 底部大板)
-        UIView *host = nil;
-        for (UIView *v in vc.view.subviews) {
-            NSString *cls = NSStringFromClass([v class]);
-            if ([cls hasPrefix:@"_UIAlertController"]) { host = v; break; }
-        }
-        if (!host) host = vc.view;
-
-        if (!bg || ![bg.contextKey isEqualToString:ctx]) {
-            [bg removeFromSuperview];
-            bg = [[SVBVideoBackgroundView alloc] initWithFrame:host.bounds contextKey:ctx];
-            objc_setAssociatedObject(vc, &SVBBGKey, bg, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        }
-        bg.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-        if (bg.superview != host) {
-            [bg removeFromSuperview];
-            [host insertSubview:bg atIndex:0];   // 面板容器圆角/masksToBounds 自动裁剪
-        }
-        [bg configure];
-        host.backgroundColor = [UIColor clearColor];
-        [self clearBackgroundsOfView:host depth:0];
-
-        [self writeHeartbeat:[NSString stringWithFormat:@"apply popup ctx=%@ cls=%@", ctx, NSStringFromClass([vc class])]];
-    } @catch (NSException *e) {}
-}
-
-// 页面离开时摘除背景 (防止列表页跳转后残留 / 串扰)// v1.5.2: pop/转场期间绝不触碰 UICollectionView 的 backgroundView ——
+// 页面离开时摘除背景 (防止列表页跳转后残留 / 串扰)
+// v1.5.2: pop/转场期间绝不触碰 UICollectionView 的 backgroundView ——
 // 运行时置空/移除私有子类在转场中持有的视图, 与「过滤条件」闪退时机完全吻合, 判定为主嫌。
 // 转场中保留挂载无害: 同一 VC 换 ctx 时 apply 会整体替换; VC pop 时随视图树一起释放。
 - (void)detachFromViewController:(UIViewController *)vc {
@@ -1879,12 +1566,6 @@ static void SVBCollectToolbars(UIView *view, NSMutableArray<UIToolbar *> *out_, 
         // 键盘整棵子树跳过 (拆键盘模糊会毁掉键盘观感)
         if ([low containsString:@"keyboard"]) continue;
         if (depth <= 3) [self logClassOnce:cls context:ctx];
-        // v11.0.3: iOS16 系统内容背景视图 —— 纯白/系统色的大底 (诊断实锤出现在
-        // 备忘录搜索/列表页), 内容为空, 直接清透明 (底部/页尾白条的来源之一)
-        if ([cls isEqualToString:@"_UISystemBackgroundView"]) {
-            if (sub.backgroundColor && ![sub.backgroundColor isEqual:[UIColor clearColor]])
-                sub.backgroundColor = [UIColor clearColor];
-        }
         // v1.7.14: 聊天页「原样」档 (ba>=0.999) = 看消息模式, 页面内部完全收手
         // (透明化只作用于透明/隐藏档), 杜绝一切对原样外观的干扰
         BOOL originMode = [ctx isEqualToString:SVBContextChat] &&
@@ -2419,8 +2100,8 @@ static NSMutableDictionary<NSString *, NSDate *> *sSVBPlayerMtimes = nil;
     return out;
 }
 
-// v11.0.1: 本进程是否有「挂载且未隐藏」的背景视图 (0.5s 缓存 —— cell/decoration
-// 赋色钩子会高频调用, 缓存挡住全树遍历开销)。备忘录清扫 gate 专用。
+// v10.4.1: 本进程是否有「挂载且未隐藏」的背景视图 (0.5s 缓存 —— cell/decoration
+// 赋色钩子会高频调用, 缓存挡住全树遍历开销)。滚动清扫 gate 专用。
 static CFAbsoluteTime sSVBSweepCheckLast = 0;
 static BOOL sSVBSweepCheckResult = NO;
 - (BOOL)hasVisibleBackgroundViews {
@@ -2443,27 +2124,6 @@ static BOOL sSVBSweepCheckResult = NO;
     }
 }
 
-// v11.0.3: 预载播放器 (只预热解码/建缓冲, 立即暂停不出声) —— 修「进页面视频
-// 出来慢」: AVURLAsset 首次建 player 要开文件+起解码器, 冷启动 1~3 秒白屏。
-// 启动时后台把常用界面的 player 先建好, 进页面时缓存直接命中, 即进即显。
-- (void)preloadPlayerForContext:(NSString *)ctx {
-    @try {
-        if (![self activeVideoPathForContext:ctx].length) return;
-        AVPlayer *p = [self playerForContext:ctx forceRebuild:NO];
-        if (p) [p pause];
-    } @catch (NSException *e) {}
-}
-
-// v11.0.2: 暂停除指定语境外的全部播放器 (备忘录防串音专用)。
-// 备忘录一次只见一个页面, 进入新页时把其它语境的视频声音全停掉 ——
-// 回到原页面时 apply -> configure -> play 自动恢复。信息侧不接 (行为保持)。
-- (void)pauseAllPlayersExcept:(NSString *)ctx {
-    for (NSString *k in self.players.allKeys) {
-        if ([k isEqualToString:ctx]) continue;
-        @try { [self.players[k] pause]; } @catch (NSException *e) {}
-    }
-}
-
 - (void)recoverVideoPlaybackForce:(BOOL)force {
     @try {
         // 1) 音频会话: 后台被失活, 不重新激活的话续播会静默失败
@@ -2474,14 +2134,7 @@ static BOOL sSVBSweepCheckResult = NO;
         } @catch (NSException *e) {}
 
         // 2) 播放器自检: 队列被清空 / item 解码失败 -> 只能重建
-        //    v11.0.3: 只自检「当前挂载着背景视图的语境」—— 此前对所有 player 重建,
-        //    重建路径会 [p play] -> 回前台瞬间所有界面的声音一起响 (真机串音实锤)。
-        //    不可见语境的坏 player 由 playerForContext 的 status 自检兜底 (进页面时重建)。
-        NSMutableSet<NSString *> *visibleCtx = [NSMutableSet set];
-        for (SVBVideoBackgroundView *v in [self allVideoBackgroundViews])
-            if (v.contextKey.length) [visibleCtx addObject:v.contextKey];
-        for (NSString *ctx in [self.players.allKeys copy]) {
-            if (![visibleCtx containsObject:ctx]) continue;   // 不可见的不动
+        for (NSString *ctx in self.players.allKeys) {
             AVPlayer *p = self.players[ctx];
             BOOL bad = force || !p || p.status == AVPlayerStatusFailed;
             if (!bad && [p isKindOfClass:[AVQueuePlayer class]]) {
@@ -2626,15 +2279,12 @@ static BOOL sSVBSweepCheckResult = NO;
         UIViewController *host = SVBViewControllerForView(self);
         NSString *ctx = self.contextKey;
         if (host.isViewLoaded && host.view && ctx.length) {
-            // v11.0.4: 弹窗面板跳过深度透明化 (拆 alert 毛玻璃会渲染成黑块, v1.7.13 同因)
-            if (![ctx isEqualToString:SVBContextNPopup]) {
-                [[SVBManager shared] deepChromePass:host.view depth:0 ctx:ctx];
-                if ([ctx isEqualToString:SVBContextChat])
-                    [[SVBManager shared] bubblePass:host.view depth:0 inCell:NO ctx:ctx sysBg:NO];
-                for (UIWindow *w in UIApplication.sharedApplication.windows) {
-                    if (w == host.view.window) continue;
-                    [[SVBManager shared] deepChromePass:w depth:0 ctx:ctx];
-                }
+            [[SVBManager shared] deepChromePass:host.view depth:0 ctx:ctx];
+            if ([ctx isEqualToString:SVBContextChat])
+                [[SVBManager shared] bubblePass:host.view depth:0 inCell:NO ctx:ctx sysBg:NO];
+            for (UIWindow *w in UIApplication.sharedApplication.windows) {
+                if (w == host.view.window) continue;
+                [[SVBManager shared] deepChromePass:w depth:0 ctx:ctx];
             }
         }
     } @catch (NSException *e) {}
@@ -2681,10 +2331,7 @@ static BOOL sSVBSweepCheckResult = NO;
 - (void)configure {
     @try {
         SVBManager *mgr = [SVBManager shared];
-        // v11.0.1: 总闸按宿主分流 —— 与 applyToViewController 同规则, 否则
-        // 信息总开关关闭时备忘录的背景视图会在这里被整体 hidden (真机实锤路径)
-        BOOL master = SVBIsNotesHostProcess() ? [mgr notesMasterEnabled] : [mgr masterEnabled];
-        BOOL on = master && [mgr isEnabledForContext:self.contextKey] &&
+        BOOL on = [mgr masterEnabled] && [mgr isEnabledForContext:self.contextKey] &&
                   [mgr activeVideoPathForContext:self.contextKey].length > 0;
         self.hidden = !on;
         if (!on) {

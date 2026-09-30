@@ -11,10 +11,14 @@
 //  - 全局: 总开关 / 透明度 / 模糊度 / 音量(默认关闭)
 //  - 所有 Hook 均有异常保护, 不影响宿主 App 正常启动
 //
-//  v11.0.0 双宿主:
-//   - 信息App (MobileSMS) 七类界面照旧;
-//   - 备忘录App (MobileNotes) 从「注入探针」转正: 正文/笔记列表/文件夹/画廊/
-//     搜索/最近删除/内部页兜底 七类语境, 独立总开关 (notes_master_enabled)。
+//  v1.3 诊断强化:
+//   1. filter 里除 com.apple.MobileSMS 外还挂了 com.apple.mobilenotes
+//      作为「注入探针」: 打开备忘录若也能看到诊断横幅, 说明注入管线本身
+//      是通的, 问题只在信息App 这一侧 (反之说明 dylib 根本没被加载)。
+//   2. 只在信息App 进程里做界面 Hook (SVBIsSMSProcess 守卫), 其它进程
+//      只写心跳 + 显示横幅, 不干扰宿主。
+//   3. 进 App 后窗口顶部会出现一条可点关闭的横幅, 显示注入状态与各素材根
+//      的可见性 —— 这是判断「插件到底进没进信息App」最直接的证据。
 // ============================================================
 
 // 当前进程是不是苹果「信息」App (只有它是真正要挂背景的目标)
@@ -25,22 +29,6 @@ static BOOL SVBIsSMSProcess(void) {
         cached = [bid isEqualToString:SVB_SMS_BUNDLE_ID] ? 1 : 0;
     }
     return cached == 1;
-}
-
-// v11.0.0: 当前进程是不是苹果「备忘录」App (第二宿主)
-static BOOL SVBIsNotesProcess(void) {
-    static int cached = -1;
-    if (cached < 0) {
-        NSString *bid = SVBHostBundleIdentifier();
-        cached = [bid isEqualToString:SVB_NOTES_BUNDLE_ID] ? 1 : 0;
-    }
-    return cached == 1;
-}
-
-// 备忘录总闸: 授权 + 备忘录总开关 (v11.0.0)
-static BOOL SVBNotesShouldProcess(void) {
-    if (!SVBIsLicensed()) return NO;
-    return [[SVBManager shared] notesMasterEnabled];
 }
 
 // v1.9.0 授权总闸: 未激活/过期时, 所有「给视频背景让路」的透明化处理 (清底、藏卡、
@@ -74,30 +62,14 @@ static NSString *SVBContextForClassName(NSString *name) {
     if ([name containsString:@"Unread"])          return SVBContextUnread;
 
     // 会话列表 (所有信息; 已知/未知发件人由过滤器检测细分)
-    return nil;
-}
+    if ([name containsString:@"ConversationList"] ||
+        [name containsString:@"Conversations"]    ||
+        [name containsString:@"MessagesList"]     ||
+        [name containsString:@"Filter"]           ||
+        [name containsString:@"Message"]          ||
+        [name containsString:@"CK"])              return SVBContextAll;
 
-// v11.0.0: 备忘录语境映射 (IC* 私有类前缀; 精确类名由专用 Hook 处理)
-// v11.0.4: 按用户命名归位 —— 首页=第一屏; 文件夹=点进文件夹后的列表; 笔记=编辑页
-static NSString *SVBNotesContextForClassName(NSString *name) {
-    if (!name || ![name hasPrefix:@"IC"]) return nil;
-    // 首页 (第一屏的文件夹列表) —— 诊断实锤此前落到「内部页」
-    if ([name isEqualToString:@"ICFolderListViewController"]) return SVBContextNFolder;
-    // 文件夹 (点进文件夹后的备忘录列表) —— 与「所有 iCloud」列表同类
-    if ([name isEqualToString:@"ICFolderViewController"]) return SVBContextNList;
-    // 笔记 (右下角新建笔记进入的编辑页) —— 从内部页拆出
-    if ([name isEqualToString:@"ICNoteEditViewController"]) return SVBContextNEdit;
-    // 内部页 (浏览页) 由专用 Hook 处理; 设置页不铺
-    if ([name isEqualToString:@"ICNoteBodyViewController"] ||
-        [name isEqualToString:@"ICSettingsViewController"]) return nil;
-    if ([name containsString:@"Gallery"])  return SVBContextNGallery;
-    if ([name containsString:@"Search"])   return SVBContextNSearch;
-    if ([name containsString:@"RecentlyDeleted"] ||
-        [name containsString:@"Trash"])    return SVBContextNRecent;
-    if ([name containsString:@"NotesView"] ||
-        [name containsString:@"NoteList"] ||
-        [name containsString:@"Note"])     return SVBContextNList;
-    return SVBContextNInternal;
+    return nil;
 }
 
 // 只对「确认返回对象类型(@)的方法」做消息发送 —— 返回结构体/原始类型的选择器
@@ -213,12 +185,8 @@ static NSString *SVBDetectListContext(UIViewController *vc, NSString *fallback) 
 }
 
 // 横幅刷新 (注入探针进程也能用, 内容会标明是哪个 App)
-// v11.0.2: 记录最近一次刷新的语境 —— %ctor 的横幅重试 timer 用它显示,
-// 不再硬编码 all (用户实锤: 每个页面横幅都显示 界面[all], 真实语境被覆盖)
-static NSString *sSVBLastBannerCtx = nil;
 static void SVBRefreshBanner(NSString *ctx) {
     @try {
-        if (ctx.length) sSVBLastBannerCtx = ctx;
         // v1.9.0: 未授权提示不受「诊断横幅」开关影响, 必须让用户看到原因
         if (!SVBIsLicensed()) SVBShowDebugBannerForce([[SVBManager shared] bannerTextForContext:ctx]);
         else                 SVBShowDebugBanner([[SVBManager shared] bannerTextForContext:ctx]);
@@ -305,10 +273,10 @@ static BOOL SVBMainSweepActive(void) {
     return m.masterEnabled && [m isEnabledForContext:SVBContextMain];
 }
 
-// v10.4.0h: 信息侧「任意页面」清扫门 —— 只要本进程挂着可见的视频背景
-// (哪个语境都行), 列表滚动时重铺的白色卡片就该被清。
-// 此前容器清扫/装饰视图拦截只认「主页面」语境: 用户在「所有信息/已读/未知…」
-// 列表里下滑, 系统重铺的分区白卡没人拦 -> 成条成块的白带 (用户实测视频实锤)。
+// v10.4.1: 「任意页面」清扫门 —— 只要本进程挂着可见的视频背景 (哪个语境都行),
+// 列表滚动时重铺的白色卡片就该被清。
+// 此前容器清扫/装饰视图拦截只认「主页面」语境: 用户在「所有信息/未读/未知…」
+// 列表里下滑, 系统重铺的分区白卡没人拦 -> 成条成块的白带 (真机视频实锤)。
 // (hasVisibleBackgroundViews 自带 0.5s 缓存, 高频调用无开销)
 static BOOL SVBSMSListSweepActive(void) {
     if (!SVBIsLicensed()) return NO;
@@ -317,25 +285,10 @@ static BOOL SVBSMSListSweepActive(void) {
     return [m hasVisibleBackgroundViews];
 }
 
-// v11.0.1: 备忘录清扫 gate —— 备忘录总开关开 && 本进程有挂载且可见的背景视图。
-// (没有可见背景时绝不清白卡, 否则页面露黑底; hasVisibleBackgroundViews 带 0.5s 缓存)
-static BOOL SVBNotesSweepActive(void) {
-    if (!SVBIsLicensed()) return NO;
-    SVBManager *m = [SVBManager shared];
-    if (!m.notesMasterEnabled) return NO;
-    return [m hasVisibleBackgroundViews];
-}
-
 static void SVBClearContainerBGs(UIView *v, NSInteger depth) {
     if (!v || depth > 14) return;
     if ([v isKindOfClass:[SVBVideoBackgroundView class]]) return;
-    // v11.0.1: 双宿主 gate —— 信息进程看「主页面 或 任意有背景的列表页」sweep,
-    // 备忘录进程看备忘录 sweep (v10.4.0h: 信息侧不再只认主页面)
-    if (SVBIsSMSProcess()) {
-        if (!SVBMainSweepActive() && !SVBSMSListSweepActive()) { SVBRestoreHiddenCards(); return; }
-    } else {
-        if (!SVBNotesSweepActive()) { SVBRestoreHiddenCards(); return; }
-    }
+    if (!SVBMainSweepActive() && !SVBSMSListSweepActive()) { SVBRestoreHiddenCards(); return; }
     // v1.7.21: cell 的系统托管背景子树整体跳过 (不藏不清)。v1.7.20 曾藏
     // backgroundView/selectedBackgroundView + layoutSubviews 持续重扫, 与系统的
     // backgroundConfiguration 重应用撞车 —— 点选单元格时 SIGABRT (崩溃日志实锤:
@@ -400,32 +353,6 @@ static void SVBScheduleMainPageCheck(UIViewController *vc) {
             }
         } @catch (NSException *e) {}
     });
-}
-
-// v11.0.1: 备忘录页面通用挂载 (对齐信息主页面机制):
-// apply + 主动清白卡 + 三次延迟补扫。备忘录列表/正文/搜索全是 iOS16 分组
-// 白卡样式, 系统铺白发生在我们挂背景之后 (或滚动复用时), 没有补扫就是白底。
-static void SVBApplyNotesPage(UIViewController *vc, NSString *ctx) {
-    [[SVBManager shared] applyToViewController:vc context:ctx];
-    // v11.0.2: 防串音 —— 备忘录一次只见一个页面, 进入本页时停掉其它语境的
-    // 视频声音 (用户实锤: 搜索页还能听到列表页的声音)。回原页面时
-    // apply -> configure -> play 自动恢复, 无需记录。
-    [[SVBManager shared] pauseAllPlayersExcept:ctx];
-    SVBRefreshBanner(ctx);
-    SVBClearContainerBGs(vc.view, 0);
-    __weak UIViewController *wvc = vc;
-    NSTimeInterval delays[3] = {0.45, 1.2, 2.5};
-    for (int i = 0; i < 3; i++) {
-        NSTimeInterval t = delays[i];
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(t * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{
-            @try {
-                UIViewController *s = wvc;
-                if (!s || !s.isViewLoaded || !s.view.window) return;
-                SVBClearContainerBGs(s.view, 0);
-            } @catch (NSException *e) {}
-        });
-    }
 }
 
 
@@ -654,10 +581,7 @@ static void SVBMapBalloonText(UIView *balloon) {
 %hook UICollectionViewListCell
 - (void)setBackgroundConfiguration:(UIBackgroundConfiguration *)cfg {
     @try {
-        // v11.0.1: 双宿主 —— 备忘录分组列表的 cell 白底同样在源头拦
-        BOOL go = (SVBIsSMSProcess() && SVBShouldProcess()) ||
-                  (SVBIsNotesProcess() && SVBNotesSweepActive());
-        if (cfg && go)
+        if (cfg && SVBIsSMSProcess() && SVBShouldProcess())
             cfg.backgroundColor = [UIColor clearColor];
     } @catch (NSException *e) {}
     %orig(cfg);
@@ -671,10 +595,8 @@ static void SVBMapBalloonText(UIView *balloon) {
 - (void)_updateDefaultBackgroundAppearance {
     %orig;
     @try {
-        // v11.0.1: 双宿主 —— 信息进程按信息闸, 备忘录进程按备忘录闸
-        if (SVBIsSMSProcess()) { if (!SVBShouldProcess()) return; }
-        else if (SVBIsNotesProcess()) { if (!SVBNotesSweepActive()) return; }
-        else return;
+        if (!SVBIsSMSProcess()) return;
+        if (!SVBShouldProcess()) return;
         if (self.backgroundConfiguration) return;
         __weak UICollectionViewListCell *wcell = self;
         dispatch_async(dispatch_get_main_queue(), ^{
@@ -688,10 +610,8 @@ static void SVBMapBalloonText(UIView *balloon) {
 - (void)layoutSubviews {
     %orig;
     @try {
-        // v11.0.1: 双宿主 —— 信息进程按信息闸, 备忘录进程按备忘录闸
-        if (SVBIsSMSProcess()) { if (!SVBShouldProcess()) return; }
-        else if (SVBIsNotesProcess()) { if (!SVBNotesSweepActive()) return; }
-        else return;
+        if (!SVBIsSMSProcess()) return;
+        if (!SVBShouldProcess()) return;
         // 只清 UIView 层底色 (UIView.backgroundColor 不触发集合布局失效, 安全)
         if (self.backgroundColor && ![self.backgroundColor isEqual:[UIColor clearColor]])
             self.backgroundColor = [UIColor clearColor];
@@ -707,10 +627,8 @@ static void SVBMapBalloonText(UIView *balloon) {
 - (void)layoutSubviews {
     %orig;
     @try {
-        // v11.0.1: 双宿主 —— 信息进程按信息闸, 备忘录进程按备忘录闸
-        if (SVBIsSMSProcess()) { if (!SVBShouldProcess()) return; }
-        else if (SVBIsNotesProcess()) { if (!SVBNotesSweepActive()) return; }
-        else return;
+        if (!SVBIsSMSProcess()) return;
+        if (!SVBShouldProcess()) return;
         if (self.backgroundColor && ![self.backgroundColor isEqual:[UIColor clearColor]])
             self.backgroundColor = [UIColor clearColor];
     } @catch (NSException *e) {}
@@ -721,10 +639,8 @@ static void SVBMapBalloonText(UIView *balloon) {
 - (void)layoutSubviews {
     %orig;
     @try {
-        // v11.0.1: 双宿主 —— 信息进程按信息闸, 备忘录进程按备忘录闸
-        if (SVBIsSMSProcess()) { if (!SVBShouldProcess()) return; }
-        else if (SVBIsNotesProcess()) { if (!SVBNotesSweepActive()) return; }
-        else return;
+        if (!SVBIsSMSProcess()) return;
+        if (!SVBShouldProcess()) return;
         if (self.backgroundView) self.backgroundView = nil;
         if (self.backgroundColor && ![self.backgroundColor isEqual:[UIColor clearColor]])
             self.backgroundColor = [UIColor clearColor];
@@ -822,11 +738,7 @@ static char SVBDetectedCtxKey;
 - (void)viewWillAppear:(BOOL)animated {
     %orig;
     SVB_SMS_GUARD()
-    // v11.0.4: 内容判定优先 —— 主页面与「所有信息」同类同名, split 布局下
-    // nav 根判别失效、标题可能迟设, 唯一可靠区分 = 内容命中 ≥2 行过滤器标题。
-    // (用户实锤: 主页面失效/被当成所有信息)
-    NSString *ctx = SVBIsFilterPickerScreen(self) ? SVBContextMain
-                  : SVBDetectListContext(self, SVBListFallback(self));
+    NSString *ctx = SVBDetectListContext(self, SVBListFallback(self));
     objc_setAssociatedObject(self, &SVBDetectedCtxKey, ctx, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     [[SVBManager shared] logClassOnce:NSStringFromClass([self class]) context:ctx];
     SVB_APPLY_CTX(self, ctx)
@@ -835,8 +747,7 @@ static char SVBDetectedCtxKey;
 - (void)viewDidAppear:(BOOL)animated {
     %orig;
     SVB_SMS_GUARD()
-    NSString *ctx = SVBIsFilterPickerScreen(self) ? SVBContextMain
-                  : SVBDetectListContext(self,
+    NSString *ctx = SVBDetectListContext(self,
         objc_getAssociatedObject(self, &SVBDetectedCtxKey) ?: SVBListFallback(self));
     objc_setAssociatedObject(self, &SVBDetectedCtxKey, ctx, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     SVB_APPLY_CTX(self, ctx)
@@ -847,8 +758,7 @@ static char SVBDetectedCtxKey;
         @try {
             __strong typeof(wself) sself = wself;
             if (!sself || !sself.isViewLoaded || !sself.view.window) return;
-            NSString *ctx2 = SVBIsFilterPickerScreen(sself) ? SVBContextMain
-                           : SVBDetectListContext(sself,
+            NSString *ctx2 = SVBDetectListContext(sself,
                 objc_getAssociatedObject(sself, &SVBDetectedCtxKey) ?: SVBListFallback(sself));
             if (![ctx2 isEqualToString:ctx]) {
                 objc_setAssociatedObject(sself, &SVBDetectedCtxKey, ctx2, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -955,119 +865,12 @@ static char SVBDetectedCtxKey;
 }
 %end
 
-// ============================================================
-// v11.0.0 备忘录 App Hook (com.apple.mobilenotes, IC* 私有类)
-// 类不存在时 Logos 仅打警告, 不影响运行
-// ============================================================
-@interface ICNoteBodyViewController : UIViewController @end
-@interface ICNoteEditViewController : UIViewController @end
-@interface ICFolderViewController : UIViewController @end
-
-#define SVB_NOTES_GUARD() if (!SVBIsNotesProcess()) return;
-// v11.0.1: 走 SVBApplyNotesPage (apply + 清白卡 + 延迟补扫), 不再裸 apply
-#define SVB_NOTES_APPLY(ctx) @try { SVBApplyNotesPage(self, ctx); } @catch (NSException *e) {}
-
-// 备忘录正文 / 编辑页
-// v11.0.4: 编辑页拆成独立语境「笔记」(右下角新建笔记进入的编辑界面)
-%hook ICNoteBodyViewController
-- (void)viewWillAppear:(BOOL)animated {
-    %orig;
-    SVB_NOTES_GUARD()
-    SVB_NOTES_APPLY(SVBContextNBody)
-    [[SVBManager shared] setContextActive:YES context:SVBContextNBody];
-}
-- (void)viewDidAppear:(BOOL)animated {
-    %orig;
-    SVB_NOTES_GUARD()
-    SVB_NOTES_APPLY(SVBContextNBody)
-}
-- (void)viewDidDisappear:(BOOL)animated {
-    %orig;
-    SVB_NOTES_GUARD()
-    @try { [[SVBManager shared] setContextActive:NO context:SVBContextNBody]; } @catch (NSException *e) {}
-}
-%end
-
-%hook ICNoteEditViewController
-- (void)viewWillAppear:(BOOL)animated {
-    %orig;
-    SVB_NOTES_GUARD()
-    SVB_NOTES_APPLY(SVBContextNEdit)
-}
-- (void)viewDidDisappear:(BOOL)animated {
-    %orig;
-    SVB_NOTES_GUARD()
-    @try { [[SVBManager shared] setContextActive:NO context:SVBContextNEdit]; } @catch (NSException *e) {}
-}
-%end
-
-// 文件夹内列表 (点进 所有iCloud/各文件夹 后的页面) —— v11.0.4 归「文件夹」语境
-%hook ICFolderViewController
-- (void)viewWillAppear:(BOOL)animated {
-    %orig;
-    SVB_NOTES_GUARD()
-    SVB_NOTES_APPLY(SVBContextNList)
-}
-- (void)viewDidDisappear:(BOOL)animated {
-    %orig;
-    SVB_NOTES_GUARD()
-    @try { [[SVBManager shared] setContextActive:NO context:SVBContextNList]; } @catch (NSException *e) {}
-}
-%end
-
-// v11.0.4: 弹窗面板 (备忘录「多多创新」) —— 左下角新建文件夹等弹出的 alert/sheet,
-// 面板多大视频铺多大。仅备忘录进程生效。
-%hook UIAlertController
-- (void)viewWillAppear:(BOOL)animated {
-    %orig;
-    SVB_NOTES_GUARD()
-    @try {
-        if (!SVBNotesShouldProcess()) return;
-        [[SVBManager shared] applyPopupBackgroundToAlertController:self context:SVBContextNPopup];
-    } @catch (NSException *e) {}
-}
-- (void)viewDidAppear:(BOOL)animated {
-    %orig;
-    SVB_NOTES_GUARD()
-    @try {
-        if (!SVBNotesShouldProcess()) return;
-        // viewDidAppear 再补一次 (首触发时面板容器可能还没进视图树)
-        [[SVBManager shared] applyPopupBackgroundToAlertController:self context:SVBContextNPopup];
-    } @catch (NSException *e) {}
-}
-- (void)viewDidDisappear:(BOOL)animated {
-    %orig;
-    SVB_NOTES_GUARD()
-    @try { [[SVBManager shared] setContextActive:NO context:SVBContextNPopup]; } @catch (NSException *e) {}
-}
-%end
-
-// 兜底: 类名关键词分发 (垃圾信息 / 最近删除 / 未读 / 过滤器页等; v11.0.0 兼做备忘录兜底)
+// 兜底: 类名关键词分发 (垃圾信息 / 最近删除 / 未读 / 过滤器页等)
 %hook UIViewController
 - (void)viewWillAppear:(BOOL)animated {
     %orig;
-    // v11.0.0: 双宿主 —— 信息App / 备忘录进程才继续, 其它探针进程照旧只看横幅
-    if (!SVBIsSMSProcess() && !SVBIsNotesProcess()) return;
+    SVB_SMS_GUARD()
     @try {
-        // ---- 备忘录兜底 (IC* 类名分发, 近似全屏页面才铺) ----
-        if (SVBIsNotesProcess()) {
-            if (!SVBNotesShouldProcess()) return;
-            NSString *name = NSStringFromClass([self class]);
-            NSString *ctx = SVBNotesContextForClassName(name);
-            // v11.0.1: 未匹配的类名也记进诊断 —— 搜索页等页面类名没实锤过,
-            // 装机后抓诊断报告即可定位真实类名 (logClassOnce 自带去重)
-            [[SVBManager shared] logClassOnce:name context:ctx ?: @"(未匹配)"];
-            if (!ctx) return;   // 精确类名由上方专用 Hook 处理
-            if ([name containsString:@"Keyboard"] || [name containsString:@"Picker"]) return;
-            CGSize vs = self.view.bounds.size;
-            CGSize ss = UIScreen.mainScreen.bounds.size;
-            BOOL fit = (fabs(vs.width - ss.width) < 32 && fabs(vs.height - ss.height) < 32) ||
-                       (fabs(vs.width - ss.height) < 32 && fabs(vs.height - ss.width) < 32);
-            if (!fit) return;
-            SVBApplyNotesPage(self, ctx);
-            return;
-        }
-        // ---- 信息App 兜底 (原有逻辑照旧) ----
         NSString *name = NSStringFromClass([self class]);
         NSString *ctx = SVBContextForClassName(name);
         [[SVBManager shared] logClassOnce:name context:ctx];
@@ -1105,8 +908,7 @@ static char SVBDetectedCtxKey;
 // 防声音穿透到其它界面。按「实际挂载过的语境」精确暂停。
 - (void)viewDidDisappear:(BOOL)animated {
     %orig;
-    // v11.0.0: 备忘录页面离开同样精确暂停
-    if (!SVBIsSMSProcess() && !SVBIsNotesProcess()) return;
+    SVB_SMS_GUARD()
     @try {
         NSString *applied = [[SVBManager shared] appliedContextForViewController:self];
         if (applied.length)
@@ -1125,30 +927,20 @@ static char SVBDetectedCtxKey;
 - (void)setBackgroundColor:(UIColor *)color {
     %orig;
     @try {
-        if (SVBIsSMSProcess()) {
-            if (!SVBMainSweepActive() && !SVBSMSListSweepActive()) return;
-        } else if (SVBIsNotesProcess()) {
-            if (!SVBNotesSweepActive()) return;
-        } else {
-            return;
-        }
+        if (!SVBIsSMSProcess()) return;
+        if (!SVBMainSweepActive() && !SVBSMSListSweepActive()) return;
         if (color && ![color isEqual:[UIColor clearColor]])
             %orig([UIColor clearColor]);
     } @catch (NSException *e) {}
 }
-// v10.4.0h: 布局期间就地再清一次 —— 滚动/复用会新建装饰视图, 它的白底可能
+// v10.4.1: 布局期间就地再清一次 —— 滚动/复用会新建装饰视图, 它的白底可能
 // 不是走 setBackgroundColor: 铺的 (或铺得比我们的钩子早一帧), 只在布局末尾
 // 兜一道, 白带就不会先显示出来。(装饰视图不是 cell, 改色不触发集合布局重入)
 - (void)layoutSubviews {
     %orig;
     @try {
-        if (SVBIsSMSProcess()) {
-            if (!SVBMainSweepActive() && !SVBSMSListSweepActive()) return;
-        } else if (SVBIsNotesProcess()) {
-            if (!SVBNotesSweepActive()) return;
-        } else {
-            return;
-        }
+        if (!SVBIsSMSProcess()) return;
+        if (!SVBMainSweepActive() && !SVBSMSListSweepActive()) return;
         if (self.backgroundColor && ![self.backgroundColor isEqual:[UIColor clearColor]])
             self.backgroundColor = [UIColor clearColor];
         if (self.layer.backgroundColor &&
@@ -1159,10 +951,10 @@ static char SVBDetectedCtxKey;
 %end
 
 // ------------------------------------------------------------------
-// v10.4.0h: 滚动期间的白带兜底 —— 系统在滚动/回弹时重铺白色卡片 (分区底、cell 容器),
+// v10.4.1: 滚动期间的白带兜底 —— 系统在滚动/回弹时重铺白色卡片 (分区底、cell 容器),
 // 往往比我们的「源头拦截」早一帧显示出来, 观感就是一条条白带。这里在滚动回调里做
 // **极轻量**清扫: 只抹容器自身底色, 不碰系统托管的 backgroundView/selectedBackgroundView
-// 子树、不藏卡片 —— 避免 v1.7.21 那类「布局重入 -> SIGABRT」。
+// 子树、也不藏卡片 —— 避免 v1.7.21 那类「布局重入 -> SIGABRT」。
 // 节流 0.12s, 且只在「本进程有可见视频背景」时才跑。
 // ------------------------------------------------------------------
 static CFAbsoluteTime sSVBLastScrollSweep = 0;
@@ -1204,14 +996,10 @@ static void SVBScrollSweepList(UIView *scrollView) {
 
 static void SVBScrollSweepIfNeeded(UIScrollView *sv) {
     if (!sv) return;
-    if (!SVBIsSMSProcess() && !SVBIsNotesProcess()) return;
+    if (!SVBIsSMSProcess()) return;
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
     if (now - sSVBLastScrollSweep < 0.12) return;
-    if (SVBIsSMSProcess()) {
-        if (!SVBSMSListSweepActive()) return;
-    } else {
-        if (!SVBNotesSweepActive()) return;
-    }
+    if (!SVBSMSListSweepActive()) return;
     sSVBLastScrollSweep = now;
     @try { SVBScrollSweepList(sv); } @catch (NSException *e) {}
 }
@@ -1294,17 +1082,6 @@ static void SVBScrollSweepIfNeeded(UIScrollView *sv) {
                     [[SVBManager shared] migrateMediaIntoPrimaryRoot];
                     // v10.4.0: 旧名杂项改名/过期诊断日志删除/界面子目录摊平
                     SVBCleanupHousekeeping();
-                    // v11.0.2: 宿主进程也跑跨容器同步 (v11.0.2 起宿主候选根=双容器)
-                    // —— 备忘录容器素材意外丢失时自动从信息容器补回,
-                    // 不再依赖「用户开过控制 App」这一步
-                    SVBSyncMediaAcrossRoots();
-                    // v11.0.3: 备忘录预载常用界面的播放器 (修进页面视频出来慢)
-                    if (SVBIsNotesProcess()) {
-                        [[SVBManager shared] preloadPlayerForContext:SVBContextNFolder];
-                        [[SVBManager shared] preloadPlayerForContext:SVBContextNList];
-                        [[SVBManager shared] preloadPlayerForContext:SVBContextNBody];
-                        [[SVBManager shared] preloadPlayerForContext:SVBContextNEdit];
-                    }
                 });
 
                 CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(),
@@ -1345,11 +1122,7 @@ static void SVBScrollSweepIfNeeded(UIScrollView *sv) {
                     dispatch_source_set_event_handler(timer, ^{
                         tries++;
                         @try {
-                            // v11.0.2: 显示最近一次 apply 的语境 (备忘录初始=列表页,
-                            // 信息=所有信息), 不再硬编码 all
-                            NSString *initCtx = sSVBLastBannerCtx
-                                ?: (SVBIsNotesProcess() ? SVBContextNList : SVBContextAll);
-                            SVBRefreshBanner(initCtx);
+                            SVBRefreshBanner(SVBContextAll);
                         } @catch (NSException *e) {}
                         if (tries >= 10) dispatch_source_cancel(timer);
                     });

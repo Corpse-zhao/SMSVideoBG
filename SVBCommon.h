@@ -22,11 +22,7 @@
 //   同时保留 jbroot / Documents 等共享根作为兜底, 用户放哪都能被扫到。
 // ============================================================
 
-// v11.0.0: 双宿主版 —— 同一个插件同时接管「信息」与「备忘录」:
-//   - 备忘录(com.apple.mobilenotes)的 7 类界面语境见下方 NVB 常量;
-//   - 控制App 首页可切「信息 / 备忘录」两个管理页, 各自独立开关;
-//   - 备忘录素材根 = 备忘录App 数据容器 (控制App 双容器齐写)。
-#define SVB_VERSION @"11.0.5"
+#define SVB_VERSION @"10.4.1"
 #define SVB_SUITE @"com.nvb.smsvideobg"
 #define SVB_DARWIN_NOTE "com.nvb.smsvideobg/prefs.changed"
 #define SVB_MEDIA_DIR_NAME @"SMSVideoBG"
@@ -46,9 +42,8 @@
 #define SVB_APP_BUNDLE_ID @"com.nvb.smsvideobg.app"
 #define SVB_URL_SCHEME @"smsvideobg"
 
-// 目标进程 = 苹果「信息」/ 苹果「备忘录」(v11.0.0 双宿主)
+// 目标进程 = 苹果「信息」
 #define SVB_SMS_BUNDLE_ID @"com.apple.MobileSMS"
-#define SVB_NOTES_BUNDLE_ID @"com.apple.mobilenotes"
 
 // 插件侧最可靠的根目录 (jbroot: 越狱进程必可访问)
 NSString *SVBJBMediaDirectory(void);
@@ -74,11 +69,6 @@ BOOL SVBOpenPathInFilza(NSString *path, NSString **message);
 //   ② 诊断日志/探针超过 3 天自动删除 (「诊断报告不要一直保留」);
 //   ③ 旧版按界面分的子目录摊平: 视频上移到素材根, 空目录删除。
 void SVBCleanupHousekeeping(void);
-
-// v11.0.0: 双容器素材同步 (仅控制App 有意义 —— 两个容器根都可写):
-// 把每个可写根里的视频补拷到其它可写根, 保证信息App 与备忘录进程
-// 各自的容器里都有全量素材 (Filza 只往一个软链里丢文件也能两边生效)。
-NSInteger SVBSyncMediaAcrossRoots(void);
 
 // 全部候选素材根, 顺序 = 优先级 (v1.3: 容器根在前)
 NSArray<NSString *> *SVBRootCandidates(void);
@@ -113,33 +103,6 @@ extern NSString * const SVBContextChat;     // 对话详情
 // 7 类界面定义: @[key, 标题, 说明]
 NSArray<NSArray<NSString *> *> *SVBContextDefinitions(void);
 
-// ---- v11.0.0 备忘录语境 (com.apple.mobilenotes, IC* 私有类) ----
-// v11.0.4: 按用户真机页面重命名 —— 首页/文件夹/内部页/笔记/搜索一下/多多创新
-extern NSString * const SVBContextNBody;      // 「内部页」点开某条备忘录后的浏览界面
-extern NSString * const SVBContextNEdit;      // 「笔记」右下角新建笔记进入的编辑界面 (v11.0.4 新增)
-extern NSString * const SVBContextNList;      // 「文件夹」点进 所有iCloud/各文件夹 后的列表页
-extern NSString * const SVBContextNFolder;    // 「首页」打开备忘录看到的第一屏
-extern NSString * const SVBContextNGallery;   // 「画廊」缩略图视图
-extern NSString * const SVBContextNSearch;    // 「搜索一下」搜索页
-extern NSString * const SVBContextNPopup;     // 「多多创新」左下角新建文件夹等弹出的面板 (v11.0.4 新增)
-extern NSString * const SVBContextNRecent;    // 「最近删除」
-extern NSString * const SVBContextNInternal;  // 「其它内部页」兜底 (近似全屏的 IC* 页)
-
-// 备忘录 7 类界面定义: @[key, 标题, 说明]
-NSArray<NSArray<NSString *> *> *SVBNotesContextDefinitions(void);
-// 信息 + 备忘录 全部语境定义 (运维/迁移遍历用)
-NSArray<NSArray<NSString *> *> *SVBAllContextDefinitions(void);
-
-// 当前宿主进程是否为备忘录 (tweak 侧判进程用)
-BOOL SVBIsNotesHostProcess(void);
-
-// v11.0.4: 控制 App 把双容器路径写进配置 (宿主进程沙盒枚举失败时的后备定位)
-void SVBRecordContainerPaths(void);
-
-// 备忘录统一素材路径: /var/mobile/信息视频背景素材/备忘录
-// (软链 -> 备忘录App 数据容器内的真实素材根; 定位不到容器时返回路径本身)
-NSString *SVBNotesFriendlyRoot(void);
-
 @interface SVBManager : NSObject
 + (instancetype)shared;
 - (NSUserDefaults *)prefs;
@@ -150,17 +113,6 @@ NSString *SVBNotesFriendlyRoot(void);
 - (void)setConfigValue:(id)value forKey:(NSString *)key;
 
 - (BOOL)masterEnabled;
-// v11.0.0: 备忘录总开关 (与信息总开关独立, 默认关 —— 需在控制App 备忘录页打开)
-- (BOOL)notesMasterEnabled;
-// v11.0.1: 本进程当前是否有「挂载且未隐藏」的视频背景视图 (0.5s 缓存) ——
-// 备忘录清扫 gate: 没有可见背景时绝不清白卡, 避免页面露黑底
-- (BOOL)hasVisibleBackgroundViews;
-// v11.0.2: 暂停除指定语境外的全部播放器 (备忘录防串音)
-- (void)pauseAllPlayersExcept:(NSString *)ctx;
-// v11.0.3: 预载播放器 (后台建好即暂停, 进页面零等待)
-- (void)preloadPlayerForContext:(NSString *)ctx;
-// v11.0.4: 弹窗面板背景 (备忘录「多多创新」, 铺进 UIAlertController 内容容器)
-- (void)applyPopupBackgroundToAlertController:(UIAlertController *)vc context:(NSString *)ctx;
 // 全局效果 (0~1)
 - (CGFloat)globalAlpha;
 - (CGFloat)globalBlur;
@@ -219,6 +171,9 @@ NSString *SVBNotesFriendlyRoot(void);
 - (void)recoverVideoPlaybackForce:(BOOL)force;
 // 屏幕上全部视频背景视图 (自愈/诊断用)
 - (NSArray<SVBVideoBackgroundView *> *)allVideoBackgroundViews;
+// v10.4.1: 本进程当前是否有「挂载且未隐藏」的视频背景视图 (0.5s 缓存) ——
+// 滚动清扫 gate: 没有可见背景时绝不清白卡, 避免页面露黑底
+- (BOOL)hasVisibleBackgroundViews;
 
 #pragma mark - v9.9.11 切后台自动清理
 
