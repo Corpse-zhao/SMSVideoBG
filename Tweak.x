@@ -990,6 +990,62 @@ static void SVBTranslucentIconTray(UIView *v, NSInteger d) {
     for (UIView *s2 in v.subviews) SVBTranslucentIconTray(s2, d + 1);
 }
 
+// v10.6.6 【关键】从底条元素继续往下钻, 把「输入栏」和「App 抽屉」分开处理。
+// 【为什么必须在里面钻】SVBScanBands 命中一条就 `continue` 不再往里钻 —— 底部的结构是
+//     inputAccessoryView (容器: 条状+全宽+贴底 => 被收进 bottoms 并 continue)
+//     ├── CKMessageEntryView.view      (输入栏)
+//     └── CKBrowserSwitcherFooterView  (App 抽屉)
+//   容器一被收进来, 里面这两份**都不会被单独收集**; 而容器含输入控件 =>
+//   整块被判成"输入栏"保留 => 输入栏自己的白底没人清(闪白)、抽屉整条没人碰(毫无变化)。
+//   前几版一直在 bottoms 这一层加码, 作用对象始终是这个容器, 所以怎么改都无效。
+//
+// 判据: 落在底部条带 + 宽度 >= 屏宽 80%("整条") + 高度 18~170。
+//   输入栏里的加号/麦克风按钮宽约 50pt, 不满足 80% => 不会被误伤。
+static void SVBDeepProcessBottom(UIView *v, UIView *space, NSInteger depth,
+                                 UIView **entryOut, CGFloat *trayHOut,
+                                 NSUInteger *trayCntOut) {
+    if (!v || depth > 8) return;
+    CGRect sb = space.bounds;
+    CGFloat W = sb.size.width, H = sb.size.height;
+    if (W < 1.0 || H < 1.0) return;
+    CGFloat safeBot = space.safeAreaInsets.bottom; if (safeBot < 1.0) safeBot = 34.0;
+    CGFloat zoneTop = H - (safeBot + 240.0);
+    for (UIView *sub in v.subviews) {
+        if (!sub || sub.hidden) continue;
+        if ([sub isKindOfClass:[SVBVideoBackgroundView class]]) continue;
+        if (SVBIsSystemManagedCellBg(sub)) continue;
+        NSString *low = NSStringFromClass([sub class]).lowercaseString;
+        if ([low containsString:@"keyboard"]) continue;
+        if ([sub isKindOfClass:[UITextField class]] ||
+            [sub isKindOfClass:[UITextView class]]) continue;
+        CGRect f = [sub convertRect:sub.bounds toView:space];
+        BOOL inBottom = (f.origin.y >= zoneTop) || (CGRectGetMaxY(f) >= zoneTop);
+        BOOL wide     = (f.size.width >= W * 0.80);
+        BOOL bandish  = (f.size.height >= 18.0 && f.size.height <= 170.0);
+        if (inBottom && wide && bandish) {
+            if (SVBSubtreeHasTextInput(sub, 0)) {
+                // 这一份里有输入框 => 输入栏本体: 只清背景, 控件全留
+                SVBTranslucentChromeView(sub);
+                if (entryOut && !*entryOut) *entryOut = sub;
+                SVBDeepProcessBottom(sub, space, depth + 1, entryOut, trayHOut, trayCntOut);
+                continue;
+            }
+            // 不含输入控件 => App 抽屉(功能键那一排): 整栏隐藏
+            SVBTranslucentIconTray(sub, 0);
+            SVBHideChromeView(sub);
+            for (UIView *g in sub.subviews) SVBHideChromeView(g);
+            if (trayCntOut) (*trayCntOut)++;
+            if (trayHOut) {
+                CGFloat h = f.size.height;
+                if (h >= 20.0 && h <= 120.0)
+                    *trayHOut = (*trayHOut < 1.0) ? h : MIN(*trayHOut, h);
+            }
+            continue;
+        }
+        SVBDeepProcessBottom(sub, space, depth + 1, entryOut, trayHOut, trayCntOut);
+    }
+}
+
 // v10.6.2: frame 是否落在「顶部条带 / 底部条带」(全宽 + 条状, 不是整屏)
 static BOOL SVBIsChromeBand(CGRect f, CGFloat W, CGFloat H, CGFloat safeTop, CGFloat safeBot) {
     if (f.size.width < W * 0.92) return NO;
@@ -1347,25 +1403,17 @@ static void SVBDoChatChrome(UIViewController *vc) {
     }
     // v10.6.2: 底条**不再 alpha=0** —— 用户要看到并用到底部输入框 / 上传照片 /
     // 下面那一排功能键。改成「只清掉容器自身白底 + 内部 bar 背景层」, 控件原样保留。
-    // v10.6.5: 用户实测「最底下一栏还是没任何变化」——
-    // 说明我们清了半天的那个视图并不是那条白的来源(透明化两轮都没触达)。
-    // 按用户明确给出的 fallback 走: **整栏隐藏**, 并把输入栏下移填补空出来的位置。
+    // v10.6.6 【关键修复】不能只看 bottoms 这一层 ——
+    // SVBScanBands 命中一条 `continue`, 所以底部那个 inputAccessoryView 容器一被收进
+    // bottoms, 里面的「输入栏」和「App 抽屉」就都不会被单独收集; 容器里含输入控件
+    // => 整块被判成"输入栏"保留 => ① 输入栏自己那层白没人清(闪白) ② 抽屉没人碰(毫无变化)。
+    // 现在改成**钻进容器内部**逐份处理。
     UIView *entryView = nil;
     CGFloat trayH = 0.0;
     NSUInteger trayCntHidden = 0;
     for (UIView *v in bottoms) {
         SVBTranslucentChromeView(v);
-        if (SVBSubtreeHasTextInput(v, 0)) {
-            if (!entryView) entryView = v;               // 输入栏: 保留, 只清背景
-        } else {
-            SVBTranslucentIconTray(v, 0);                // 仍然先试着透明化(无害)
-            SVBHideChromeView(v);                        // v10.6.5: 整栏隐藏
-            trayCntHidden++;
-            // 取「抽屉本体」的高度(限制在 20~120 之间, 排除把输入栏也包进去的父容器)
-            CGFloat h = v.bounds.size.height;
-            if (h >= 20.0 && h <= 120.0)
-                trayH = (trayH < 1.0) ? h : MIN(trayH, h);
-        }
+        SVBDeepProcessBottom(v, vc.view, 0, &entryView, &trayH, &trayCntHidden);
     }
     // v10.6.5: 输入栏下移到最底下。用 transform 而不是改 frame/约束 ——
     // transform 独立于 Auto Layout, 系统重排时不会被覆盖。
@@ -1786,6 +1834,12 @@ static char SVBDetectedCtxKey;
 // 文字在 CKTextBalloonView 的 UITextView 子视图里, 清掉气泡图不影响文字。
 // 注: CKBalloonView 只有前向声明, 属性一律经由 UIView* 访问
 %hook CKBalloonView
+// v10.6.6: 滚动复用 / 新消息插入时会有一帧气泡背景还没被清掉(用户说"气泡被卡出来"),
+// 补一道 layoutSubviews —— 与 CKTextBalloonView 是同一套做法(那边本来就在用)。
+- (void)layoutSubviews {
+    %orig;
+    if (SVBBubbleSweepActive()) SVBStripBalloonPaint((UIView *)self);
+}
 - (void)setBackgroundColor:(UIColor *)color {
     %orig;
     // 先让系统把色赋上, 再清掉; color 已是透明时不再赋值, 避免递归
