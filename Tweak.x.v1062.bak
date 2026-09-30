@@ -578,7 +578,6 @@ static char SVBChromeMappedKey;
 static NSMutableArray<UIView *> *SVBTranslucentChrome;
 static char SVBTransBgKey;
 static char SVBTransLayerBgKey;
-static char SVBIconTrayKey;                 // v10.6.3: 标记「底部 App 抽屉」视图
 
 // 返回按钮的点击目标: UIAction 的 identifier 是 readonly 且 actionWithTitle:image:
 // 传 nil 会撞 -Wnonnull (CI 开了 -Werror), 干脆用一个常驻辅助对象 + target-action,
@@ -652,19 +651,9 @@ static void SVBScanChromeVCs(UIViewController *vc, NSInteger depth,
         if ([cls containsString:@"MessageEntryView"] ||
             [cls containsString:@"BrowserSwitcher"] ||
             [cls containsString:@"ChatInput"]) {
-            BOOL isTray = [cls containsString:@"BrowserSwitcher"];
-            if (vc.isViewLoaded && vc.view.superview) {
-                SVBAddUniqueView(out_, vc.view);
-                // v10.6.3: 打标 —— 抽屉要跟输入框一样做「深度」透明化 (图标自己那层白底)
-                if (isTray) objc_setAssociatedObject(vc.view, &SVBIconTrayKey, @YES,
-                                                     OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-            }
+            if (vc.isViewLoaded && vc.view.superview) SVBAddUniqueView(out_, vc.view);
             UIView *iav = vc.inputAccessoryView;
-            if (iav && iav.superview) {
-                SVBAddUniqueView(out_, iav);
-                if (isTray) objc_setAssociatedObject(iav, &SVBIconTrayKey, @YES,
-                                                     OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-            }
+            if (iav && iav.superview) SVBAddUniqueView(out_, iav);
         }
     } @catch (NSException *e) {}
     for (UIViewController *c in vc.childViewControllers)
@@ -824,52 +813,6 @@ static NSString *SVBFindPhoneText(UIView *v, NSInteger d) {
     return nil;
 }
 
-// v10.6.3 【核心】子树里有没有「可见内容」。
-// 【为什么必须有这个】导航栏的**内容层** (UINavigationBarContentView, 装着返回按钮和
-// 标题) 同样满足「条状 + 全宽 + 贴顶」的几何判据 -> 会被 SVBScanBands 收进 tops
-// -> 被 alpha=0 -> **系统返回键和标题被一起藏掉**。这正是用户看到的
-// 「上面没有对方号码、左上角也没有返回键」。
-// 所以: 有内容一律不允许整体隐藏, 只能去掉它的背景色。
-static BOOL SVBTopHasContent(UIView *v, NSInteger d) {
-    if (!v || d > 6) return NO;
-    @try {
-        if ([v isKindOfClass:[UILabel class]]) {
-            if (((UILabel *)v).text.length) return YES;
-        } else if ([v isKindOfClass:[UITextField class]] ||
-                   [v isKindOfClass:[UITextView class]] ||
-                   [v isKindOfClass:[UIControl class]]) {
-            return YES;
-        } else if ([v isKindOfClass:[UIImageView class]]) {
-            if (((UIImageView *)v).image) return YES;
-        }
-    } @catch (NSException *e) {}
-    for (UIView *s2 in v.subviews) {
-        if (SVBTopHasContent(s2, d + 1)) return YES;
-    }
-    return NO;
-}
-
-// v10.6.3: 系统导航栏的「返回键 / 标题」现在是不是真的能看见 (alpha>0, 未 hidden, 在屏上)。
-//   YES -> 用系统的, 我们不再自绘 (自绘只会有重影 / 错位风险)
-//   NO  -> 系统内容确实不可见, 才启用自绘兜底
-static BOOL SVBNavContentVisible(UIView *nav) {
-    if (!nav) return NO;
-    NSMutableArray<UIView *> *stack = [NSMutableArray arrayWithObject:nav];
-    NSInteger guard = 0;
-    while (stack.count && guard++ < 500) {
-        UIView *v = stack.firstObject;
-        [stack removeObjectAtIndex:0];
-        @try {
-            if (v.alpha > 0.05 && !v.hidden && v.window) {
-                if ([v isKindOfClass:[UIControl class]]) return YES;
-                if ([v isKindOfClass:[UILabel class]] && ((UILabel *)v).text.length) return YES;
-            }
-        } @catch (NSException *e) {}
-        [stack addObjectsFromArray:v.subviews];
-    }
-    return NO;
-}
-
 // 把 chrome 容器藏掉 (alpha=0 而非 hidden, 保证它仍参与布局 —— 我们要读它的 frame)
 static void SVBHideChromeView(UIView *v) {
     if (!v || !v.superview) return;
@@ -941,30 +884,6 @@ static void SVBTranslucentChromeView(UIView *v) {
     SVBClearBarBackgroundsInside(v, 0);
 }
 
-// v10.6.3: 底部 App 抽屉(功能键那一排) 的**深度**透明化。
-// 为什么不能只清容器: 浅色模式下每个图标外面那层白底挂在自己的按钮上
-// (CKBrowserIconView / UIButton 的 backgroundColor), 清容器底部根本清不掉。
-// 所以这里递归往下清, 但 cell 与输入控件一律不碰 (SIGABRT 史 + 别把输入框弄坏)。
-static void SVBTranslucentIconTray(UIView *v, NSInteger d) {
-    if (!v || d > 8) return;
-    @try {
-        if ([v isKindOfClass:[SVBVideoBackgroundView class]]) return;
-        if ([v isKindOfClass:[UICollectionViewCell class]] ||
-            [v isKindOfClass:[UITableViewCell class]]) return;      // cell 一律不碰
-        if ([v isKindOfClass:[UITextField class]] ||
-            [v isKindOfClass:[UITextView class]]) return;           // 输入控件别动
-        NSString *cls = NSStringFromClass([v class]);
-        if ([cls hasPrefix:@"_UIBarBackground"] || [cls containsString:@"BarBackground"]) {
-            v.hidden = YES;
-            return;
-        }
-        if (v.backgroundColor && ![v.backgroundColor isEqual:[UIColor clearColor]])
-            v.backgroundColor = [UIColor clearColor];
-        if (v.layer.backgroundColor) v.layer.backgroundColor = NULL;
-    } @catch (NSException *e) {}
-    for (UIView *s2 in v.subviews) SVBTranslucentIconTray(s2, d + 1);
-}
-
 // v10.6.2: frame 是否落在「顶部条带 / 底部条带」(全宽 + 条状, 不是整屏)
 static BOOL SVBIsChromeBand(CGRect f, CGFloat W, CGFloat H, CGFloat safeTop, CGFloat safeBot) {
     if (f.size.width < W * 0.92) return NO;
@@ -1005,9 +924,7 @@ static void SVBSweepDeepChrome(UIView *root, UIView *space, NSInteger depth) {
             if (band && ([cls containsString:@"CKGradientView"] ||
                          [cls hasPrefix:@"_UIBarBackground"] ||
                          [cls containsString:@"BarBackground"])) {
-                // v10.6.3: 万一这个"背景层"里嵌了内容(极少数), 也只清背景不整体藏
-                if (SVBTopHasContent(sub, 0)) SVBTranslucentChromeView(sub);
-                else                          SVBHideChromeView(sub);
+                SVBHideChromeView(sub);      // 具名装饰层: 条带里就藏
                 continue;
             }
             if (band) {
@@ -1033,8 +950,7 @@ static void SVBSweepDeepChrome(UIView *root, UIView *space, NSInteger depth) {
 
 static void SVBMapChatTop(UIViewController *vc, UIView *topBand,
                           NSString *titleText, UIFont *titleFont,
-                          NSString *subText, UIFont *subFont,
-                          BOOL sysOk) {
+                          NSString *subText, UIFont *subFont) {
     UIView *host = topBand.superview;
     if (!host) return;
     UIView *layer = objc_getAssociatedObject(vc, &SVBChromeMappedKey);
@@ -1081,19 +997,15 @@ static void SVBMapChatTop(UIViewController *vc, UIView *topBand,
         title.textAlignment = NSTextAlignmentCenter;
         [layer addSubview:title];
     }
-    // v10.6.3: sysOk=YES 表示系统导航栏的标题(联系人名)本来就看得见 ——
-    // 再自绘一遍会重影/错位, 所以自绘标题只在「系统内容确实不可见」时才启用。
-    title.hidden = sysOk;
-    title.text = sysOk ? @"" : (titleText ?: @"");
+    title.text = titleText ?: @"";
     title.textColor = fg;
     title.font = titleFont ?: [UIFont boldSystemFontOfSize:17];
     CGFloat maxW = MAX(40.0, lf.size.width - 140.0);
     CGSize need = [title sizeThatFits:CGSizeMake(maxW, CGFLOAT_MAX)];
     BOOL hasSub = (subText.length > 0);
     CGFloat titleTop = hasSub ? (ccy - need.height - 0.5) : (ccy - need.height / 2.0);
-    if (!sysOk)
-        title.frame = CGRectMake(floor(ccx - need.width / 2.0), floor(titleTop),
-                                 need.width, need.height);
+    title.frame = CGRectMake(floor(ccx - need.width / 2.0), floor(titleTop),
+                             need.width, need.height);
 
     // ---- 副行 (对方号码) ----
     UILabel *subLine = (UILabel *)[layer viewWithTag:0x53564253];   // 'SVBS'
@@ -1109,11 +1021,7 @@ static void SVBMapChatTop(UIViewController *vc, UIView *topBand,
         subLine.textColor = fg;
         subLine.font = subFont ?: [UIFont systemFontOfSize:11];
         CGSize n2 = [subLine sizeThatFits:CGSizeMake(maxW, CGFLOAT_MAX)];
-        // v10.6.3: sysOk 时导航栏的标题已被系统占住, 号码就放到「副标题位」(靠下);
-        // 否则按自绘标题的下方排。
-        CGFloat subY = sysOk ? (lf.size.height - n2.height - 2.0) : (ccy + 0.5);
-        if (subY < contentTop) subY = contentTop;
-        subLine.frame = CGRectMake(floor(ccx - n2.width / 2.0), floor(subY),
+        subLine.frame = CGRectMake(floor(ccx - n2.width / 2.0), floor(ccy + 0.5),
                                    n2.width, n2.height);
     } else if (subLine) {
         subLine.hidden = YES;
@@ -1131,8 +1039,6 @@ static void SVBMapChatTop(UIViewController *vc, UIView *topBand,
     [back setTitle:@"‹" forState:UIControlStateNormal];
     [back setTitleColor:fg forState:UIControlStateNormal];
     back.titleLabel.font = [UIFont systemFontOfSize:30 weight:UIFontWeightRegular];
-    // v10.6.3: 系统返回键可见时(sysOk)不重复画 —— 系统的位置/手势/无障碍都是对的
-    back.hidden = sysOk;
     // v10.6.2b: 返回键只在安全带 (状态栏以下) 内撑满, 否则会顶到灵动岛里
     back.frame = CGRectMake(4, contentTop, 58, contentH);
     __weak UIViewController *wvc = vc;
@@ -1178,42 +1084,6 @@ static void SVBClearMappedChrome(void) {
         objc_setAssociatedObject(v, &SVBChromeHiddenKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
     [SVBHiddenChrome removeAllObjects];
-}
-
-// v10.6.3: 系统导航栏**没**显示号码时, 直接从会话对象里把对方号码取出来。
-// 路径: CKChatController.conversation -> CKConversation.chat -> IMChat.participants
-//       -> IMHandle.address / displayID; 单聊退化用 CKConversation.recipient。
-// 全部走 KVC + @try, 拿不到就返回 nil (绝不抛异常)。
-static NSString *SVBPeerNumberFromVC(UIViewController *vc) {
-    if (!vc) return nil;
-    @try {
-        if (![vc respondsToSelector:NSSelectorFromString(@"conversation")]) return nil;
-        id conv = [vc valueForKey:@"conversation"];
-        if (!conv) return nil;
-        NSMutableArray *handles = [NSMutableArray array];
-        @try {
-            id chat = [conv valueForKey:@"chat"];
-            if (chat) {
-                id ps = [chat valueForKey:@"participants"];
-                if ([ps isKindOfClass:[NSArray class]]) [handles addObjectsFromArray:ps];
-                else if ([ps isKindOfClass:[NSSet class]])
-                    [handles addObjectsFromArray:[(NSSet *)ps allObjects]];
-            }
-        } @catch (NSException *e) {}
-        if (!handles.count) {
-            @try {
-                id rec = [conv valueForKey:@"recipient"];
-                if (rec) [handles addObject:rec];
-            } @catch (NSException *e) {}
-        }
-        for (id h in handles) {
-            NSString *addr = nil;
-            @try { addr = [h valueForKey:@"address"]; } @catch (NSException *e) {}
-            if (!addr.length) @try { addr = [h valueForKey:@"displayID"]; } @catch (NSException *e) {}
-            if (addr.length) return addr;
-        }
-    } @catch (NSException *e) {}
-    return nil;
 }
 
 // 一轮完整处理: 扫 -> (兜底 nav bar) -> 抓标题 -> 藏 -> 映射
@@ -1301,52 +1171,15 @@ static void SVBDoChatChrome(UIViewController *vc) {
         } @catch (NSException *e) {}
     }
 
-    // v10.6.3 【关键修复】顶部「有内容」的视图只能清背景, 绝不能整体 alpha=0。
-    // 导航栏内容层同样满足「条状+全宽+贴顶」的几何判据, 旧代码把它一起 alpha=0,
-    // 于是系统返回键 + 标题(含对方号码) 全没了 —— 这就是用户这次报的两个现象。
-    for (UIView *v in tops) {
-        if (SVBTopHasContent(v, 0)) SVBTranslucentChromeView(v);   // 导航栏内容层: 只清背景
-        else                        SVBHideChromeView(v);          // 纯背景层: 照旧藏
-    }
-    for (UIView *v in masks) {
-        if (SVBTopHasContent(v, 0)) SVBTranslucentChromeView(v);
-        else                        SVBHideChromeView(v);
-    }
+    for (UIView *v in tops)  SVBHideChromeView(v);
+    for (UIView *v in masks) SVBHideChromeView(v);
     // v10.6.2: 底条**不再 alpha=0** —— 用户要看到并用到底部输入框 / 上传照片 /
     // 下面那一排功能键。改成「只清掉容器自身白底 + 内部 bar 背景层」, 控件原样保留。
-    for (UIView *v in bottoms) {
-        SVBTranslucentChromeView(v);
-        // v10.6.3: 底部 App 抽屉(功能键排) 再做一次**深度**透明化 —— 用户要求
-        // 「最底下的功能键背景跟输入框一样透明」, 那层白底挂在各图标自己的按钮上。
-        NSString *bcls = NSStringFromClass([v class]);
-        if ([bcls containsString:@"BrowserSwitcher"] ||
-            objc_getAssociatedObject(v, &SVBIconTrayKey))
-            SVBTranslucentIconTray(v, 0);
-    }
-
-    // v10.6.3: 系统导航栏的返回键/标题此刻是否真的可见 -> 决定自绘层要不要画
-    BOOL sysOk = NO;
-    for (UIView *v in tops) { if (SVBNavContentVisible(v)) { sysOk = YES; break; } }
-    if (!sysOk) {
-        @try {
-            UINavigationBar *nb0 = vc.navigationController.navigationBar;
-            if (nb0) sysOk = SVBNavContentVisible(nb0);
-        } @catch (NSException *e) {}
-    }
-    // v10.6.3: 号码 —— 系统顶条里已经显示号码就别重复; 没显示就去会话对象里取对方的号
-    BOOL sysShowsNumber = (subText.length > 0) && SVBLooksLikePhone(subText);
-    if (sysShowsNumber) {
-        subText = nil;                       // 系统已显示, 自绘层不重复
-    } else {
-        @try {
-            NSString *peer = SVBPeerNumberFromVC(vc);
-            if (peer.length) { subText = peer; subFont = [UIFont systemFontOfSize:12]; }
-        } @catch (NSException *e) {}
-    }
+    for (UIView *v in bottoms) SVBTranslucentChromeView(v);
 
     if (top) {
         @try {
-            SVBMapChatTop(vc, top, titleText, titleFont, subText, subFont, sysOk);
+            SVBMapChatTop(vc, top, titleText, titleFont, subText, subFont);
         } @catch (NSException *e) {}
     }
 
@@ -1376,19 +1209,6 @@ static void SVBDoChatChrome(UIViewController *vc) {
             UINavigationBar *nbLog = vc.navigationController.navigationBar;
             if (nbLog && nbLog != top)
                 [[SVBManager shared] log:@"chat chrome 导航栏文字候选: %@", SVBTextDump(nbLog, 150)];
-            // v10.6.3: 顶部内容保护是否生效 / 系统返回键可见性 / 抽屉是否被识别
-            NSMutableString *td = [NSMutableString string];
-            for (UIView *v in tops)
-                [td appendFormat:@"%@(内容=%d) ", NSStringFromClass([v class]),
-                                     (int)SVBTopHasContent(v, 0)];
-            BOOL sysOkLog = NO;
-            for (UIView *v in tops) { if (SVBNavContentVisible(v)) { sysOkLog = YES; break; } }
-            NSUInteger trayCnt = 0;
-            for (UIView *v in bottoms)
-                if (NSStringFromClass([v class]).length &&
-                    (objc_getAssociatedObject(v, &SVBIconTrayKey) != nil)) trayCnt++;
-            [[SVBManager shared] log:@"chat chrome 顶部保护: sysOk=%d 抽屉=%lu 明细: %@",
-                (int)sysOkLog, (unsigned long)trayCnt, td];
         }
     } @catch (NSException *e) {}
 }
