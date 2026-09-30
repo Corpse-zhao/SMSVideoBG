@@ -604,11 +604,8 @@ static BOOL SVBIsInputBarClass(NSString *low) {
            [low containsString:@"bottombar"] || [low containsString:@"toolbar"] ||
            [low containsString:@"accessory"] || [low containsString:@"quicklook"];
 }
-static BOOL SVBIsNavBarClass(NSString *low) {
-    return [low containsString:@"navigationbar"] || [low containsString:@"navbar"] ||
-           [low containsString:@"_uinavigationbar"] || [low containsString:@"titleview"] ||
-           [low containsString:@"header"];
-}
+// 注: 顶部导航栏不走「类名搜索」—— 直接拿 vc.navigationController.navigationBar,
+// 比在视图树里猜类名可靠得多 (SVBMapNavBar 里就是这么做的)。
 
 // 取「容器自身」的矩形 (含其父链上不可见部分不管, 直接用 window 坐标)
 static CGRect SVBWindowRect(UIView *v) {
