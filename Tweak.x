@@ -1078,14 +1078,27 @@ static UIView *SVBAccessoryHost(UIView *entry) {
     return nil;
 }
 
-// v10.6.7b: 取子树里「真正看得见的东西」在 space 坐标系里的**联合框**。
-// 只认**叶子级**的交互/文字/图片元素 (UITextField / UITextView / UIControl /
-// 有字的 UILabel / 有图的 UIImageView); 命中的元素内部若还有更具体的元素, 就取内部的
-// —— 这样不会把整条全宽容器算进来 (否则「水平居中」永远算出来是 0, 等于没做)。
+// v10.6.10 【核心修正】内容框**只取输入行**, 绝不能把下面那排 App 抽屉图标也算进来。
+// 【v10.6.9 为什么还是没居中】它把整棵子树里所有"看得见的东西" union 成一个框:
+//   输入行(胶囊) 在 y=5..39, 下面那排抽屉图标在 y=44..81 —— 被 union 成一个又宽又高的框
+//     => ① 水平中心被更靠左的抽屉拉偏: 算出 239 (胶囊本身是 266.5)
+//           => tx 只有 -24, 而真正需要的是 -51.5
+//        ② 下沿被抽屉拉到 890, 于是 ty = 890 - 890 = 0, 而真正需要的是 +42
+//   两个方向都"差一点点但没到位" => 用户看到的还是「不居中」。
+// 【修法】先定位**输入框本体**, 只 union 与它同一行的元素, 抽屉在下一行 => 直接排除。
+typedef struct {
+    CGRect r;
+    BOOL isField;
+    __unsafe_unretained NSString *cls;
+} SVBLeaf;
+
+// v10.6.10: 收集子树里"看得见的东西" (叶子级), 框在 space 坐标系里。
+// 只认 UITextField / UITextView / UIControl / 有字的 UILabel / 有图的 UIImageView;
+// 命中的元素内部若还有更具体的元素就取内部的 (不把整条全宽容器算进来);
 // 被我们藏掉的 (hidden / alpha<0.05) 一律不计 —— 例如功能键那一排。
-static void SVBContentUnionInSpace(UIView *v, NSInteger d, UIView *space,
-                                   CGRect *u, BOOL *has) {
-    if (!v || d > 8) return;
+static void SVBCollectLeaves(UIView *v, NSInteger d, UIView *space,
+                             SVBLeaf *buf, NSInteger *n, NSInteger cap) {
+    if (!v || d > 8 || *n >= cap) return;
     @try {
         if (v.hidden || v.alpha < 0.05) return;
         if ([v isKindOfClass:[SVBVideoBackgroundView class]]) return;
@@ -1097,59 +1110,116 @@ static void SVBContentUnionInSpace(UIView *v, NSInteger d, UIView *space,
                      ([v isKindOfClass:[UIImageView class]] &&
                       ((UIImageView *)v).image != nil);
         if (match) {
-            BOOL innerHas = NO; CGRect inner = CGRectZero;
+            NSInteger mark = *n;
             for (UIView *s in v.subviews)
-                SVBContentUnionInSpace(s, d + 1, space, &inner, &innerHas);
-            CGRect r; BOOL useIt = NO;
-            if (innerHas) { r = inner; useIt = YES; }
-            else {
-                r = [space convertRect:v.bounds fromView:v];
-                useIt = (r.size.width > 8.0 && r.size.height > 6.0);
-            }
-            if (useIt) {
-                if (!*has) { *u = r; *has = YES; }
-                else *u = CGRectUnion(*u, r);
+                SVBCollectLeaves(s, d + 1, space, buf, n, cap);
+            if (*n > mark) return;               // 内部还有更具体的元素 => 用内部的
+            CGRect r = [space convertRect:v.bounds fromView:v];
+            if (r.size.width > 8.0 && r.size.height > 6.0) {
+                buf[*n].r = r;
+                buf[*n].isField = ([v isKindOfClass:[UITextField class]] ||
+                                   [v isKindOfClass:[UITextView class]]);
+                buf[*n].cls = NSStringFromClass([v class]);
+                (*n)++;
             }
             return;
         }
     } @catch (NSException *e) {}
-    for (UIView *s in v.subviews) SVBContentUnionInSpace(s, d + 1, space, u, has);
+    for (UIView *s in v.subviews) SVBCollectLeaves(s, d + 1, space, buf, n, cap);
 }
 
-// v10.6.9 【核心】把输入栏**钉在屏幕底部 + 水平居中**。
+// v10.6.10: 找**最宽的输入框本体** (UITextField / UITextView) —— 用户看到的那条"胶囊"。
+// 逐层全扫 (不因命中就停), 免得输入框内部还有子控件时把它自己漏掉。
+static void SVBFindWidestField(UIView *v, NSInteger d, UIView *space,
+                               CGRect *best, CGFloat *bw) {
+    if (!v || d > 8) return;
+    @try {
+        if (v.hidden || v.alpha < 0.05) return;
+        if ([v isKindOfClass:[SVBVideoBackgroundView class]]) return;
+        if ([v isKindOfClass:[UITextField class]] ||
+            [v isKindOfClass:[UITextView class]]) {
+            CGRect r = [space convertRect:v.bounds fromView:v];
+            if (r.size.width > *bw) { *bw = r.size.width; *best = r; }
+        }
+    } @catch (NSException *e) {}
+    for (UIView *s in v.subviews) SVBFindWidestField(s, d + 1, space, best, bw);
+}
+
+// v10.6.10: 钉底诊断用 (在 SVBDoChatChrome 里打一行, 一眼看出算得对不对)
+static CGRect     gSVBLastContent;
+static CGRect     gSVBLastField;
+static CGFloat    gSVBLastTx = 0;
+static CGFloat    gSVBLastTy = 0;
+static NSInteger  gSVBLastLeaf = 0;
+static NSInteger  gSVBLastMode = 0;      // 0=整行 1=输入框本体 2=整个 entry
+static BOOL       gSVBLastDocked = NO;
+static __unsafe_unretained NSString *gSVBLastHost = nil;
+
+// v10.6.10 【核心】把输入栏**钉在屏幕底部 + 水平居中**。
 // 【历史】
 //   v10.6.7 按「宿主容器高度」算 => 总差一截, 且**没做水平居中**(只算了 ty)。
 //   v10.6.8 改成在屏幕坐标系里按"看得见的东西"算 => 位置对了, 但**开始横跳**:
-//     ⚠️ 因为内容框是 convertRect 到 space 取的, 而这条转换**会经过 entry 自己的
-//        transform** —— 那个 transform 正是我们上一次施加的位移。
-//        第 1 次: 内容中心 266.5 -> tx = -51.5 -> 应用 -51.5
-//        第 2 次: 内容已被挪到 215 -> tx = 0   -> 应用 0 (弹回原位)
-//        第 3 次: 又回到 266.5 ...            -> 无限自激振荡
-// 【v10.6.9 的修法】让"内容框"与我们的 transform **彻底解耦**:
-//   ① 内容框改在 **entry 自己的坐标系** 里取 (SVBContentUnionInSpace 的 space 传 entry),
-//      convertRect 到 entry 不会经过 entry 自身的 transform => 恒稳;
-//   ② 用 entry.center (**不受 transform 影响的那个值**) 反推出"未施加位移时"的屏幕框;
-//   ③ 再把内容框相对 entry.bounds 的偏移搬过去, 得到"未施加位移时"的内容屏幕框;
-//   ④ 于是 tx/ty 只跟系统布局有关, 跟我们挪过多少无关 => 公式**重新幂等**, 不再横跳。
-// 目标: 水平中心 == 屏宽/2; 下沿 == 屏高 - 底部安全区 - 8 (系统原生那一条的位置)。
+//     ⚠️ 内容框 convertRect 到 space **会经过 entry 自己的 transform**, 而那个 transform
+//        正是我们上一次施加的位移 => 输入量混进了自己的输出 => 无限自激振荡。
+//   v10.6.9 让内容框与 transform 解耦 (在 entry 自身坐标系取 + 用 center 反推) => 不横跳了,
+//     但**位置还是不对**: 内容框把下面那排 App 抽屉图标也 union 了进来 =>
+//     水平中心被拉偏 (239 vs 胶囊的 266.5), 下沿被拉低 (890 vs 胶囊的 848)
+//     => tx 只算出 -24 (该 -51.5)、ty 算成 0 (该 +42) => 用户看到「还是不居中」。
+// 【v10.6.10 的修法】内容框**只取输入行**:
+//   ① SVBFindWidestField 先找到最宽的 UITextField/UITextView (就是那条"胶囊");
+//   ② 只 union 与它**同一行**的元素 (垂直中心差 <= 行高/2 + 14) —— 抽屉在下一行 => 排除;
+//   ③ 万一这一行几乎占满屏宽 (居中它没意义), 退化成**只居中输入框本体**;
+//   ④ 删掉 v10.6.9 那条 `ty < 0 就归零` 的非对称钳位 (它也是"该下移却没下移"的帮凶),
+//      改成对称钳位 ±160。
+// 依旧保持**幂等** (内容框在 entry 自身坐标系取 + 用 center 反推), 所以不会横跳。
 // 键盘弹出时 (宿主不再贴屏底) 不动垂直 —— 否则会钻到键盘后面。
-// 返回 YES 表示已钉住; NO 表示几何不可信 (调用方可走兜底逻辑)。
+// 返回 YES 表示已钉住; NO 表示几何不可信。
 static BOOL SVBPinEntryToBottom(UIView *entry, UIView *space) {
     if (!entry || !space || !entry.superview) return NO;
     CGFloat W = space.bounds.size.width, Hh = space.bounds.size.height;
     if (W < 60.0 || Hh < 60.0) return NO;
     CGRect eb = entry.bounds;
     if (eb.size.height < 10.0 || eb.size.width < 10.0) return NO;
-    // ① 内容框: 取在 **entry 自己的坐标系** 里 (不含我们的 transform)
+    // ① 叶子元素清单: 取在 **entry 自己的坐标系** 里 (不含我们的 transform)
+    SVBLeaf leaves[64]; NSInteger n = 0;
+    SVBCollectLeaves(entry, 0, entry, leaves, &n, 64);
+    // ② 输入框本体 (最宽的 UITextField / UITextView) —— 用户看到的那条"胶囊"
+    CGRect field = CGRectZero; CGFloat fw = 0.0;
+    SVBFindWidestField(entry, 0, entry, &field, &fw);
+    // ③ 只取与输入框**同一行**的元素 —— 下面那排抽屉图标在另一行, 直接排除
     BOOL hasC = NO; CGRect cInEntry = CGRectZero;
-    SVBContentUnionInSpace(entry, 0, entry, &cInEntry, &hasC);
-    if (!hasC || cInEntry.size.width < 20.0) cInEntry = eb;
-    // ② entry.center 不受 transform 影响 => 用它反推"未施加位移时"的屏幕框
+    NSInteger mode = 0;                       // 0=输入行 1=输入框本体 2=整个 entry
+    CGFloat rowMidY = 0.0, rowTol = 0.0;
+    if (fw >= 60.0) {
+        rowMidY = CGRectGetMidY(field);
+        rowTol = field.size.height / 2.0 + 14.0;
+        cInEntry = field; hasC = YES;
+    } else if (n > 0) {
+        rowMidY = CGRectGetMidY(leaves[0].r);
+        for (NSInteger i = 1; i < n; i++) {
+            CGFloat my = CGRectGetMidY(leaves[i].r);
+            if (my < rowMidY) rowMidY = my;
+        }
+        rowTol = 26.0;
+    }
+    if (rowTol > 0.0) {
+        for (NSInteger i = 0; i < n; i++) {
+            if (fabs(CGRectGetMidY(leaves[i].r) - rowMidY) > rowTol) continue;
+            if (!hasC) { cInEntry = leaves[i].r; hasC = YES; }
+            else cInEntry = CGRectUnion(cInEntry, leaves[i].r);
+        }
+    }
+    // 整行几乎占满屏宽 => 居中它没意义, 退化成只居中"胶囊"本体
+    if (hasC && cInEntry.size.width >= W * 0.92 && fw >= 60.0) {
+        cInEntry = field; mode = 1;
+    }
+    if (!hasC || cInEntry.size.width < 20.0) { cInEntry = eb; mode = 2; }
+    // ④ entry.center 不受 transform 影响 => 用它反推"未施加位移时"的屏幕框
     CGPoint ctr = [space convertPoint:entry.center fromView:entry.superview];
     CGRect raw = CGRectMake(ctr.x - eb.size.width / 2.0,
                             ctr.y - eb.size.height / 2.0,
                             eb.size.width, eb.size.height);
-    // ③ 把内容框相对 entry.bounds 的偏移搬过去
+    // ⑤ 把内容框相对 entry.bounds 的偏移搬过去
     CGRect content = CGRectMake(raw.origin.x + (cInEntry.origin.x - eb.origin.x),
                                 raw.origin.y + (cInEntry.origin.y - eb.origin.y),
                                 cInEntry.size.width, cInEntry.size.height);
@@ -1167,12 +1237,18 @@ static BOOL SVBPinEntryToBottom(UIView *entry, UIView *space) {
     }
     CGFloat tx = (W / 2.0) - CGRectGetMidX(content);
     CGFloat ty = 0.0;
-    if (docked) {
+    if (docked && mode != 2) {
         ty = (Hh - safeBot - 8.0) - CGRectGetMaxY(content);
-        // 没越界就不上移(防抖); 越界了(下沿掉到屏外)才允许往上拉回来
-        if (ty < 0.0 && CGRectGetMaxY(content) < Hh - 10.0) ty = 0.0;
+        if (ty >  160.0) ty =  160.0;        // 对称钳位 (v10.6.9 那条非对称的已删)
+        if (ty < -160.0) ty = -160.0;
     }
-    if (fabs(tx) > 240.0 || ty > 320.0 || ty < -200.0) return NO;
+    // v10.6.10: 诊断快照
+    gSVBLastContent = cInEntry; gSVBLastField = field;
+    gSVBLastTx = tx; gSVBLastTy = ty;
+    gSVBLastLeaf = n; gSVBLastMode = mode;
+    gSVBLastDocked = docked;
+    gSVBLastHost = host ? NSStringFromClass([host class]) : nil;
+    if (fabs(tx) > 240.0) return NO;
     // 原始 transform 只记一次, 离开页面时还原
     NSValue *ov = objc_getAssociatedObject(entry, &SVBOrigTfKey);
     CGAffineTransform base = CGAffineTransformIdentity;
@@ -1190,6 +1266,22 @@ static BOOL SVBPinEntryToBottom(UIView *entry, UIView *space) {
     CGAffineTransform cur = entry.transform;
     if (fabs(cur.tx - want.tx) > 0.5 || fabs(cur.ty - want.ty) > 0.5)
         entry.transform = want;
+    @try {
+        static NSTimeInterval lastLeafLog = 0;
+        NSTimeInterval nowL = [NSDate date].timeIntervalSince1970;
+        if (nowL - lastLeafLog > 1.5) {
+            lastLeafLog = nowL;
+            NSMutableString *ls = [NSMutableString string];
+            NSInteger lim = n < 10 ? n : 10;
+            for (NSInteger i = 0; i < lim; i++)
+                [ls appendFormat:@"%@(%.0f,%.0f %.0fx%.0f) ",
+                    leaves[i].cls ?: @"?",
+                    leaves[i].r.origin.x, leaves[i].r.origin.y,
+                    leaves[i].r.size.width, leaves[i].r.size.height];
+            [[SVBManager shared] log:@"chat chrome 叶明细(%d): %@",
+                (int)n, ls.length ? ls : @"(无)"];
+        }
+    } @catch (NSException *e) {}
     return YES;
 }
 
@@ -1658,6 +1750,15 @@ static void SVBDoChatChrome(UIViewController *vc) {
                         wl.bounds.size.width, wl.bounds.size.height,
                         wl.safeAreaInsets.bottom,
                         (int)(CGRectGetMaxY(cv) >= wl.bounds.size.height - 60.0)];
+                    // v10.6.10: 把"算出来的内容框/输入框/tx/ty"直接打出来, 一眼看出对不对
+                    [[SVBManager shared] log:@"chat chrome 钉底值: 内容框=(%.0f,%.0f %.0fx%.0f) 输入框=(%.0f,%.0f %.0fx%.0f) 叶=%d 模式=%d tx=%.0f ty=%.0f 贴底=%d 宿主=%@",
+                        gSVBLastContent.origin.x, gSVBLastContent.origin.y,
+                        gSVBLastContent.size.width, gSVBLastContent.size.height,
+                        gSVBLastField.origin.x, gSVBLastField.origin.y,
+                        gSVBLastField.size.width, gSVBLastField.size.height,
+                        (int)gSVBLastLeaf, (int)gSVBLastMode,
+                        gSVBLastTx, gSVBLastTy, (int)gSVBLastDocked,
+                        gSVBLastHost ?: @"(无)"];
                 }
             } @catch (NSException *e) {}
         }
