@@ -3,7 +3,7 @@
 #import <objc/runtime.h>
 
 // ============================================================
-// 授权签发 App v2.4.0 —— 纯离线授权串 + 产品位 (客户侧不联网)
+// 授权签发 App v2.3.0 —— 纯离线授权串 (客户侧不联网)
 //   ① 客户在控制App「授权」页复制本机 UDID 发给你;
 //   ② 你把 UDID 粘进来 (可加备注 / 选有效期) 点「生成授权串」;
 //   ③ 授权串自动进剪贴板 -> 发给客户 -> 客户在控制 App 点「粘贴离线授权」导入即生效;
@@ -145,10 +145,6 @@ static UITextField *KGField(NSString *placeholder, CGFloat fontSize, BOOL digits
 @property (nonatomic, strong) UIButton *issueBtn;
 @property (nonatomic, strong) UILabel *issueStatus;
 
-// v2.4.0: 产品位选择 (通用 / 仅信息 / 仅备忘录)
-@property (nonatomic, strong) UISegmentedControl *productSeg;
-@property (nonatomic, strong) UILabel *productHint;
-
 @property (nonatomic, strong) UILabel *heroSub;
 @property (nonatomic, strong) UIStackView *listStack;
 @property (nonatomic, strong) UILabel *listStatus;
@@ -157,8 +153,6 @@ static UITextField *KGField(NSString *placeholder, CGFloat fontSize, BOOL digits
 
 // v2.3.0: 只保留离线授权串 (不再有 GitHub / Gitee 名单同步)
 - (void)offlineTicket:(NSInteger)i;
-// v2.4.0: 当前选中的产品位 ("all" / "sms" / "memos")
-- (NSString *)currentProduct;
 @end
 
 @implementation KGViewController
@@ -250,25 +244,6 @@ static UITextField *KGField(NSString *placeholder, CGFloat fontSize, BOOL digits
     _noteField.autocapitalizationType = UITextAutocapitalizationTypeSentences;
     [stack addArrangedSubview:_noteField];
 
-    // v2.4.0 产品位: 信息版与备忘录版共用同一套密钥和指纹,
-    // 靠这一段决定这个码给哪个插件用。
-    [stack addArrangedSubview:KGLabel(@"这个码给谁用", 13, UIFontWeightSemibold,
-                                      [UIColor secondaryLabelColor])];
-    _productSeg = [[UISegmentedControl alloc] initWithItems:
-                   @[@"通用", @"仅信息", @"仅备忘录"]];
-    _productSeg.selectedSegmentIndex = 0;
-    _productSeg.selectedSegmentTintColor = KGAccent();
-    [_productSeg setTitleTextAttributes:@{ NSForegroundColorAttributeName: UIColor.whiteColor }
-                               forState:UIControlStateSelected];
-    [_productSeg addTarget:self action:@selector(productChanged:)
-          forControlEvents:UIControlEventValueChanged];
-    [_productSeg.heightAnchor constraintEqualToConstant:36].active = YES;
-    [stack addArrangedSubview:_productSeg];
-
-    _productHint = KGLabel(@"通用：信息版和备忘录版都能导入", 12, UIFontWeightRegular,
-                           [UIColor tertiaryLabelColor]);
-    [stack addArrangedSubview:_productHint];
-
     _foreverSwitch = [[UISwitch alloc] initWithFrame:CGRectZero];
     _foreverSwitch.onTintColor = KGAccent();
     _foreverSwitch.on = YES;
@@ -338,15 +313,14 @@ static UITextField *KGField(NSString *placeholder, CGFloat fontSize, BOOL digits
     UIView *card = KGCard(@"签名密钥", &stack);
 
     NSString *secret = KGCompiledSecret();
-    BOOL fallback = [secret hasPrefix:@"VIDEOBG-LICENSE-FALLBACK"];
+    BOOL fallback = [secret hasPrefix:@"SVBG-LICENSE-FALLBACK"];
     UILabel *fp = KGLabel([NSString stringWithFormat:@"指纹 %@", KGSecretFingerprint(secret)],
                           14, UIFontWeightSemibold, fallback ? [UIColor systemOrangeColor] : [UIColor labelColor]);
     [stack addArrangedSubview:fp];
 
     [stack addArrangedSubview:KGLabel(
         fallback ? @"⚠️ 当前用的是内置兜底密钥：签出来的授权串插件不认。请到 GitHub 仓库 "
-                   @"Settings → Secrets 配置 VIDEOBG_LICENSE_SECRET"
-                   @"（信息版与备忘录版两个仓库必须配同一个值）。"
+                   @"Settings → Secrets 配置 SVB_LICENSE_SECRET（与插件编译用的同一个）。"
                  : @"与插件编译时注入的密钥一致（两边指纹相同 → 你签发的授权串客户一定能导入）。",
         12.5, UIFontWeightRegular,
         fallback ? [UIColor systemOrangeColor] : [UIColor tertiaryLabelColor])];
@@ -354,7 +328,7 @@ static UITextField *KGField(NSString *placeholder, CGFloat fontSize, BOOL digits
 }
 
 - (UIView *)footerLabel {
-    return KGLabel(@"SMSVideoBG v10.5 · 客户侧不联网（不需要梯子），授权 = 你按 UDID 生成的一段授权串",
+    return KGLabel(@"SMSVideoBG v10.3 · 客户侧不联网（不需要梯子），授权 = 你按 UDID 生成的一段授权串",
                    12, UIFontWeightRegular, [UIColor tertiaryLabelColor]);
 }
 
@@ -475,26 +449,6 @@ static UITextField *KGField(NSString *placeholder, CGFloat fontSize, BOOL digits
 
 #pragma mark 动作
 
-// v2.4.0: 当前选中的产品位
-- (NSString *)currentProduct {
-    switch (_productSeg.selectedSegmentIndex) {
-        case 1:  return KG_PRODUCT_SMS;
-        case 2:  return KG_PRODUCT_MEMOS;
-        default: return KG_PRODUCT_ALL;
-    }
-}
-
-- (void)productChanged:(UISegmentedControl *)s {
-    NSString *p = [self currentProduct];
-    if ([p isEqualToString:KG_PRODUCT_SMS]) {
-        _productHint.text = @"仅信息视频背景能用（备忘录版导入会提示产品位不对）";
-    } else if ([p isEqualToString:KG_PRODUCT_MEMOS]) {
-        _productHint.text = @"仅备忘录视频背景能用（信息版导入会提示产品位不对）";
-    } else {
-        _productHint.text = @"通用：信息版和备忘录版都能导入";
-    }
-}
-
 - (void)foreverToggled:(UISwitch *)s {
     _daysField.enabled = !_foreverSwitch.on;
     _daysField.alpha = _foreverSwitch.on ? 0.4 : 1.0;
@@ -533,10 +487,8 @@ static UITextField *KGField(NSString *placeholder, CGFloat fontSize, BOOL digits
     NSString *note = [_noteField.text stringByTrimmingCharactersInSet:
                       [NSCharacterSet whitespaceAndNewlineCharacterSet]];
     NSInteger hit = [self indexForHash:hash];
-    NSString *product = [self currentProduct];   // v2.4.0 产品位 (决定发给哪个插件用)
     NSMutableDictionary *rec = [NSMutableDictionary dictionaryWithDictionary:
-        @{@"udid": udid, @"hash": hash, @"exp": @(exp), @"product": product,
-          @"addedAt": @([[NSDate date] timeIntervalSince1970])}];
+        @{@"udid": udid, @"hash": hash, @"exp": @(exp), @"addedAt": @([[NSDate date] timeIntervalSince1970])}];
     if (note.length) rec[@"note"] = note;
     else if (hit >= 0 && [self.devices[hit][@"note"] isKindOfClass:[NSString class]])
         rec[@"note"] = self.devices[hit][@"note"];
@@ -565,10 +517,7 @@ static UITextField *KGField(NSString *placeholder, CGFloat fontSize, BOOL digits
         return;
     }
     uint32_t exp = (uint32_t)[rec[@"exp"] unsignedIntValue];
-    // v2.4.0: 产品位优先用记录里存的 (早期记录没这个字段 -> 按通用处理)
-    NSString *product = [rec[@"product"] isKindOfClass:[NSString class]]
-                      ? rec[@"product"] : KG_PRODUCT_ALL;
-    NSString *ticket = KGAuthBuildOfflineTicket(KGCompiledSecret(), udid, exp, product);
+    NSString *ticket = KGAuthBuildOfflineTicket(KGCompiledSecret(), udid, exp);
     if (!ticket.length) {
         [self kgAlert:@"生成失败" msg:@"签名密钥异常，无法生成离线授权串。"];
         return;
@@ -580,11 +529,9 @@ static UITextField *KGField(NSString *placeholder, CGFloat fontSize, BOOL digits
         @"让客户在控制 App 里点「粘贴离线授权」导入：\n"
         @"- 不需要任何网络就能生效（客户端不联网，不需要梯子）\n"
         @"- 只对这台设备有效（已绑定它的 UDID）\n"
-        @"- 适用范围：%@\n"
         @"- 有效期到 %@\n\n"
         @"注意：授权串一旦发出，到期前无法远程收回；想控制节奏就签短一点（如 30 天），到期让他来找你换新的。",
         KGAuthShortTicket(ticket),
-        KGProductText(product),
         (exp == KG_AUTH_FOREVER) ? @"永久" : KGDateTextForDayIndex(exp)];
     [self kgAlert:@"离线授权串已复制" msg:msg];
 }

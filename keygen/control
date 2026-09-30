@@ -1,6 +1,6 @@
 Package: com.nvb.svbkeygen
 Name: 授权签发
-Version: 2.4.0
+Version: 2.4.1
 Architecture: iphoneos-arm64
 Description: 信息视频背景 授权签发工具 (输 UDID 出离线授权串; 客户侧不联网, 不需要梯子)
 Maintainer: 板栗仁

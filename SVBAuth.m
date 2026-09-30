@@ -7,41 +7,34 @@
 #import <math.h>
 
 // ============================================================
-// 授权核心 v10.5.0 —— 纯离线授权串 (零网络) + 产品位
+// 授权核心 v10.3.0 —— 纯离线授权串 (零网络)
 //   与签发 App (keygen/KGAuth.m) 共用同一把密钥:
-//   CI 从 GitHub Secret VIDEOBG_LICENSE_SECRET 注入。
-//
-//   ★ 信息版与备忘录版共用同一把密钥 / 同一套指纹算法, 靠「产品位」区分:
-//       产品位 all   -> 两版都认
-//       产品位 sms   -> 只有本版(信息)认
-//       产品位 memos -> 只有备忘录版认
+//   CI 从 GitHub Secret SVB_LICENSE_SECRET 注入。
 // ============================================================
 
-// 与签发 App 共用同一把密钥
-// (CI 从 GitHub Secret VIDEOBG_LICENSE_SECRET 注入; 两版必须用同一个值)
-#ifndef VIDEOBG_LICENSE_SECRET
-#define VIDEOBG_LICENSE_SECRET "VIDEOBG-LICENSE-FALLBACK-INSECURE-SET-CI-SECRET"
+// 与签发 App 共用同一把密钥 (CI 从 GitHub Secret SVB_LICENSE_SECRET 注入)
+#ifndef SVB_LICENSE_SECRET
+#define SVB_LICENSE_SECRET "SVBG-LICENSE-FALLBACK-INSECURE-SET-CI-SECRET"
 #endif
-static const char *const kAuthSecret = VIDEOBG_LICENSE_SECRET;
+static const char *const kAuthSecret = SVB_LICENSE_SECRET;
 
-#define SVB_AUTH_KEY_OFFLINE @"auth_offline"  // 离线授权串: {"h","e","t","s","p","at"}
+#define SVB_AUTH_KEY_OFFLINE @"auth_offline"  // 离线授权串: {"h","e","t","s","at"}
 // 只读遗留: v10.2 及更早版本走在线名单时缓存的 {H32: dayIndex}。
 // 本机若曾在线授权过, 这里命中就继续认 (升级不踢人); 之后不再更新,
 // 因为 v10.3.0 起插件一个网络请求都不发。
 #define SVB_AUTH_KEY_LEGACY_MAP @"auth_map"
 
 // --- 离线授权串 ---
-#define SVB_AUTH_TICKET_TAG @"VIDEOBGOFFLINE1:"
+#define SVB_AUTH_TICKET_TAG @"SVBOFFLINE1:"
 // 仅用于兼容 v10.1.x 的旧记录 (那种记录没存签名, 本地可被手改, 只能硬截断保平安);
 // v10.2.0 起新记录会把整串字段存下来并在每次读取时复验签名, 因此期限由作者自由指定。
 #define SVB_AUTH_TICKET_LEGACY_MAX_DAYS 90
 
-// UDID 哈希前缀 —— 与签发 App、备忘录版**三处必须完全相同**,
-// 否则同一台设备在不同插件里算出的 H32 不同, 授权串就没法通用
-static NSString * const kAuthHashPrefix = @"VideoBG-AUTH/v1|";
+// UDID 哈希前缀 (与签发 App 严格一致)
+static NSString * const kAuthHashPrefix = @"SMSVideoBG-AUTH/v1|";
 
 // 前置声明: 「判定」区会用到离线串的签名原文构造函数 (定义在后面的「离线授权串」区)
-static NSString *SVBAuthOfflinePayload(NSString *prod, NSString *h32, uint32_t exp, NSInteger ts);
+static NSString *SVBAuthOfflinePayload(NSString *h32, uint32_t exp, NSInteger ts);
 
 #pragma mark - 日期工具
 
@@ -147,24 +140,6 @@ static NSString *SVBAuthSignatureHex(NSString *payload) {
     return SVBAuthHexLower(mac, CC_SHA256_DIGEST_LENGTH);
 }
 
-#pragma mark - 产品位 (v10.5.0)
-
-// 产品位是否被本插件接受: 等于 "all"(通用) 或等于本插件标识 "sms"
-BOOL SVBAuthProductAllowed(NSString *product) {
-    NSString *p = [product lowercaseString];
-    if (!p.length) return NO;
-    if ([p isEqualToString:SVB_AUTH_PRODUCT_ALL]) return YES;
-    return [p isEqualToString:SVB_AUTH_PRODUCT_MINE];
-}
-
-NSString *SVBAuthProductText(NSString *product) {
-    NSString *p = [product lowercaseString];
-    if ([p isEqualToString:SVB_AUTH_PRODUCT_ALL]) return @"通用（信息版+备忘录版）";
-    if ([p isEqualToString:@"sms"])              return @"仅信息视频背景";
-    if ([p isEqualToString:@"memos"])            return @"仅备忘录视频背景";
-    return @"未标注";
-}
-
 #pragma mark - 判定 (纯本地)
 
 // 只读遗留: 早期在线名单缓存里的本机条目 (升级不踢人, 不再更新)
@@ -196,9 +171,6 @@ static BOOL SVBAuthOfflineTicketExp(uint32_t *outExp) {
     NSString *h = d[@"h"];
     NSString *sig = d[@"s"];
     id t = d[@"t"];
-    // 产品位: 记录里没存 p 的按 "all" 处理 (兼容 v10.5.0 之前签发的记录)
-    NSString *prod = [d[@"p"] isKindOfClass:[NSString class]]
-                   ? [(NSString *)d[@"p"] lowercaseString] : SVB_AUTH_PRODUCT_ALL;
 
     if ([h isKindOfClass:[NSString class]] && h.length &&
         [sig isKindOfClass:[NSString class]] && sig.length &&
@@ -206,13 +178,9 @@ static BOOL SVBAuthOfflineTicketExp(uint32_t *outExp) {
         // ---- 新格式: 有签名, 逐次复验 ----
         NSString *mine = SVBAuthDeviceHash();
         if (!mine.length || ![[h uppercaseString] isEqualToString:mine]) return NO;
-        // 验签必须用**记录里存的产品位**重建原文 —— 不能用本插件标识替换,
-        // 否则 "all" 的码在这里会算出另一个签名而误判为无效
         NSString *expect = SVBAuthSignatureHex(
-            SVBAuthOfflinePayload(prod, [h uppercaseString], exp, [t integerValue]));
+            SVBAuthOfflinePayload([h uppercaseString], exp, [t integerValue]));
         if (![[sig lowercaseString] isEqualToString:expect]) return NO;
-        // 产品位放行判定: 只有 "all" 或本插件标识才认
-        if (!SVBAuthProductAllowed(prod)) return NO;
     } else {
         // ---- v10.1.x 旧格式: 没存签名, 本地可被手改, 只能硬截断保平安 ----
         if (exp == SVB_AUTH_FOREVER) return NO;     // 旧格式不允许永久
@@ -325,11 +293,9 @@ static NSData *SVBAuthB64Decode(NSString *s) {
     return [[NSData alloc] initWithBase64EncodedString:m options:0];
 }
 
-static NSString *SVBAuthOfflinePayload(NSString *prod, NSString *h32, uint32_t exp, NSInteger ts) {
-    // 与签发端 KGAuth.m 严格一致: VIDEOBG/v1|<产品位>|<H32>|<e>|<t>
-    NSString *p = prod.length ? [prod lowercaseString] : SVB_AUTH_PRODUCT_ALL;
-    return [NSString stringWithFormat:@"VIDEOBG/v1|%@|%@|%u|%ld",
-            p, h32, (unsigned)exp, (long)ts];
+static NSString *SVBAuthOfflinePayload(NSString *h32, uint32_t exp, NSInteger ts) {
+    return [NSString stringWithFormat:@"SVBGOFFLINE/v1|%@|%u|%ld",
+            h32, (unsigned)exp, (long)ts];
 }
 
 BOOL SVBAuthImportTicket(NSString *text, NSString **message) {
@@ -354,9 +320,6 @@ BOOL SVBAuthImportTicket(NSString *text, NSString **message) {
         NSString *h = d[@"h"];
         NSNumber *e = d[@"e"], *tk = d[@"t"];
         NSString *sig = d[@"s"];
-        // 产品位: 串里没带 p 的按 "all" 处理
-        NSString *prod = [d[@"p"] isKindOfClass:[NSString class]]
-                       ? [(NSString *)d[@"p"] lowercaseString] : SVB_AUTH_PRODUCT_ALL;
         if (![h isKindOfClass:[NSString class]] ||
             ![e isKindOfClass:[NSNumber class]] ||
             ![tk isKindOfClass:[NSNumber class]] ||
@@ -374,24 +337,17 @@ BOOL SVBAuthImportTicket(NSString *text, NSString **message) {
             break;
         }
 
-        // ② 验签 (用串里带的产品位重建原文, 与签发端 KGAuth.m 严格一致)
+        // ② 验签
         uint32_t want = (uint32_t)[e unsignedIntValue];
         NSString *expect = SVBAuthSignatureHex(
-            SVBAuthOfflinePayload(prod, mine, want, [tk integerValue]));
+            SVBAuthOfflinePayload(mine, want, [tk integerValue]));
         if (![[sig lowercaseString] isEqualToString:expect]) {
-            fail = @"授权串校验不通过（内容被改过或不是同一套密钥签发）";
-            break;
-        }
-
-        // ②.5 产品位: 既不是「通用」也不是本插件的 -> 拒收并说清是给哪个产品的
-        if (!SVBAuthProductAllowed(prod)) {
-            fail = [NSString stringWithFormat:@"这段授权串是给「%@」的，本插件用不了",
-                    SVBAuthProductText(prod)];
+            fail = @"授权串校验不通过（内容被改过或不是本插件签发）";
             break;
         }
 
         // ③ 期限完全按作者签发的内容 (不再有 90 天上限)
-        //    本条记录会把 h/e/t/s/p 一起存下来, 每次判定都复验签名 ——
+        //    本条记录会把 h/e/t/s 一起存下来, 每次判定都复验签名 ——
         //    客户手改 plist 里任何一位都会验签失败, 记录直接作废。
         uint32_t today = SVBAuthDayIndexNow();
         uint32_t use = want;
@@ -404,17 +360,15 @@ BOOL SVBAuthImportTicket(NSString *text, NSString **message) {
                                              @"e": @(use),
                                              @"t": tk,
                                              @"s": [sig lowercaseString],
-                                             @"p": prod,
                                              @"at": @([[NSDate date] timeIntervalSince1970]) }
                                    forKey:SVB_AUTH_KEY_OFFLINE];
         SVBAuthInvalidateCache();
 
         if (message) {
-            NSString *prodNote = [prod isEqualToString:SVB_AUTH_PRODUCT_ALL] ? @"（通用码）" : @"";
             *message = (use == SVB_AUTH_FOREVER)
-                ? [NSString stringWithFormat:@"导入成功，本机已授权%@（永久有效）。", prodNote]
-                : [NSString stringWithFormat:@"导入成功，本机已授权%@（有效期至 %@）。",
-                   prodNote, SVBAuthDateTextForDayIndex(use)];
+                ? @"导入成功，本机已授权（永久有效）。"
+                : [NSString stringWithFormat:@"导入成功，本机已授权（有效期至 %@）。",
+                   SVBAuthDateTextForDayIndex(use)];
         }
         return YES;
     } while (0);
@@ -466,7 +420,6 @@ NSString *SVBAuthDiagnose(void) {
         if ([raw isKindOfClass:[NSDictionary class]]) {
             NSDictionary *d = (NSDictionary *)raw;
             [o appendFormat:@"记录内容 : e=%@ t=%@\n", d[@"e"] ?: @"?", d[@"t"] ?: @"?"];
-            [o appendFormat:@"产品位   : %@\n", SVBAuthProductText(d[@"p"])];
             [o appendFormat:@"验签结果 : %@\n", SVBAuthOfflineTicketExp(NULL)
                 ? @"通过 ✓" : @"不通过 ✗（记录被改过或不属于本机）"];
         } else {
@@ -480,10 +433,8 @@ NSString *SVBAuthDiagnose(void) {
             : @"无"];
 
         [o appendString:@"\n=== 说明 ===\n"];
-        [o appendString:@"· 插件**不发起任何网络请求**，授权只用离线授权串，"
+        [o appendString:@"· v10.3.0 起插件**不发起任何网络请求**，授权只用离线授权串，"
                     "国内网络直连即可，不需要代理 / 梯子。\n"];
-        [o appendString:@"· 授权串带「产品位」：通用码（信息版+备忘录版都能用）/ "
-                    "仅信息版 / 仅备忘录版 —— 提示用不了就是产品位不对。\n"];
         [o appendString:@"· 未授权 → 点「本机 UDID」复制发给作者，拿到授权串后点「粘贴离线授权」导入。\n"];
         [o appendString:@"· 已过期 → 找作者要一段新的授权串（作者可以自由指定天数）。\n"];
         [o appendString:@"· 导入了仍显示未授权 → 仔细核对 UDID 是否本机的（串只对一台设备有效）。\n"];

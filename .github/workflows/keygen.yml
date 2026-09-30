@@ -38,29 +38,28 @@ jobs:
         working-directory: keygen
         env:
           THEOS: ${{ github.workspace }}/theos
-          # v10.5.0 与各插件共用同一 Secret —— 两版密钥一致, 签出的码才能通用
-          # (兼容旧名: 新名没配时自动回退读 SVB_LICENSE_SECRET)
-          VIDEOBG_LICENSE_SECRET: ${{ secrets.VIDEOBG_LICENSE_SECRET || secrets.SVB_LICENSE_SECRET }}
+          # 与主插件共用同一 Secret, 两边密钥一致签出的码才有效
+          SVB_LICENSE_SECRET: ${{ secrets.SVB_LICENSE_SECRET }}
         run: |
-          if [ -z "$VIDEOBG_LICENSE_SECRET" ]; then
-            echo "::warning::VIDEOBG_LICENSE_SECRET 未配置 —— 本次用兜底密钥编译, 签出的码插件不会识别"
+          if [ -z "$SVB_LICENSE_SECRET" ]; then
+            echo "::warning::SVB_LICENSE_SECRET 未配置 —— 本次用兜底密钥编译, 签出的码插件不会识别"
           else
-            echo "✓ 密钥已注入 指纹 $(printf '%s' "$VIDEOBG_LICENSE_SECRET" | shasum -a 256 | cut -c1-8)"
+            echo "✓ 密钥已注入 指纹 $(printf '%s' "$SVB_LICENSE_SECRET" | shasum -a 256 | cut -c1-8)"
           fi
           gmake package THEOS_PACKAGE_SCHEME=rootless FINALPACKAGE=1
 
       - name: Verify secret injected into binary
         working-directory: keygen
         env:
-          VIDEOBG_LICENSE_SECRET: ${{ secrets.VIDEOBG_LICENSE_SECRET || secrets.SVB_LICENSE_SECRET }}
+          SVB_LICENSE_SECRET: ${{ secrets.SVB_LICENSE_SECRET }}
         run: |
-          if [ -z "$VIDEOBG_LICENSE_SECRET" ]; then
+          if [ -z "$SVB_LICENSE_SECRET" ]; then
             echo "::warning::未配置密钥, 跳过注入校验"
             exit 0
           fi
           bin=$(find .theos -type f -name SVBKeyGen 2>/dev/null | head -1)
           if [ -n "$bin" ]; then
-            if grep -q "$VIDEOBG_LICENSE_SECRET" "$bin"; then
+            if grep -q "$SVB_LICENSE_SECRET" "$bin"; then
               echo "OK  $bin 已注入密钥"
             else
               echo "::error::密钥未能注入二进制"

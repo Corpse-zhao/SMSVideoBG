@@ -39,20 +39,17 @@ jobs:
       - name: Build package
         env:
           THEOS: ${{ github.workspace }}/theos
-          # v10.5.0 统一授权签名密钥: 信息版与备忘录版**共用同一个值** ——
-          # 配合「产品位」实现一个授权码两版通用。
+          # v1.9.0 授权签名密钥: 只在这里注入, 不写进公开源码。
           # 仓库 Settings -> Secrets and variables -> Actions -> New repository secret
-          # 名字 VIDEOBG_LICENSE_SECRET (两个仓库必须配同一个值!)。
-          # 兼容旧名: 新名没配时自动回退读 SVB_LICENSE_SECRET。
-          # 都没配则用兜底值编译 (仅供自测, 无法防盗版)。
-          VIDEOBG_LICENSE_SECRET: ${{ secrets.VIDEOBG_LICENSE_SECRET || secrets.SVB_LICENSE_SECRET }}
+          # 名字 SVB_LICENSE_SECRET; 没配则用兜底值编译 (仅供自测, 无法防盗版)。
+          SVB_LICENSE_SECRET: ${{ secrets.SVB_LICENSE_SECRET }}
           # v10.3.0: 插件端已无任何在线名单/网络校验 —— 授权只走离线授权串,
           # 因此原来的 SVB_GITEE_URL 注入位已删除。
         run: |
-          if [ -z "$VIDEOBG_LICENSE_SECRET" ]; then
-            echo "::warning::VIDEOBG_LICENSE_SECRET 未配置 —— 本次用内置兜底密钥编译 (任何人拿到源码都能签发激活码)"
+          if [ -z "$SVB_LICENSE_SECRET" ]; then
+            echo "::warning::SVB_LICENSE_SECRET 未配置 —— 本次用内置兜底密钥编译 (任何人拿到源码都能签发激活码)"
           else
-            echo "✓ 已从 Secret 注入授权密钥 (长度 ${#VIDEOBG_LICENSE_SECRET})"
+            echo "✓ 已从 Secret 注入授权密钥 (长度 ${#SVB_LICENSE_SECRET})"
           fi
           gmake package THEOS_PACKAGE_SCHEME=rootless FINALPACKAGE=1
 
@@ -62,17 +59,17 @@ jobs:
       # v1.9.1: 确认授权密钥真的注入进了二进制 (只打印哈希前缀, 不泄露明文)
       - name: Verify license secret injected
         env:
-          VIDEOBG_LICENSE_SECRET: ${{ secrets.VIDEOBG_LICENSE_SECRET || secrets.SVB_LICENSE_SECRET }}
+          SVB_LICENSE_SECRET: ${{ secrets.SVB_LICENSE_SECRET }}
         run: |
-          if [ -z "$VIDEOBG_LICENSE_SECRET" ]; then
-            echo "::warning::VIDEOBG_LICENSE_SECRET 未配置, 使用兜底密钥"
+          if [ -z "$SVB_LICENSE_SECRET" ]; then
+            echo "::warning::SVB_LICENSE_SECRET 未配置, 使用兜底密钥"
             exit 0
           fi
-          printf 'secret sha256[:8] = '; printf '%s' "$VIDEOBG_LICENSE_SECRET" | shasum -a 256 | cut -c1-8
+          printf 'secret sha256[:8] = '; printf '%s' "$SVB_LICENSE_SECRET" | shasum -a 256 | cut -c1-8
           ok=1
           for f in .theos/obj/SMSVideoBG.dylib .theos/obj/SMSVideoBGApp; do
             if [ -f "$f" ]; then
-              if grep -q "$VIDEOBG_LICENSE_SECRET" "$f"; then echo "OK  $f 已注入密钥"; else echo "FAIL  $f 未见密钥"; ok=0; fi
+              if grep -q "$SVB_LICENSE_SECRET" "$f"; then echo "OK  $f 已注入密钥"; else echo "FAIL $f 未见密钥"; ok=0; fi
             fi
           done
           [ "$ok" = "1" ] || { echo "::error::授权密钥未能注入二进制"; exit 1; }

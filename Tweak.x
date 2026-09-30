@@ -12,10 +12,9 @@
 //  - 所有 Hook 均有异常保护, 不影响宿主 App 正常启动
 //
 //  v1.3 诊断强化:
-//   1. filter 只挂 com.apple.MobileSMS (信息App), 备忘录已拆分为独立工程。
-//   2. 只在信息App 进程里做界面 Hook (SVBIsSMSProcess 守卫), 其它进程
-//      只写心跳, 不干扰宿主。
-//   3. 进 App 后窗口顶部会出现一条可点关闭的横幅, 显示注入状态与各素材根
+//   1. 只在信息App 进程里做界面 Hook (SVBIsSMSProcess 守卫), 其它被注入
+//      进程只写心跳 + 显示横幅, 不干扰宿主。
+//   2. 进 App 后窗口顶部会出现一条可点关闭的横幅, 显示注入状态与各素材根
 //      的可见性 —— 这是判断「插件到底进没进信息App」最直接的证据。
 // ============================================================
 
@@ -52,6 +51,10 @@ static NSString *SVBContextForClassName(NSString *name) {
 
     // 对话详情 (优先级最高, Transcript 是聊天页核心类)
     if ([name containsString:@"Transcript"])  return SVBContextChat;
+    // v10.5.1: 诊断报告实测 CKChatController 之前落到 ctx=all, 于是 %hook UIViewController
+    // 的兜底分支会在它出现时把语境覆盖成 all -> 聊天页被当普通列表处理。补上判定。
+    if ([name containsString:@"ChatController"] || [name hasPrefix:@"CKChat"])
+        return SVBContextChat;
 
     // 特殊列表
     if ([name containsString:@"Junk"])            return SVBContextJunk;
@@ -271,10 +274,22 @@ static BOOL SVBMainSweepActive(void) {
     return m.masterEnabled && [m isEnabledForContext:SVBContextMain];
 }
 
+// v10.4.1: 「任意页面」清扫门 —— 只要本进程挂着可见的视频背景 (哪个语境都行),
+// 列表滚动时重铺的白色卡片就该被清。
+// 此前容器清扫/装饰视图拦截只认「主页面」语境: 用户在「所有信息/未读/未知…」
+// 列表里下滑, 系统重铺的分区白卡没人拦 -> 成条成块的白带 (真机视频实锤)。
+// (hasVisibleBackgroundViews 自带 0.5s 缓存, 高频调用无开销)
+static BOOL SVBSMSListSweepActive(void) {
+    if (!SVBIsLicensed()) return NO;
+    SVBManager *m = [SVBManager shared];
+    if (!m.masterEnabled) return NO;
+    return [m hasVisibleBackgroundViews];
+}
+
 static void SVBClearContainerBGs(UIView *v, NSInteger depth) {
     if (!v || depth > 14) return;
     if ([v isKindOfClass:[SVBVideoBackgroundView class]]) return;
-    if (!SVBMainSweepActive()) { SVBRestoreHiddenCards(); return; }
+    if (!SVBMainSweepActive() && !SVBSMSListSweepActive()) { SVBRestoreHiddenCards(); return; }
     // v1.7.21: cell 的系统托管背景子树整体跳过 (不藏不清)。v1.7.20 曾藏
     // backgroundView/selectedBackgroundView + layoutSubviews 持续重扫, 与系统的
     // backgroundConfiguration 重应用撞车 —— 点选单元格时 SIGABRT (崩溃日志实锤:
@@ -538,6 +553,300 @@ static void SVBMapBalloonText(UIView *balloon) {
     if (!CGRectEqualToRect(lb.frame, fr)) lb.frame = fr;
 }
 
+#pragma mark - 对话详情: 顶部导航栏 / 底部输入栏「整块隐藏 + 自行映射」(v10.5.0)
+
+// 与气泡同一套思路, 但对象是「系统 chrome」:
+//   顶部 = 那一条白 (联系人头像 + 名字 + 返回按钮区)
+//   底部 = 输入框胶囊那一条 (相机/App/文字胶囊/麦克风)
+// 做法: 把整块 chrome 容器 alpha=0 (连材质/圆角/胶囊底色一起消失),
+//       再用我们自己的 UIView/UILabel 在同一位置重画需要看得见的东西。
+//       用 alpha 而不是 hidden —— 视图仍参与布局, 我们才能读到它的 frame 做映射。
+//
+// 底部输入框采用用户拍板方案: 整块隐藏, 不再映射内容 (视频完全透出)。
+// 代价: 该界面内无法再打字 (点输入框不会有反应) —— 这是「完全通透」的必然取舍,
+//       需要打字时切到别的界面或临时关掉对话详情开关即可。
+// 导航栏则重画返回按钮 + 联系人名, 返回可点 (走原生 pop, 不改系统行为)。
+
+static NSMutableArray<UIView *> *SVBHiddenChrome;      // 被藏掉的 chrome 容器
+static NSMutableArray<UIView *> *SVBMappedChrome;      // 我们自己画的映射视图
+
+static char SVBChromeAlphaKey;
+static char SVBChromeHiddenKey;
+static char SVBChromeMappedKey;
+
+// 返回按钮的点击目标: UIAction 的 identifier 是 readonly 且 actionWithTitle:image:
+// 传 nil 会撞 -Wnonnull (CI 开了 -Werror), 干脆用一个常驻辅助对象 + target-action,
+// 每个按钮把自己的 block 存进关联对象, 辅助对象统一转发。
+@interface SVBChromeActionProxy : NSObject
++ (instancetype)shared;
+- (void)handle:(UIButton *)sender;
+@end
+
+static char SVBChromeActionBlockKey;
+
+@implementation SVBChromeActionProxy
++ (instancetype)shared {
+    static SVBChromeActionProxy *p = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ p = [SVBChromeActionProxy new]; });
+    return p;
+}
+- (void)handle:(UIButton *)sender {
+    void (^blk)(void) = objc_getAssociatedObject(sender, &SVBChromeActionBlockKey);
+    if (blk) @try { blk(); } @catch (NSException *e) {}
+}
+@end
+
+// v10.5.1: 顶部 / 底部 chrome 改用「几何定位」—— 不再猜类名。
+// v10.5.0 实测无效的原因 (配合诊断报告 2026-09-30):
+//   ① 聊天页顶部那条**不是**标准 navigationBar, 底部输入条也是私有类 ——
+//      按类名关键词搜 / 取 navigationController.navigationBar 都找不到真身;
+//   ② 报告实测到的真实类名: CKChatController / CKMessageEntryView (输入栏 VC) /
+//      CKBrowserSwitcherFooterView (App 抽屉) / CKGradientView (渐变遮罩, 浅色下就是白)。
+// 判定规则: 条状 (高 22 ~ 屏高34%) + 全宽 (>=92%) + 落在顶部/底部条带。
+//
+// 安全铁律 (沿用):
+//   ① 遇到 UICollectionView / UITableView 直接跳过整棵子树 —— 列表内部 (日期分隔条 /
+//      气泡 / cell) 一概不碰, 这是防误伤最关键的一条
+//   ② 跳过 SVBVideoBackgroundView 子树 (别把视频藏了)
+//   ③ 跳过 keyboard 子树
+//   ④ 系统托管 cell backgroundView / selectedBackgroundView 子树绝不碰 (SIGABRT 史)
+static BOOL SVBIsListClass(UIView *v) {
+    return [v isKindOfClass:[UICollectionView class]] ||
+           [v isKindOfClass:[UITableView class]];
+}
+
+static BOOL SVBIsSystemManagedCellBg(UIView *v) {
+    UIView *pv = v.superview;
+    if (![pv isKindOfClass:[UICollectionViewCell class]]) return NO;
+    UICollectionViewCell *pc = (UICollectionViewCell *)pv;
+    return (pc.backgroundView && v == pc.backgroundView) ||
+           (pc.selectedBackgroundView && v == pc.selectedBackgroundView);
+}
+
+// 递归扫「条状全宽容器」+「已知遮罩类」。命中即收, 不再往里钻。
+static void SVBScanBands(UIView *root, UIView *space, NSInteger depth,
+                         NSMutableArray<UIView *> *tops,
+                         NSMutableArray<UIView *> *bottoms,
+                         NSMutableArray<UIView *> *masks) {
+    if (!root || depth > 6) return;
+    CGRect sb = space.bounds;
+    CGFloat W = sb.size.width, H = sb.size.height;
+    if (W < 1 || H < 1) return;
+    CGFloat safeTop = space.safeAreaInsets.top;    if (safeTop < 1) safeTop = 44.0;
+    CGFloat safeBot = space.safeAreaInsets.bottom; if (safeBot < 1) safeBot = 34.0;
+    CGFloat topLimit    = safeTop + 74.0;               // 顶条下沿的允许上限
+    CGFloat bottomStart = H - (safeBot + 110.0);        // 底条上沿的允许下限
+
+    for (UIView *sub in root.subviews) {
+        if ([sub isKindOfClass:[SVBVideoBackgroundView class]]) continue;
+        if (sub.hidden) continue;
+        if (SVBIsListClass(sub)) continue;              // 列表整棵子树跳过 (不递归)
+        if (SVBIsSystemManagedCellBg(sub)) continue;
+        NSString *cls = NSStringFromClass([sub class]);
+        NSString *low = cls.lowercaseString;
+        if ([low containsString:@"keyboard"]) continue;
+
+        // 已知遮罩 (诊断报告实测 CKGradientView = 顶部/底部渐变, 浅色模式下就是那条白):
+        // 一律直接藏, 不参与几何判定
+        if ([cls hasPrefix:@"CKGradientView"]) { [masks addObject:sub]; continue; }
+
+        CGRect f = [sub convertRect:sub.bounds toView:space];
+        BOOL fullWidth = f.size.width >= W * 0.92;
+        BOOL strip = (f.size.height >= 22.0) && (f.size.height <= H * 0.34);
+        if (fullWidth && strip && CGRectIntersectsRect(f, sb)) {
+            // 顶条: 顶边贴屏幕最上, 或底边不超过安全区 + 74
+            if (f.origin.y <= safeTop * 0.5 || CGRectGetMaxY(f) <= topLimit) {
+                [tops addObject:sub];
+                continue;
+            }
+            if (f.origin.y >= bottomStart) { [bottoms addObject:sub]; continue; }
+        }
+        SVBScanBands(sub, space, depth + 1, tops, bottoms, masks);
+    }
+}
+
+// 从顶条子树里抓「最长的一段文字」当标题 (联系人名 / 群名 / Apple)
+static void SVBPickTitleText(UIView *v, NSInteger d, NSString **best, UIFont **font) {
+    if (!v || d > 6) return;
+    if ([v isKindOfClass:[UILabel class]]) {
+        UILabel *l = (UILabel *)v;
+        NSString *t = l.text;
+        if (t.length && (!*best || t.length > (*best).length)) {
+            *best = t;
+            if (font) *font = l.font;
+        }
+    }
+    for (UIView *s in v.subviews) SVBPickTitleText(s, d + 1, best, font);
+}
+
+// 把 chrome 容器藏掉 (alpha=0 而非 hidden, 保证它仍参与布局 —— 我们要读它的 frame)
+static void SVBHideChromeView(UIView *v) {
+    if (!v || !v.superview) return;
+    if (!SVBHiddenChrome) SVBHiddenChrome = [NSMutableArray new];
+    // 只在首次藏时记录原值 (重复调用不能覆盖, 否则恢复时拿到的是 0)
+    if (!objc_getAssociatedObject(v, &SVBChromeAlphaKey)) {
+        objc_setAssociatedObject(v, &SVBChromeAlphaKey, @(v.alpha),
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(v, &SVBChromeHiddenKey, @(v.hidden),
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        if (![SVBHiddenChrome containsObject:v]) [SVBHiddenChrome addObject:v];
+    }
+    v.alpha = 0.0;
+}
+
+#pragma mark - 顶部条映射 (返回按钮 + 名字)
+
+static void SVBMapChatTop(UIViewController *vc, UIView *topBand,
+                          NSString *titleText, UIFont *titleFont) {
+    UIView *host = topBand.superview;
+    if (!host) return;
+    UIView *layer = objc_getAssociatedObject(vc, &SVBChromeMappedKey);
+    if (layer && layer.superview && layer.superview != host) {
+        [layer removeFromSuperview];
+        objc_setAssociatedObject(vc, &SVBChromeMappedKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        layer = nil;
+    }
+    if (!layer || !layer.superview) {
+        layer = [UIView new];
+        layer.tag = 0x5356424E;                 // 'SVBN'
+        layer.userInteractionEnabled = YES;
+        [host addSubview:layer];
+        objc_setAssociatedObject(vc, &SVBChromeMappedKey, layer,
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        if (!SVBMappedChrome) SVBMappedChrome = [NSMutableArray new];
+        if (![SVBMappedChrome containsObject:layer]) [SVBMappedChrome addObject:layer];
+    }
+    CGRect lf = [topBand convertRect:topBand.bounds toView:host];
+    if (!CGRectEqualToRect(layer.frame, lf)) layer.frame = lf;
+    layer.backgroundColor = [UIColor clearColor];
+
+    BOOL dark = (vc.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark);
+    UIColor *fg = dark ? [UIColor whiteColor] : [UIColor blackColor];
+
+    // ---- 标题 ----
+    UILabel *title = (UILabel *)[layer viewWithTag:0x53564254];   // 'SVBT'
+    if (!title) {
+        title = [UILabel new];
+        title.tag = 0x53564254;
+        title.textAlignment = NSTextAlignmentCenter;
+        [layer addSubview:title];
+    }
+    title.text = titleText ?: @"";
+    title.textColor = fg;
+    title.font = titleFont ?: [UIFont boldSystemFontOfSize:17];
+    CGSize need = [title sizeThatFits:CGSizeMake(MAX(40.0, lf.size.width - 140.0), CGFLOAT_MAX)];
+    title.frame = CGRectMake(floor((lf.size.width - need.width) / 2.0),
+                             floor((lf.size.height - need.height) / 2.0 + lf.size.height * 0.16),
+                             need.width, need.height);
+
+    // ---- 返回按钮 (‹) ----
+    // 用辅助对象转发 block (UIAction.identifier 只读, 且 actionWithTitle:image: 传 nil
+    // 会撞 -Wnonnull —— 两坑都踩过, 见 skill 14.8)。
+    UIButton *back = (UIButton *)[layer viewWithTag:0x53564242];  // 'SVBB'
+    if (!back) {
+        back = [UIButton buttonWithType:UIButtonTypeSystem];
+        back.tag = 0x53564242;
+        [layer addSubview:back];
+    }
+    [back setTitle:@"‹" forState:UIControlStateNormal];
+    [back setTitleColor:fg forState:UIControlStateNormal];
+    back.titleLabel.font = [UIFont systemFontOfSize:30 weight:UIFontWeightRegular];
+    back.frame = CGRectMake(6, 0, 46, lf.size.height);
+    __weak UIViewController *wvc = vc;
+    objc_setAssociatedObject(back, &SVBChromeActionBlockKey, ^{
+        UIViewController *s = wvc;
+        if (!s) return;
+        @try { [s.navigationController popViewControllerAnimated:YES]; }
+        @catch (NSException *e) {}
+    }, OBJC_ASSOCIATION_COPY_NONATOMIC);
+    // 注: action:nil 会撞 -Wnonnull, 必须写明确 selector
+    [back removeTarget:[SVBChromeActionProxy shared]
+                action:@selector(handle:)
+      forControlEvents:UIControlEventTouchUpInside];
+    [back addTarget:[SVBChromeActionProxy shared]
+             action:@selector(handle:)
+   forControlEvents:UIControlEventTouchUpInside];
+}
+
+static void SVBClearMappedChrome(void) {
+    for (UIView *v in [SVBMappedChrome copy]) {
+        if (v.superview) [v removeFromSuperview];
+    }
+    [SVBMappedChrome removeAllObjects];
+    for (UIView *v in [SVBHiddenChrome copy]) {
+        if (!v.superview) continue;
+        NSNumber *a = objc_getAssociatedObject(v, &SVBChromeAlphaKey);
+        NSNumber *h = objc_getAssociatedObject(v, &SVBChromeHiddenKey);
+        if (a) v.alpha = a.doubleValue;
+        if (h) v.hidden = h.boolValue;
+        objc_setAssociatedObject(v, &SVBChromeAlphaKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(v, &SVBChromeHiddenKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    [SVBHiddenChrome removeAllObjects];
+}
+
+// 一轮完整处理: 扫 -> (兜底 nav bar) -> 抓标题 -> 藏 -> 映射
+static void SVBDoChatChrome(UIViewController *vc) {
+    if (!vc || !vc.view) return;
+    NSMutableArray<UIView *> *tops = [NSMutableArray array];
+    NSMutableArray<UIView *> *bottoms = [NSMutableArray array];
+    NSMutableArray<UIView *> *masks = [NSMutableArray array];
+    @try {
+        SVBScanBands(vc.view, vc.view, 0, tops, bottoms, masks);
+    } @catch (NSException *e) {}
+
+    // 几何没找到顶条 -> 退回标准导航栏兜底 (有则藏着无害)
+    if (!tops.count) {
+        UINavigationBar *nav = vc.navigationController.navigationBar;
+        if (nav && nav.window && nav.superview) [tops addObject:nav];
+    }
+    UIView *top = tops.firstObject;
+
+    // 标题先抓后藏 (alpha 不影响读 text)
+    NSString *titleText = nil;
+    UIFont *titleFont = nil;
+    if (top) {
+        @try { SVBPickTitleText(top, 0, &titleText, &titleFont); } @catch (NSException *e) {}
+    }
+    if (!titleText.length) {
+        NSString *t = vc.title;
+        if (!t.length) t = vc.navigationItem.title;
+        if (t.length) titleText = t;
+    }
+
+    for (UIView *v in tops)    SVBHideChromeView(v);
+    for (UIView *v in bottoms) SVBHideChromeView(v);
+    for (UIView *v in masks)   SVBHideChromeView(v);
+
+    if (top) {
+        @try { SVBMapChatTop(vc, top, titleText, titleFont); } @catch (NSException *e) {}
+    }
+}
+
+// 入口: 进对话时调用一次; 与气泡一样做延迟补扫 (系统重建 chrome 后再藏)
+static void SVBApplyChatChrome(UIViewController *vc) {
+    if (!vc || !vc.view || !vc.view.window) return;
+    if (!SVBBubbleSweepActive()) { SVBClearMappedChrome(); return; }
+    if (!SVBHiddenChrome) SVBHiddenChrome = [NSMutableArray new];
+    if (!SVBMappedChrome) SVBMappedChrome = [NSMutableArray new];
+    @try { SVBDoChatChrome(vc); } @catch (NSException *e) {}
+    __weak UIViewController *wvc = vc;
+    NSTimeInterval delays[4] = {0.35, 0.9, 1.8, 3.0};
+    for (int i = 0; i < 4; i++) {
+        NSTimeInterval t = delays[i];
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(t * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            @try {
+                UIViewController *s = wvc;
+                if (!s || !s.isViewLoaded || !s.view.window) return;
+                if (!SVBBubbleSweepActive()) { SVBClearMappedChrome(); return; }
+                SVBDoChatChrome(s);
+            } @catch (NSException *e) {}
+        });
+    }
+}
+
 #pragma mark - 信息 App Hook
 
 @interface CKConversationListController : UIViewController @end
@@ -709,6 +1018,7 @@ static char SVBDetectedCtxKey;
     SVB_SMS_GUARD()
     SVB_SAFE_APPLY(SVBContextChat)
     SVBApplyChatBubbles(self);   // v10.5.0: 隐藏气泡只留文字
+    SVBApplyChatChrome(self);    // v10.5.0: 顶部导航栏/底部输入栏整块隐藏 + 自行映射
 }
 - (void)viewDidDisappear:(BOOL)animated {
     %orig;
@@ -716,6 +1026,7 @@ static char SVBDetectedCtxKey;
     @try { [[SVBManager shared] setContextActive:NO context:SVBContextChat]; } @catch (NSException *e) {}
     SVBRestoreChatBlur();
     SVBRestoreMappedBalloons();   // 撤掉气泡隐藏与文字映射
+    SVBClearMappedChrome();       // 还原导航栏/输入栏
 }
 %end
 
@@ -777,6 +1088,7 @@ static char SVBDetectedCtxKey;
     SVB_SMS_GUARD()
     SVB_SAFE_APPLY(SVBContextChat)
     SVBApplyChatBubbles(self);   // v10.5.0: 隐藏气泡只留文字
+    SVBApplyChatChrome(self);    // v10.5.0: 顶部导航栏/底部输入栏整块隐藏 + 自行映射
 }
 - (void)viewDidDisappear:(BOOL)animated {
     %orig;
@@ -784,6 +1096,7 @@ static char SVBDetectedCtxKey;
     @try { [[SVBManager shared] setContextActive:NO context:SVBContextChat]; } @catch (NSException *e) {}
     SVBRestoreChatBlur();
     SVBRestoreMappedBalloons();   // 撤掉气泡隐藏与文字映射
+    SVBClearMappedChrome();       // 还原导航栏/输入栏
 }
 %end
 
@@ -914,9 +1227,103 @@ static char SVBDetectedCtxKey;
     %orig;
     @try {
         if (!SVBIsSMSProcess()) return;
-        if (!SVBMainSweepActive()) return;
+        if (!SVBMainSweepActive() && !SVBSMSListSweepActive()) return;
         if (color && ![color isEqual:[UIColor clearColor]])
             %orig([UIColor clearColor]);
+    } @catch (NSException *e) {}
+}
+// v10.4.1: 布局期间就地再清一次 —— 滚动/复用会新建装饰视图, 它的白底可能
+// 不是走 setBackgroundColor: 铺的 (或铺得比我们的钩子早一帧), 只在布局末尾
+// 兜一道, 白带就不会先显示出来。(装饰视图不是 cell, 改色不触发集合布局重入)
+- (void)layoutSubviews {
+    %orig;
+    @try {
+        if (!SVBIsSMSProcess()) return;
+        if (!SVBMainSweepActive() && !SVBSMSListSweepActive()) return;
+        if (self.backgroundColor && ![self.backgroundColor isEqual:[UIColor clearColor]])
+            self.backgroundColor = [UIColor clearColor];
+        if (self.layer.backgroundColor &&
+            !CGColorEqualToColor(self.layer.backgroundColor, [UIColor clearColor].CGColor))
+            self.layer.backgroundColor = NULL;
+    } @catch (NSException *e) {}
+}
+%end
+
+// ------------------------------------------------------------------
+// v10.4.1: 滚动期间的白带兜底 —— 系统在滚动/回弹时重铺白色卡片 (分区底、cell 容器),
+// 往往比我们的「源头拦截」早一帧显示出来, 观感就是一条条白带。这里在滚动回调里做
+// **极轻量**清扫: 只抹容器自身底色, 不碰系统托管的 backgroundView/selectedBackgroundView
+// 子树、也不藏卡片 —— 避免 v1.7.21 那类「布局重入 -> SIGABRT」。
+// 节流 0.12s, 且只在「本进程有可见视频背景」时才跑。
+// ------------------------------------------------------------------
+static CFAbsoluteTime sSVBLastScrollSweep = 0;
+
+static void SVBScrollSweepList(UIView *scrollView) {
+    for (UIView *v in scrollView.subviews) {
+        if ([v isKindOfClass:[SVBVideoBackgroundView class]]) continue;
+        if ([v isKindOfClass:[UICollectionViewCell class]] ||
+            [v isKindOfClass:[UITableViewCell class]]) {
+            // cell 本体 + contentView 底色 (改 UIView 底色不走集合布局失效, 安全)
+            if (v.backgroundColor && ![v.backgroundColor isEqual:[UIColor clearColor]])
+                v.backgroundColor = [UIColor clearColor];
+            UIView *cv = [(UITableViewCell *)v contentView];
+            if (cv.backgroundColor && ![cv.backgroundColor isEqual:[UIColor clearColor]])
+                cv.backgroundColor = [UIColor clearColor];
+            // cell 内部一层容器 (系统白卡/分区底) 浅清, 跳过文字图标等受保护控件
+            for (UIView *s in v.subviews) {
+                if (s == cv) continue;
+                if ([s isKindOfClass:[SVBVideoBackgroundView class]]) continue;
+                if ([s isKindOfClass:[UILabel class]] || [s isKindOfClass:[UIImageView class]] ||
+                    [s isKindOfClass:[UIControl class]] || [s isKindOfClass:[UITextField class]] ||
+                    [s isKindOfClass:[UIVisualEffectView class]]) continue;
+                if (s.backgroundColor && ![s.backgroundColor isEqual:[UIColor clearColor]])
+                    s.backgroundColor = [UIColor clearColor];
+                if (s.layer.backgroundColor &&
+                    !CGColorEqualToColor(s.layer.backgroundColor, [UIColor clearColor].CGColor))
+                    s.layer.backgroundColor = NULL;
+            }
+        } else {
+            // 装饰视图/容器 (非 cell): 底色 + layer 底色一起抹
+            if (v.backgroundColor && ![v.backgroundColor isEqual:[UIColor clearColor]])
+                v.backgroundColor = [UIColor clearColor];
+            if (v.layer.backgroundColor &&
+                !CGColorEqualToColor(v.layer.backgroundColor, [UIColor clearColor].CGColor))
+                v.layer.backgroundColor = NULL;
+        }
+    }
+}
+
+static void SVBScrollSweepIfNeeded(UIScrollView *sv) {
+    if (!sv) return;
+    if (!SVBIsSMSProcess()) return;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (now - sSVBLastScrollSweep < 0.12) return;
+    if (!SVBSMSListSweepActive()) return;
+    sSVBLastScrollSweep = now;
+    @try { SVBScrollSweepList(sv); } @catch (NSException *e) {}
+}
+
+%hook UIScrollView
+// 手指拖动/减速期间 UIKit 走 setBounds:, 程序化滚动走 setContentOffset: —— 两个都接
+- (void)setBounds:(CGRect)bounds {
+    %orig;
+    @try {
+        if ([self isKindOfClass:[UICollectionView class]] ||
+            [self isKindOfClass:[UITableView class]]) SVBScrollSweepIfNeeded(self);
+    } @catch (NSException *e) {}
+}
+- (void)setContentOffset:(CGPoint)contentOffset {
+    %orig;
+    @try {
+        if ([self isKindOfClass:[UICollectionView class]] ||
+            [self isKindOfClass:[UITableView class]]) SVBScrollSweepIfNeeded(self);
+    } @catch (NSException *e) {}
+}
+- (void)setContentOffset:(CGPoint)contentOffset animated:(BOOL)animated {
+    %orig;
+    @try {
+        if ([self isKindOfClass:[UICollectionView class]] ||
+            [self isKindOfClass:[UITableView class]]) SVBScrollSweepIfNeeded(self);
     } @catch (NSException *e) {}
 }
 %end
@@ -953,7 +1360,7 @@ static char SVBDetectedCtxKey;
 
 // ------------------------------------------------------------------
 // 插件入口: 写心跳 + 挂横幅 + 注册 Darwin 通知
-// 这段在「任何被注入的进程」里都会跑 (信息App / 备忘录探针 / 其它)
+// 这段在「任何被注入的进程」里都会跑 (信息App / 控制App / 其它)
 // ------------------------------------------------------------------
 %ctor {
     @autoreleasepool {   // 早期加载时主线程还没有 autorelease pool
@@ -962,7 +1369,7 @@ static char SVBDetectedCtxKey;
             BOOL isSB = [proc isEqualToString:@"SpringBoard"];
 
             // v10.4.0g: SpringBoard (桌面) 崩溃 = 全机安全模式, 桌面侧零文件 IO ——
-            // 心跳/日志只在宿主 App (信息/备忘录探针) 里写, 桌面只保留 displayName 钩子
+            // 心跳/日志只在宿主 App (信息/控制App) 里写, 桌面只保留 displayName 钩子
             // SpringBoard 只用 displayName 钩子, 不做素材迁移/诊断横幅 (防干扰桌面启动)
             if (!isSB) {
                 [[SVBManager shared] writeHeartbeat:

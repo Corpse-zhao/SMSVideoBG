@@ -1,37 +1,26 @@
 #import <Foundation/Foundation.h>
 
 // ============================================================
-// 授权模块 v10.5.0 —— 纯离线授权串 (只有这一条通道) + 产品位
+// 授权模块 v10.3.0 —— 纯离线授权串 (只有这一条通道)
 //
 //   流程:
 //     ① 控制App「授权」页读本机 UDID, 客户复制发给作者;
-//     ② 作者在签发 App 里粘贴 UDID, 选有效天数 + 选产品(通用/仅信息/仅备忘录),
-//        点「签发」-> 得到一段以 VIDEOBGOFFLINE1: 开头的授权串, 复制发给客户;
+//     ② 作者在签发 App 里粘贴 UDID, 选有效天数, 点「签发」-> 得到一段
+//        以 SVBOFFLINE1: 开头的授权串, 复制发给客户;
 //     ③ 客户在控制 App「粘贴离线授权」导入 -> 立即授权。
 //
 //   本模块**不发起任何网络请求** —— 客户国内网络直连即可, 完全不需要梯子。
-//   判定 = 纯本地 HMAC 验签 + 到期日比较 + 产品位校验。
+//   判定 = 纯本地 HMAC 验签 + 到期日比较。
 //
-//   隐私: 授权串里带的是 SHA256("VideoBG-AUTH/v1|<归一化UDID>") 前 16 字节
+//   隐私: 授权串里带的是 SHA256("SMSVideoBG-AUTH/v1|<归一化UDID>") 前 16 字节
 //         的大写十六进制 (32 位, 即 H32 指纹), 不暴露 UDID 原文。
 //
 //   授权串格式:
-//     "VIDEOBGOFFLINE1:" + base64(JSON{"h":H32,"e":到期dayIndex,"t":ts,
-//                                      "s":64位hex,"p":产品位})
+//     "SVBOFFLINE1:" + base64(JSON{"h":H32,"e":到期dayIndex,"t":ts,"s":64位hex})
 //     到期 dayIndex = 自 2020-01-01 UTC 起的天数; 4294967295 = 永久
-//     产品位 p = "all"(两版通用) | "sms"(仅信息App) | "memos"(仅备忘录App)
-//     签名原文 = "VIDEOBG/v1|<p>|<H32>|<e>|<t>", HMAC-SHA256(secret, 原文) 全 32 字节小写 hex
+//     签名原文 = "SVBGOFFLINE/v1|<H32>|<e>|<t>", HMAC-SHA256(secret, 原文) 全 32 字节小写 hex
 //
-//   ★ 产品位说明 (v10.5.0 新增)
-//     「信息视频背景」与「备忘录视频背景」是两个独立插件, 但**共用同一把签名密钥、
-//     同一套指纹算法** (指纹前缀统一为 VideoBG-AUTH/v1|), 因此同一台设备在两版里
-//     算出的 H32 完全相同 —— 这是「一个码两版通用」的前提。
-//     作者签发时指定产品位:
-//       · all   -> 两版都能导入成功 (卖全家桶 / 自己用省事)
-//       · sms   -> 只有信息视频背景认
-//       · memos -> 只有备忘录视频背景认
-//
-//   本地记录 (配置键 auth_offline) 会把 h/e/t/s/p 全字段存下来, **每次判定都复验
+//   本地记录 (配置键 auth_offline) 会把 h/e/t/s 全字段存下来, **每次判定都复验
 //   一次签名** —— 因此有效期完全按作者签发的天数, 没有上限; 客户手改 plist 里
 //   任何一位都会验签失败、记录作废。
 //
@@ -39,12 +28,6 @@
 // ============================================================
 
 #define SVB_AUTH_FOREVER 4294967295u
-
-// ---- 产品位 (v10.5.0) ----
-// 通用位: 签这个值, 两版都能导入
-#define SVB_AUTH_PRODUCT_ALL   @"all"
-// 本插件在产品位体系里的标识 (签发端 product 参数须填这个, 或填 "all")
-#define SVB_AUTH_PRODUCT_MINE  @"sms"
 
 typedef NS_ENUM(NSInteger, SVBAuthState) {
     SVBAuthStateNoUDID       = 0,   // 读不到设备 UDID, 无法授权
@@ -92,12 +75,6 @@ NSString *SVBAuthOfflineTicketInfo(void);
 // ---- 诊断 (纯本地, 不联网) ----
 // 返回人话报告: 本机 UDID/指纹、当前授权状态、本地授权串内容与验签结果。
 NSString *SVBAuthDiagnose(void);
-
-// ---- 产品位 (v10.5.0) ----
-// 产品位是否被本插件接受 (等于 "all" 或本插件标识 "sms")
-BOOL SVBAuthProductAllowed(NSString *product);
-// 产品位 -> 人话 (诊断/提示用)
-NSString *SVBAuthProductText(NSString *product);
 
 // ---- 日期工具 (与签发 App 对齐) ----
 uint32_t SVBAuthDayIndexNow(void);
