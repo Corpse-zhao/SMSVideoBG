@@ -221,7 +221,8 @@ static BOOL SVBAuthOfflineTicketExp(uint32_t *outExp) {
             NSString *mine = SVBAuthDeviceHash();
             if (!mine.length || ![[h uppercaseString] isEqualToString:mine]) return NO;
             // 产品位: 记录里没存 p 的按 "all" 处理 (签发端恒写 p, 这里只是兜底)
-            NSString *prod = [d[@"p"] isKindOfClass:[NSString class]] && d[@"p"].length
+            NSString *prod = ([d[@"p"] isKindOfClass:[NSString class]] &&
+                              [(NSString *)d[@"p"] length])
                            ? [(NSString *)d[@"p"] lowercaseString] : SVB_AUTH_PRODUCT_ALL;
             // 验签必须用**记录里存的产品位**重建原文 —— 不能用本插件标识替换,
             // 否则 "all" 的码在这里会算出另一个签名而误判为无效
@@ -410,7 +411,8 @@ BOOL SVBAuthImportTicket(NSString *text, NSString **message) {
             if (!mine.length) { fail = @"读不到本机 UDID，无法导入"; break; }
 
             // 产品位: 签发端恒写; 缺失按 "all"(通用) 兜底
-            NSString *prod = [d[@"p"] isKindOfClass:[NSString class]] && d[@"p"].length
+            NSString *prod = ([d[@"p"] isKindOfClass:[NSString class]] &&
+                              [(NSString *)d[@"p"] length])
                            ? [(NSString *)d[@"p"] lowercaseString] : SVB_AUTH_PRODUCT_ALL;
 
             // ① 必须绑定本机 (新轨指纹)
