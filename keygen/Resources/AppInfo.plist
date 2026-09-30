@@ -5,9 +5,9 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>zh_CN</string>
 	<key>CFBundleDisplayName</key>
-	<string>授权签发</string>
+	<string>板栗</string>
 	<key>CFBundleExecutable</key>
-	<string>SVBKeyGen</string>
+	<string>BanliKeyGen</string>
 	<key>CFBundleIcons</key>
 	<dict>
 		<key>CFBundlePrimaryIcon</key>
@@ -21,15 +21,15 @@
 		</dict>
 	</dict>
 	<key>CFBundleIdentifier</key>
-	<string>com.nvb.svbkeygen</string>
+	<string>com.nvb.banli</string>
 	<key>CFBundleName</key>
-	<string>授权签发</string>
+	<string>板栗</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>2.4.1</string>
+	<string>3.0.0</string>
 	<key>CFBundleVersion</key>
-	<string>2.4.1</string>
+	<string>3.0.0</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>UIRequiredDeviceCapabilities</key>

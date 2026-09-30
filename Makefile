@@ -19,7 +19,14 @@ include $(THEOS)/makefiles/common.mk
 ifeq ($(strip $(SVB_LICENSE_SECRET)),)
 SVB_LICENSE_SECRET = SVBG-LICENSE-FALLBACK-INSECURE-SET-CI-SECRET
 endif
-LICENSE_CFLAGS = -DSVB_LICENSE_SECRET='"$(SVB_LICENSE_SECRET)"'
+# v10.4.0 双轨授权:
+#   老轨 = SVB_LICENSE_SECRET    (兼容 v10.6.x 及更早签发的串, 升级不踢人)
+#   新轨 = VIDEOBG_LICENSE_SECRET (与备忘录版 / 「板栗」签发 App 同一把, 码可两版通用)
+# 两把都必须注入: 少一把, 对应授权通道整条失效。
+ifeq ($(strip $(VIDEOBG_LICENSE_SECRET)),)
+VIDEOBG_LICENSE_SECRET = VIDEOBG-LICENSE-FALLBACK-INSECURE-SET-CI-SECRET
+endif
+LICENSE_CFLAGS = -DSVB_LICENSE_SECRET='"$(SVB_LICENSE_SECRET)"' -DVIDEOBG_LICENSE_SECRET='"$(VIDEOBG_LICENSE_SECRET)"'
 
 # v10.3.0: 授权只走「离线授权串」, 插件端零网络请求 —— 原来的 Gitee/镜像名单
 # 地址注入位(GITEE_CFLAGS)已随在线名单一起删除。

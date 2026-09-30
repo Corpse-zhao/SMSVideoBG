@@ -6,19 +6,20 @@ export ARCHS = arm64
 include $(THEOS)/makefiles/common.mk
 
 # ------------------------------------------------------------
-# 签名密钥: 与主插件共用同一 GitHub Secret (SVB_LICENSE_SECRET)。
+# 板栗 v3.0.0 —— 信息/备忘录 两版统一授权签发
+# 签名密钥: 与两版插件共用同一个 GitHub Secret (VIDEOBG_LICENSE_SECRET)。
 # 两边密钥一致, 签发的激活码才能被插件识别。
 # ------------------------------------------------------------
-ifeq ($(strip $(SVB_LICENSE_SECRET)),)
-SVB_LICENSE_SECRET = SVBG-LICENSE-FALLBACK-INSECURE-SET-CI-SECRET
+ifeq ($(strip $(VIDEOBG_LICENSE_SECRET)),)
+VIDEOBG_LICENSE_SECRET = VIDEOBG-LICENSE-FALLBACK-INSECURE-SET-CI-SECRET
 endif
-KEYGEN_CFLAGS = -DSVB_LICENSE_SECRET='"$(SVB_LICENSE_SECRET)"'
+KEYGEN_CFLAGS = -DVIDEOBG_LICENSE_SECRET='"$(VIDEOBG_LICENSE_SECRET)"'
 
-APPLICATION_NAME = SVBKeyGen
-SVBKeyGen_FILES = main.m KGAppDelegate.m KGAuth.m
-SVBKeyGen_FRAMEWORKS = UIKit
-SVBKeyGen_CFLAGS = -fobjc-arc -fno-threadsafe-statics -Wno-deprecated-declarations $(KEYGEN_CFLAGS)
-SVBKeyGen_INSTALL_PATH = /Applications
+APPLICATION_NAME = BanliKeyGen
+BanliKeyGen_FILES = main.m KGAppDelegate.m KGAuth.m
+BanliKeyGen_FRAMEWORKS = UIKit
+BanliKeyGen_CFLAGS = -fobjc-arc -fno-threadsafe-statics -Wno-deprecated-declarations $(KEYGEN_CFLAGS)
+BanliKeyGen_INSTALL_PATH = /Applications
 
 include $(THEOS_MAKE_PATH)/application.mk
 

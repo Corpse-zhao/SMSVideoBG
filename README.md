@@ -18,7 +18,7 @@
 - 诊断日志（v10.4.0）：`.svb_tweak.log` 等日志文件**超过 3 天自动删除**（此前只限大小、一直保留）
 - 授权（v10.3.0：**纯离线**，插件零网络请求，国内网络直连即可，不需要代理 / 梯子）：
   1. 控制 App「授权」页点「本机 UDID」复制，发给作者；
-  2. 作者在「授权签发」App 里粘贴 UDID、选有效天数，点「生成授权串」；
+  2. 作者在「板栗」App 里粘贴 UDID、选有效天数 + 选产品位（通用/仅信息/仅备忘录），点「签发」；
   3. 客户在控制 App 点「粘贴离线授权」导入即生效，有效期按作者签发的内容计。
   - 代价：授权串一旦发出，到期前无法远程收回 —— 想控制节奏就让作者签短一点。
 
@@ -40,7 +40,7 @@
 gmake package THEOS_PACKAGE_SCHEME=rootless FINALPACKAGE=1
 ```
 
-产物：`packages/com.nvb.smsvideobg_*_iphoneos-arm64.deb`（签发 App 同仓库 `keygen/`，产物 `com.nvb.svbkeygen_*`）
+产物：`packages/com.nvb.smsvideobg_*_iphoneos-arm64.deb`（签发 App「板栗」同仓库 `keygen/`，产物 `com.nvb.banli_*`）
 
 ## 架构
 
@@ -48,5 +48,5 @@ gmake package THEOS_PACKAGE_SCHEME=rootless FINALPACKAGE=1
 |---|---|
 | Tweak.x + SVBCommon.m + SVBAuth.m | 主插件，注入 MobileSMS（视频背景 + 素材根 + 离线授权判定） |
 | app/*.m + SVBCommon.m + SVBAuth.m | 独立控制 App（开关 / 素材 / 授权 / 诊断） |
-| keygen/*（独立 deb） | 授权签发 App：输 UDID + 选天数 → 生成离线授权串 |
+| keygen/*（独立 deb） | 「板栗」签发 App：输 UDID + 选天数 + 选产品位 → 生成离线授权串（信息/备忘录两版通用） |
 | 共享配置 | NSUserDefaults suite `com.nvb.smsvideobg` + Darwin 通知实时刷新 |

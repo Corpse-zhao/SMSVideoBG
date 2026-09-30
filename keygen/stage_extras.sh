@@ -9,14 +9,14 @@ fi
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
 APP_DIR=""
-for p in "$STAGE/Applications/SVBKeyGen.app" \
-         "$STAGE/var/jb/Applications/SVBKeyGen.app" \
-         "$STAGE/SVBKeyGen.app"; do
+for p in "$STAGE/Applications/BanliKeyGen.app" \
+         "$STAGE/var/jb/Applications/BanliKeyGen.app" \
+         "$STAGE/BanliKeyGen.app"; do
   if [ -d "$p" ]; then APP_DIR="$p"; break; fi
 done
 
 if [ -z "$APP_DIR" ]; then
-  echo "::error::SVBKeyGen.app staging 目录未找到, staging 内容:"
+  echo "::error::BanliKeyGen.app staging 目录未找到, staging 内容:"
   find "$STAGE" -maxdepth 5 -name "*.app" 2>/dev/null
   exit 1
 fi
@@ -24,13 +24,13 @@ fi
 cp "$DIR/Resources/AppInfo.plist" "$APP_DIR/Info.plist"
 cp "$DIR/Resources/Icon.png" "$APP_DIR/Icon.png"
 
-if ! grep -q "授权签发" "$APP_DIR/Info.plist"; then
+if ! grep -q "板栗" "$APP_DIR/Info.plist"; then
   echo "::error::Info.plist 覆盖失败"
   exit 1
 fi
 
-if command -v ldid >/dev/null 2>&1 && [ -f "$APP_DIR/SVBKeyGen" ]; then
-  ldid -S "$APP_DIR/SVBKeyGen" && echo "ldid: signed"
+if command -v ldid >/dev/null 2>&1 && [ -f "$APP_DIR/BanliKeyGen" ]; then
+  ldid -S "$APP_DIR/BanliKeyGen" && echo "ldid: signed"
 fi
 
 echo "keygen staged: $APP_DIR"

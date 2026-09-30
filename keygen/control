@@ -1,8 +1,8 @@
-Package: com.nvb.svbkeygen
-Name: 授权签发
-Version: 2.4.1
+Package: com.nvb.banli
+Name: 板栗
+Version: 3.0.0
 Architecture: iphoneos-arm64
-Description: 信息视频背景 授权签发工具 (输 UDID 出离线授权串; 客户侧不联网, 不需要梯子)
+Description: 板栗 —— 信息视频背景 + 备忘录视频背景 统一授权签发工具 (支持 通用/仅信息/仅备忘录 三档产品位; 输 UDID 出离线授权串, 客户侧不联网)
 Maintainer: 板栗仁
 Author: 板栗仁
 Section: Utilities
