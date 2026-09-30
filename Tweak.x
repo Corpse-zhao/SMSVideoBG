@@ -1078,34 +1078,87 @@ static UIView *SVBAccessoryHost(UIView *entry) {
     return nil;
 }
 
-// v10.6.7 【核心修法②】把输入栏**钉在宿主容器的底部居中**。
-// 【为什么废掉上一版的写法】v10.6.5/10.6.6 是把「抽屉高度」一次性写进 transform。
-// 但键盘弹出/收起时系统会重排 inputAccessoryView, 抽屉高度也会跟着变 ——
-// 写死的位移会残留下来, 用户看到的就是「开合键盘后输入框位置下移」。
-// 【现在的做法】每次重新算, 不做任何记忆:
-//   ① 用 [host convertRect:entry.bounds fromView:entry] 拿输入栏的**实际视觉框**
-//      (这已经包含 transform, 也顺带处理了 host 不是直接父视图的坐标系问题);
-//   ② 目标下沿 = 宿主高度 - 底部安全区 (避开 home 指示条);
-//   ③ 差值就是这次需要的 ty。
-// 公式是**幂等**的 (center 不受 transform 影响 => 反复调用结果一致),
-// 所以系统怎么重排都能自愈, 不会再累积漂移。
-// 返回 YES 表示已按底部锚定; NO 表示找不到宿主容器 (调用方可走老的兜底逻辑)。
-static BOOL SVBPinEntryToBottom(UIView *entry) {
-    if (!entry) return NO;
+// v10.6.7b: 取子树里「真正看得见的东西」在 space 坐标系里的**联合框**。
+// 只认**叶子级**的交互/文字/图片元素 (UITextField / UITextView / UIControl /
+// 有字的 UILabel / 有图的 UIImageView); 命中的元素内部若还有更具体的元素, 就取内部的
+// —— 这样不会把整条全宽容器算进来 (否则「水平居中」永远算出来是 0, 等于没做)。
+// 被我们藏掉的 (hidden / alpha<0.05) 一律不计 —— 例如功能键那一排。
+static void SVBContentUnionInSpace(UIView *v, NSInteger d, UIView *space,
+                                   CGRect *u, BOOL *has) {
+    if (!v || d > 8) return;
+    @try {
+        if (v.hidden || v.alpha < 0.05) return;
+        if ([v isKindOfClass:[SVBVideoBackgroundView class]]) return;
+        BOOL match = [v isKindOfClass:[UITextField class]] ||
+                     [v isKindOfClass:[UITextView class]] ||
+                     [v isKindOfClass:[UIControl class]] ||
+                     ([v isKindOfClass:[UILabel class]] &&
+                      ((UILabel *)v).text.length > 0) ||
+                     ([v isKindOfClass:[UIImageView class]] &&
+                      ((UIImageView *)v).image != nil);
+        if (match) {
+            BOOL innerHas = NO; CGRect inner = CGRectZero;
+            for (UIView *s in v.subviews)
+                SVBContentUnionInSpace(s, d + 1, space, &inner, &innerHas);
+            CGRect r; BOOL useIt = NO;
+            if (innerHas) { r = inner; useIt = YES; }
+            else {
+                r = [space convertRect:v.bounds fromView:v];
+                useIt = (r.size.width > 8.0 && r.size.height > 6.0);
+            }
+            if (useIt) {
+                if (!*has) { *u = r; *has = YES; }
+                else *u = CGRectUnion(*u, r);
+            }
+            return;
+        }
+    } @catch (NSException *e) {}
+    for (UIView *s in v.subviews) SVBContentUnionInSpace(s, d + 1, space, u, has);
+}
+
+// v10.6.7b 【核心】把输入栏**钉在屏幕底部 + 水平居中**。
+// 【为什么不再"按宿主容器算"】宿主容器的高度/内边距不固定, 算出来的位置总是差一截 ——
+// 用户实拍实测: 输入栏中心在 266.5pt (屏幕中心 215pt, 偏右 51.5pt),
+// 下沿在 848pt (home 指示条 919pt, 偏高约 42pt)。而且老实现**根本没做水平居中**。
+// 【现在的做法】直接在**屏幕(窗口)坐标系**里算目标, 参照物是"看得见的东西":
+//   ① SVBContentUnionInSpace 取文字框 + 麦克风这类叶子元素的联合框;
+//   ② 水平: 中心 x == 屏宽 / 2;
+//   ③ 垂直: 下沿 == 屏高 - 底部安全区 - 8 (正好是系统原生那一条的位置);
+//   ④ 键盘弹出时 (宿主不再贴屏底) **不动垂直** —— 否则会钻到键盘后面;
+//      没越界就不上移 (防抖动);
+//   ⑤ 只下移 / 只小幅度修正, 位移过大 (异常几何) 宁可不做。
+// 公式幂等 (center 不受 transform 影响) => 系统怎么重排都自愈, 不累积漂移。
+// 返回 YES 表示已钉住; NO 表示几何不可信 (调用方可走兜底逻辑)。
+static BOOL SVBPinEntryToBottom(UIView *entry, UIView *space) {
+    if (!entry || !space) return NO;
+    CGFloat W = space.bounds.size.width, Hh = space.bounds.size.height;
+    if (W < 60.0 || Hh < 60.0) return NO;
+    CGRect vis = [space convertRect:entry.bounds fromView:entry];
+    if (vis.size.height < 10.0) return NO;
+    BOOL hasC = NO; CGRect content = CGRectZero;
+    SVBContentUnionInSpace(entry, 0, space, &content, &hasC);
+    if (!hasC) content = vis;
+    if (content.size.width < 20.0) return NO;
+    CGFloat safeBot = space.safeAreaInsets.bottom;
+    if (safeBot < 1.0) safeBot = 34.0;
+    if (safeBot > 80.0) safeBot = 34.0;
+    // 键盘是否收起: 宿主容器是否贴着屏底 (贴着 => 收起)
     UIView *host = SVBAccessoryHost(entry);
-    if (!host) return NO;
-    CGFloat h = entry.bounds.size.height;
-    CGFloat H = host.bounds.size.height;
-    if (h < 20.0 || h > 260.0) return NO;         // 不像输入栏就不碰
-    if (H < h - 1.0) return NO;
-    CGRect vis = [host convertRect:entry.bounds fromView:entry];
-    if (vis.size.height < 1.0) return NO;
-    CGFloat safeBot = host.safeAreaInsets.bottom;
-    if (safeBot < 0.0) safeBot = 0.0;
-    if (safeBot > H - h) safeBot = 0.0;           // 数值不合理就不扣安全区
-    CGFloat ty = (H - safeBot) - CGRectGetMaxY(vis);
-    if (ty < -1.0) ty = 0.0;                      // 已经比目标更低就不再上移(防抖)
-    if (ty > 240.0) return NO;                    // 异常几何: 宁可不做
+    BOOL docked;
+    if (host) {
+        CGRect hb = [space convertRect:host.bounds fromView:host];
+        docked = (CGRectGetMaxY(hb) >= Hh - 12.0);
+    } else {
+        docked = (CGRectGetMaxY(content) >= Hh - 150.0);
+    }
+    CGFloat tx = (W / 2.0) - CGRectGetMidX(content);
+    CGFloat ty = 0.0;
+    if (docked) {
+        ty = (Hh - safeBot - 8.0) - CGRectGetMaxY(content);
+        // 没越界就不上移(防抖); 越界了(下沿掉到屏外)才允许往上拉回来
+        if (ty < 0.0 && CGRectGetMaxY(content) < Hh - 10.0) ty = 0.0;
+    }
+    if (fabs(tx) > 240.0 || ty > 320.0 || ty < -200.0) return NO;
     // 原始 transform 只记一次, 离开页面时还原
     NSValue *ov = objc_getAssociatedObject(entry, &SVBOrigTfKey);
     CGAffineTransform base = CGAffineTransformIdentity;
@@ -1118,7 +1171,7 @@ static BOOL SVBPinEntryToBottom(UIView *entry) {
         if (!SVBShiftedViews) SVBShiftedViews = [NSMutableArray new];
         if (![SVBShiftedViews containsObject:entry]) [SVBShiftedViews addObject:entry];
     }
-    CGAffineTransform want = CGAffineTransformTranslate(base, 0, ty);
+    CGAffineTransform want = CGAffineTransformTranslate(base, tx, ty);
     if (!CGAffineTransformEqualToTransform(entry.transform, want))
         entry.transform = want;
     return YES;
@@ -1498,7 +1551,7 @@ static void SVBDoChatChrome(UIViewController *vc) {
     // v10.6.7 【关键改动】不再用「一次性写死的位移」——
     // 键盘开合会让系统重排 inputAccessoryView, 抽屉高度也跟着变, 写死的位移会残留
     // (用户报的「收起键盘后输入框位置下移」)。改成每次重算的**底部锚定**(幂等)。
-    if (entryView && !SVBPinEntryToBottom(entryView)) {
+    if (entryView && !SVBPinEntryToBottom(entryView, vc.view.window ?: vc.view)) {
         // 兜底: 找不到紧贴的宿主容器时, 才退回「按抽屉高度下移」的老行为
         if (trayH > 8.0) {
             if (!SVBShiftedViews) SVBShiftedViews = [NSMutableArray new];
@@ -1589,6 +1642,18 @@ static void SVBDoChatChrome(UIViewController *vc) {
             [[SVBManager shared] log:@"chat chrome 底条处理: 输入栏=%@ 抽屉高=%.0f 隐藏数=%lu",
                 entryView ? NSStringFromClass([entryView class]) : @"(未找到)",
                 trayH, (unsigned long)trayCntHidden];
+            // v10.6.7b: 钉底结果 (直接看输入栏被挪了多少 / 有没有贴屏底)
+            @try {
+                UIWindow *wl = vc.view.window;
+                if (entryView && wl) {
+                    CGRect cv = [wl convertRect:entryView.bounds fromView:entryView];
+                    [[SVBManager shared] log:@"chat chrome 钉底: 框=(%.0f,%.0f %.0fx%.0f) 屏=%.0fx%.0f 安全底=%.0f 贴底=%d",
+                        cv.origin.x, cv.origin.y, cv.size.width, cv.size.height,
+                        wl.bounds.size.width, wl.bounds.size.height,
+                        wl.safeAreaInsets.bottom,
+                        (int)(CGRectGetMaxY(cv) >= wl.bounds.size.height - 60.0)];
+                }
+            } @catch (NSException *e) {}
         }
     } @catch (NSException *e) {}
 }
@@ -1944,7 +2009,9 @@ static char SVBDetectedCtxKey;
         SVBTranslucentChromeView(self.view);
         UIView *host = self.view.superview;
         if (host) SVBDeepProcessBottom(host, host, 0, NULL, NULL, NULL);
-        SVBPinEntryToBottom(self.view);
+        // v10.6.7b: 必须在**窗口坐标系**里算, 用 self.view 当参照会算成 0
+        UIWindow *win = self.view.window;
+        if (win) SVBPinEntryToBottom(self.view, win);
     } @catch (NSException *e) {}
 }
 - (void)viewWillAppear:(BOOL)animated {
