@@ -1198,6 +1198,9 @@ static NSInteger  gSVBLastLeaf = 0;
 static NSInteger  gSVBLastMode = 0;      // 0=整行 1=输入框本体 2=整个 entry
 static BOOL       gSVBLastDocked = NO;
 static __unsafe_unretained NSString *gSVBLastHost = nil;
+static CGRect     gSVBLastAfter;                    // v10.6.12: 位移施加后读回的框
+static BOOL       gSVBLastSelfOK = NO;              // v10.6.12: 自检 (有没有真的挪到位)
+static NSString  *gSVBLastTargetCls = nil;          // v10.6.12: 位移施加在哪个类上
 
 // v10.6.10 【核心】把输入栏**钉在屏幕底部 + 水平居中**。
 // 【历史】
@@ -1269,6 +1272,16 @@ static BOOL SVBPinEntryToBottom(UIView *entry, UIView *space) {
     CGRect content = CGRectMake(raw.origin.x + (cInEntry.origin.x - eb.origin.x),
                                 raw.origin.y + (cInEntry.origin.y - eb.origin.y),
                                 cInEntry.size.width, cInEntry.size.height);
+    // v10.6.12: 有胶囊就**只按胶囊本体**算 —— 用户看到的就是它。
+    // (字框/联合框都可能锚错: 实测最宽字框是居中的 => tx=0 => "还是在原位")
+    UIView *target = capView ?: entry;
+    if (capView) {
+        CGRect tb = target.bounds;
+        CGPoint tctr = [space convertPoint:target.center fromView:target.superview];
+        content = CGRectMake(tctr.x - tb.size.width / 2.0,
+                             tctr.y - tb.size.height / 2.0,
+                             tb.size.width, tb.size.height);
+    }
     CGFloat safeBot = space.safeAreaInsets.bottom;
     if (safeBot < 1.0) safeBot = 34.0;
     if (safeBot > 80.0) safeBot = 34.0;
@@ -1288,30 +1301,46 @@ static BOOL SVBPinEntryToBottom(UIView *entry, UIView *space) {
         if (ty >  160.0) ty =  160.0;        // 对称钳位 (v10.6.9 那条非对称的已删)
         if (ty < -160.0) ty = -160.0;
     }
-    // v10.6.10: 诊断快照
-    gSVBLastContent = cInEntry; gSVBLastField = field;
+    // v10.6.12: entry 上若还留着旧版本的位移, 先还原 —— 位移统一只施加在 target 上,
+    // 免得两条路径的位移叠加 (v10.6.8 的横跳就是这么来的)。
+    NSValue *evo = objc_getAssociatedObject(entry, &SVBOrigTfKey);
+    if (evo && target != entry) {
+        CGAffineTransform eb0 = evo.CGAffineTransformValue;
+        if (!CGAffineTransformEqualToTransform(entry.transform, eb0)) entry.transform = eb0;
+    }
+    // 诊断快照 (v10.6.10 起)
+    gSVBLastContent = content; gSVBLastField = field;
     gSVBLastTx = tx; gSVBLastTy = ty;
     gSVBLastLeaf = n; gSVBLastMode = mode;
     gSVBLastDocked = docked;
     gSVBLastHost = host ? NSStringFromClass([host class]) : nil;
-    if (fabs(tx) > 240.0) return NO;
+    gSVBLastTargetCls = NSStringFromClass([target class]);
+    if (fabs(tx) > 320.0) return NO;
     // 原始 transform 只记一次, 离开页面时还原
-    NSValue *ov = objc_getAssociatedObject(entry, &SVBOrigTfKey);
+    NSValue *ov = objc_getAssociatedObject(target, &SVBOrigTfKey);
     CGAffineTransform base = CGAffineTransformIdentity;
     if (ov) {
         base = ov.CGAffineTransformValue;
     } else {
-        base = entry.transform;
-        objc_setAssociatedObject(entry, &SVBOrigTfKey,
+        base = target.transform;
+        objc_setAssociatedObject(target, &SVBOrigTfKey,
             [NSValue valueWithCGAffineTransform:base], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         if (!SVBShiftedViews) SVBShiftedViews = [NSMutableArray new];
-        if (![SVBShiftedViews containsObject:entry]) [SVBShiftedViews addObject:entry];
+        if (![SVBShiftedViews containsObject:target]) [SVBShiftedViews addObject:target];
     }
     CGAffineTransform want = CGAffineTransformTranslate(base, tx, ty);
     // v10.6.9: 加 0.5pt 死区 —— 浮点噪声引起的"差之毫厘"不再触发赋值, 杜绝微抖
-    CGAffineTransform cur = entry.transform;
+    CGAffineTransform cur = target.transform;
     if (fabs(cur.tx - want.tx) > 0.5 || fabs(cur.ty - want.ty) > 0.5)
-        entry.transform = want;
+        target.transform = want;
+    // v10.6.12: 自检 —— 施加后立刻读回 (读回值本身就含 transform), 确认真的挪到位了
+    CGRect after = [space convertRect:target.bounds fromView:target];
+    gSVBLastAfter = after;
+    BOOL okX = (fabs(CGRectGetMidX(after) - W / 2.0) <= 3.0);
+    BOOL okY = YES;
+    if (docked && mode != 2)
+        okY = (fabs(CGRectGetMaxY(after) - (Hh - safeBot - 8.0)) <= 4.0);
+    gSVBLastSelfOK = (okX && okY);
     @try {
         static NSTimeInterval lastLeafLog = 0;
         NSTimeInterval nowL = [NSDate date].timeIntervalSince1970;
@@ -1797,16 +1826,21 @@ static void SVBDoChatChrome(UIViewController *vc) {
                         wl.safeAreaInsets.bottom,
                         (int)(CGRectGetMaxY(cv) >= wl.bounds.size.height - 60.0)];
                     // v10.6.10/11: 把"算出来的内容框/胶囊/tx/ty/当前transform"直接打出来
-                    [[SVBManager shared] log:@"chat chrome 钉底值: 内容框=(%.0f,%.0f %.0fx%.0f) 胶囊=(%.0f,%.0f %.0fx%.0f) 叶=%d 模式=%d tx=%.0f ty=%.0f tf=(%.1f,%.1f) 贴底=%d 宿主=%@",
+                    [[SVBManager shared] log:@"chat chrome 钉底值: 内容框=(%.0f,%.0f %.0fx%.0f) 胶囊=(%.0f,%.0f %.0fx%.0f) 叶=%d 模式=%d tx=%.0f ty=%.0f 贴底=%d 宿主=%@",
                         gSVBLastContent.origin.x, gSVBLastContent.origin.y,
                         gSVBLastContent.size.width, gSVBLastContent.size.height,
                         gSVBLastField.origin.x, gSVBLastField.origin.y,
                         gSVBLastField.size.width, gSVBLastField.size.height,
                         (int)gSVBLastLeaf, (int)gSVBLastMode,
-                        gSVBLastTx, gSVBLastTy,
-                        entryView.transform.tx, entryView.transform.ty,
-                        (int)gSVBLastDocked,
+                        gSVBLastTx, gSVBLastTy, (int)gSVBLastDocked,
                         gSVBLastHost ?: @"(无)"];
+                    // v10.6.12: 实况 —— 挪在谁身上 / 挪完在哪 / 自检过没过
+                    [[SVBManager shared] log:@"chat chrome 钉底实况: 目标=%@ 应用后=(%.0f,%.0f %.0fx%.0f) entryTf=(%.1f,%.1f) 自检=%d",
+                        gSVBLastTargetCls ?: @"(无)",
+                        gSVBLastAfter.origin.x, gSVBLastAfter.origin.y,
+                        gSVBLastAfter.size.width, gSVBLastAfter.size.height,
+                        entryView.transform.tx, entryView.transform.ty,
+                        (int)gSVBLastSelfOK];
                     // v10.6.11: 把所有字框的框打出来 —— 验证"胶囊"到底锚到了谁
                     [[SVBManager shared] log:@"chat chrome 字框清单: %@",
                         gSVBLastFields ?: @"(无)"];

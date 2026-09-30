@@ -1414,6 +1414,11 @@ static void SVBCollectToolbars(UIView *view, NSMutableArray<UIToolbar *> *out_, 
         }
         [self attachBackground:bg toViewController:vc];
         [bg configure];
+        // v10.6.12: 从别的界面退回时, 系统会把 AVPlayerLayer 的显示内容回收; 而重挂到
+        // collectionView.backgroundView 之后, configure 只在"播放器换了"时才重绑 =>
+        // 同一条播放器 => 层是空的 => 用户先看到白再等自愈。这里立刻补一次强绑。
+        // 只在"确实没画面"时才强绑 (playbackLooksBroken), 免得正常 apply 也被闪一下。
+        if ([bg playbackLooksBroken]) [bg reconnectPlayerForce:YES];
 
         vc.view.backgroundColor = [UIColor clearColor];
         [self clearBackgroundsOfView:vc.view depth:0];
@@ -2391,7 +2396,10 @@ static BOOL sSVBSweepCheckResult = NO;
 - (instancetype)initWithFrame:(CGRect)frame contextKey:(NSString *)key {
     if ((self = [super initWithFrame:frame])) {
         _contextKey = [key copy];
-        self.backgroundColor = [UIColor clearColor];
+        // v10.6.12: clearColor -> black。视频层是 ResizeAspectFill, 正常永远铺满看不见底;
+        // 而"还没出画面"的那一瞬间 (从别的界面退回来、系统回收了 AVPlayerLayer 内容)
+        // 原来会露出窗口白底 => 用户看到的「闪一下白」。换成黑底, 最多黑一帧, 不再闪白。
+        self.backgroundColor = [UIColor blackColor];
         self.userInteractionEnabled = NO; // 不拦截触摸
         AVPlayerLayer *videoLayer = [AVPlayerLayer layer];
         videoLayer.frame = self.bounds;
