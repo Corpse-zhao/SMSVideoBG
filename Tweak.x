@@ -51,6 +51,10 @@ static NSString *SVBContextForClassName(NSString *name) {
 
     // 对话详情 (优先级最高, Transcript 是聊天页核心类)
     if ([name containsString:@"Transcript"])  return SVBContextChat;
+    // v10.5.1: 诊断报告实测 CKChatController 之前落到 ctx=all, 于是 %hook UIViewController
+    // 的兜底分支会在它出现时把语境覆盖成 all -> 聊天页被当普通列表处理。补上判定。
+    if ([name containsString:@"ChatController"] || [name hasPrefix:@"CKChat"])
+        return SVBContextChat;
 
     // 特殊列表
     if ([name containsString:@"Junk"])            return SVBContextJunk;
@@ -593,25 +597,87 @@ static char SVBChromeActionBlockKey;
 }
 @end
 
-// v10.5.0: 只处理导航栏与输入栏, 用类名关键词 + 层级定位。
-// 已从踩坑记录继承的安全铁律:
-//   ① 绝不碰 UICollectionView 的 backgroundView / selectedBackgroundView 子树 (SIGABRT)
-//   ② 有视频背景视图的子树一律跳过 (别把视频藏了)
-//   ③ 键盘子树跳过 (拆了会毁键盘)
-static BOOL SVBIsInputBarClass(NSString *low) {
-    return [low containsString:@"input"] || [low containsString:@"sendbutton"] ||
-           [low containsString:@"messageentry"] || [low containsString:@"dock"] ||
-           [low containsString:@"bottombar"] || [low containsString:@"toolbar"] ||
-           [low containsString:@"accessory"] || [low containsString:@"quicklook"];
+// v10.5.1: 顶部 / 底部 chrome 改用「几何定位」—— 不再猜类名。
+// v10.5.0 实测无效的原因 (配合诊断报告 2026-09-30):
+//   ① 聊天页顶部那条**不是**标准 navigationBar, 底部输入条也是私有类 ——
+//      按类名关键词搜 / 取 navigationController.navigationBar 都找不到真身;
+//   ② 报告实测到的真实类名: CKChatController / CKMessageEntryView (输入栏 VC) /
+//      CKBrowserSwitcherFooterView (App 抽屉) / CKGradientView (渐变遮罩, 浅色下就是白)。
+// 判定规则: 条状 (高 22 ~ 屏高34%) + 全宽 (>=92%) + 落在顶部/底部条带。
+//
+// 安全铁律 (沿用):
+//   ① 遇到 UICollectionView / UITableView 直接跳过整棵子树 —— 列表内部 (日期分隔条 /
+//      气泡 / cell) 一概不碰, 这是防误伤最关键的一条
+//   ② 跳过 SVBVideoBackgroundView 子树 (别把视频藏了)
+//   ③ 跳过 keyboard 子树
+//   ④ 系统托管 cell backgroundView / selectedBackgroundView 子树绝不碰 (SIGABRT 史)
+static BOOL SVBIsListClass(UIView *v) {
+    return [v isKindOfClass:[UICollectionView class]] ||
+           [v isKindOfClass:[UITableView class]];
 }
-// 注: 顶部导航栏不走「类名搜索」—— 直接拿 vc.navigationController.navigationBar,
-// 比在视图树里猜类名可靠得多 (SVBMapNavBar 里就是这么做的)。
 
-// 取「容器自身」的矩形 (含其父链上不可见部分不管, 直接用 window 坐标)
-static CGRect SVBWindowRect(UIView *v) {
-    UIWindow *w = v.window ?: UIApplication.sharedApplication.windows.firstObject;
-    if (!w) return CGRectZero;
-    return [v convertRect:v.bounds toView:w];
+static BOOL SVBIsSystemManagedCellBg(UIView *v) {
+    UIView *pv = v.superview;
+    if (![pv isKindOfClass:[UICollectionViewCell class]]) return NO;
+    UICollectionViewCell *pc = (UICollectionViewCell *)pv;
+    return (pc.backgroundView && v == pc.backgroundView) ||
+           (pc.selectedBackgroundView && v == pc.selectedBackgroundView);
+}
+
+// 递归扫「条状全宽容器」+「已知遮罩类」。命中即收, 不再往里钻。
+static void SVBScanBands(UIView *root, UIView *space, NSInteger depth,
+                         NSMutableArray<UIView *> *tops,
+                         NSMutableArray<UIView *> *bottoms,
+                         NSMutableArray<UIView *> *masks) {
+    if (!root || depth > 6) return;
+    CGRect sb = space.bounds;
+    CGFloat W = sb.size.width, H = sb.size.height;
+    if (W < 1 || H < 1) return;
+    CGFloat safeTop = space.safeAreaInsets.top;    if (safeTop < 1) safeTop = 44.0;
+    CGFloat safeBot = space.safeAreaInsets.bottom; if (safeBot < 1) safeBot = 34.0;
+    CGFloat topLimit    = safeTop + 74.0;               // 顶条下沿的允许上限
+    CGFloat bottomStart = H - (safeBot + 110.0);        // 底条上沿的允许下限
+
+    for (UIView *sub in root.subviews) {
+        if ([sub isKindOfClass:[SVBVideoBackgroundView class]]) continue;
+        if (sub.hidden) continue;
+        if (SVBIsListClass(sub)) continue;              // 列表整棵子树跳过 (不递归)
+        if (SVBIsSystemManagedCellBg(sub)) continue;
+        NSString *cls = NSStringFromClass([sub class]);
+        NSString *low = cls.lowercaseString;
+        if ([low containsString:@"keyboard"]) continue;
+
+        // 已知遮罩 (诊断报告实测 CKGradientView = 顶部/底部渐变, 浅色模式下就是那条白):
+        // 一律直接藏, 不参与几何判定
+        if ([cls hasPrefix:@"CKGradientView"]) { [masks addObject:sub]; continue; }
+
+        CGRect f = [sub convertRect:sub.bounds toView:space];
+        BOOL fullWidth = f.size.width >= W * 0.92;
+        BOOL strip = (f.size.height >= 22.0) && (f.size.height <= H * 0.34);
+        if (fullWidth && strip && CGRectIntersectsRect(f, sb)) {
+            // 顶条: 顶边贴屏幕最上, 或底边不超过安全区 + 74
+            if (f.origin.y <= safeTop * 0.5 || CGRectGetMaxY(f) <= topLimit) {
+                [tops addObject:sub];
+                continue;
+            }
+            if (f.origin.y >= bottomStart) { [bottoms addObject:sub]; continue; }
+        }
+        SVBScanBands(sub, space, depth + 1, tops, bottoms, masks);
+    }
+}
+
+// 从顶条子树里抓「最长的一段文字」当标题 (联系人名 / 群名 / Apple)
+static void SVBPickTitleText(UIView *v, NSInteger d, NSString **best, UIFont **font) {
+    if (!v || d > 6) return;
+    if ([v isKindOfClass:[UILabel class]]) {
+        UILabel *l = (UILabel *)v;
+        NSString *t = l.text;
+        if (t.length && (!*best || t.length > (*best).length)) {
+            *best = t;
+            if (font) *font = l.font;
+        }
+    }
+    for (UIView *s in v.subviews) SVBPickTitleText(s, d + 1, best, font);
 }
 
 // 把 chrome 容器藏掉 (alpha=0 而非 hidden, 保证它仍参与布局 —— 我们要读它的 frame)
@@ -626,24 +692,21 @@ static void SVBHideChromeView(UIView *v) {
                                  OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         if (![SVBHiddenChrome containsObject:v]) [SVBHiddenChrome addObject:v];
     }
-    v.alpha = 0.0;   // alpha=0 而非 hidden: 视图仍参与布局, 我们才能读到它的 frame
+    v.alpha = 0.0;
 }
 
-#pragma mark - 顶部导航栏映射
+#pragma mark - 顶部条映射 (返回按钮 + 名字)
 
-static void SVBMapNavBar(UIViewController *vc) {
-    UINavigationBar *nav = vc.navigationController.navigationBar;
-    if (!nav || !nav.window) return;
-
-    // 导航栏整块藏掉 —— 材质、发丝线、白底一并消失
-    SVBHideChromeView(nav);
-
-    UIView *host = nav.superview ?: vc.view;
-    CGRect navRect = SVBWindowRect(nav);
-    if (navRect.size.height < 1) return;
-
-    // 映射层: 一条覆盖导航栏区域的透明视图, 里面重画标题 + 返回按钮
+static void SVBMapChatTop(UIViewController *vc, UIView *topBand,
+                          NSString *titleText, UIFont *titleFont) {
+    UIView *host = topBand.superview;
+    if (!host) return;
     UIView *layer = objc_getAssociatedObject(vc, &SVBChromeMappedKey);
+    if (layer && layer.superview && layer.superview != host) {
+        [layer removeFromSuperview];
+        objc_setAssociatedObject(vc, &SVBChromeMappedKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        layer = nil;
+    }
     if (!layer || !layer.superview) {
         layer = [UIView new];
         layer.tag = 0x5356424E;                 // 'SVBN'
@@ -651,17 +714,17 @@ static void SVBMapNavBar(UIViewController *vc) {
         [host addSubview:layer];
         objc_setAssociatedObject(vc, &SVBChromeMappedKey, layer,
                                  OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        [SVBMappedChrome addObject:layer];
+        if (!SVBMappedChrome) SVBMappedChrome = [NSMutableArray new];
+        if (![SVBMappedChrome containsObject:layer]) [SVBMappedChrome addObject:layer];
     }
-    // 映射层坐标: 用 nav 在 host 里的位置
-    CGRect lf = [nav convertRect:nav.bounds toView:host];
+    CGRect lf = [topBand convertRect:topBand.bounds toView:host];
     if (!CGRectEqualToRect(layer.frame, lf)) layer.frame = lf;
     layer.backgroundColor = [UIColor clearColor];
 
     BOOL dark = (vc.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark);
     UIColor *fg = dark ? [UIColor whiteColor] : [UIColor blackColor];
 
-    // ---- 标题 (联系人名) ----
+    // ---- 标题 ----
     UILabel *title = (UILabel *)[layer viewWithTag:0x53564254];   // 'SVBT'
     if (!title) {
         title = [UILabel new];
@@ -669,34 +732,17 @@ static void SVBMapNavBar(UIViewController *vc) {
         title.textAlignment = NSTextAlignmentCenter;
         [layer addSubview:title];
     }
-    // iOS16 导航栏标题常拆成 UILabel; 直接搜 nav 子树里的 label, 取最长的那条当标题
-    NSString *titleText = nil;
-    UIFont *titleFont = nil;
-    for (UIView *s in nav.subviews) {
-        if ([s isKindOfClass:[UILabel class]]) {
-            UILabel *l = (UILabel *)s;
-            if (l.text.length && (!titleText || l.text.length > titleText.length)) {
-                titleText = l.text;
-                titleFont = l.font;
-            }
-        }
-    }
-    if (!titleText) {
-        // 兜底: vc.navigationItem.title (多数情况系统已同步进 label)
-        NSString *t = vc.navigationItem.title;
-        if (t.length) titleText = t;
-    }
     title.text = titleText ?: @"";
     title.textColor = fg;
     title.font = titleFont ?: [UIFont boldSystemFontOfSize:17];
-    CGSize need = [title sizeThatFits:CGSizeMake(lf.size.width - 140, CGFLOAT_MAX)];
-    title.frame = CGRectMake((lf.size.width - need.width) / 2.0,
-                             (lf.size.height - need.height) / 2.0 + lf.size.height * 0.18,
+    CGSize need = [title sizeThatFits:CGSizeMake(MAX(40.0, lf.size.width - 140.0), CGFLOAT_MAX)];
+    title.frame = CGRectMake(floor((lf.size.width - need.width) / 2.0),
+                             floor((lf.size.height - need.height) / 2.0 + lf.size.height * 0.16),
                              need.width, need.height);
 
-    // ---- 返回按钮 (‹ 箭头 + 返回) ----
-    // 用 UIAction 闭包而不是 target-action: 闭包持有 vc 的弱引用, 不需要额外
-    // 目标对象, 也不会因为映射层重建而野指针。
+    // ---- 返回按钮 (‹) ----
+    // 用辅助对象转发 block (UIAction.identifier 只读, 且 actionWithTitle:image: 传 nil
+    // 会撞 -Wnonnull —— 两坑都踩过, 见 skill 14.8)。
     UIButton *back = (UIButton *)[layer viewWithTag:0x53564242];  // 'SVBB'
     if (!back) {
         back = [UIButton buttonWithType:UIButtonTypeSystem];
@@ -706,9 +752,7 @@ static void SVBMapNavBar(UIViewController *vc) {
     [back setTitle:@"‹" forState:UIControlStateNormal];
     [back setTitleColor:fg forState:UIControlStateNormal];
     back.titleLabel.font = [UIFont systemFontOfSize:30 weight:UIFontWeightRegular];
-    back.frame = CGRectMake(6, 0, 44, lf.size.height);
-    // 点它 = 原生返回 (走 navigationController pop, 不改系统行为)。
-    // 用辅助对象转发 block: 重复经过这里时先把旧的 block 换掉即可, 不会叠加 target。
+    back.frame = CGRectMake(6, 0, 46, lf.size.height);
     __weak UIViewController *wvc = vc;
     objc_setAssociatedObject(back, &SVBChromeActionBlockKey, ^{
         UIViewController *s = wvc;
@@ -716,45 +760,13 @@ static void SVBMapNavBar(UIViewController *vc) {
         @try { [s.navigationController popViewControllerAnimated:YES]; }
         @catch (NSException *e) {}
     }, OBJC_ASSOCIATION_COPY_NONATOMIC);
-    // 注: action:nil 会撞 -Wnonnull, 直接指定 selector 移除 (没挂过也无害)
+    // 注: action:nil 会撞 -Wnonnull, 必须写明确 selector
     [back removeTarget:[SVBChromeActionProxy shared]
                 action:@selector(handle:)
       forControlEvents:UIControlEventTouchUpInside];
     [back addTarget:[SVBChromeActionProxy shared]
              action:@selector(handle:)
    forControlEvents:UIControlEventTouchUpInside];
-}
-
-#pragma mark - 底部输入栏映射
-
-static void SVBMapInputBar(UIView *root, NSInteger depth) {
-    if (!root || depth > 12) return;
-    for (UIView *sub in [root.subviews copy]) {
-        if ([sub isKindOfClass:[SVBVideoBackgroundView class]]) continue;
-        NSString *low = NSStringFromClass([sub class]).lowercaseString;
-        if ([low containsString:@"keyboard"]) continue;
-        // 别把消息列表藏了
-        if ([sub isKindOfClass:[UICollectionView class]] ||
-            [sub isKindOfClass:[UITableView class]]) continue;
-        // 系统托管 cell 背景子树绝不碰
-        UIView *pv = sub.superview;
-        if ([pv isKindOfClass:[UICollectionViewCell class]]) {
-            UICollectionViewCell *pc = (UICollectionViewCell *)pv;
-            if ((pc.backgroundView && sub == pc.backgroundView) ||
-                (pc.selectedBackgroundView && sub == pc.selectedBackgroundView)) continue;
-        }
-        // 输入栏容器: 必须位于屏幕下半部 (键盘/输入条都在底部), 且类名命中。
-        // 注意用 window 的高度而不是 UIScreen —— 分屏/横屏时两者不一致。
-        CGRect wr = SVBWindowRect(sub);
-        CGFloat winH = (sub.window ?: UIApplication.sharedApplication.windows.firstObject).bounds.size.height;
-        if (winH < 1) winH = UIScreen.mainScreen.bounds.size.height;
-        BOOL inBottomHalf = (wr.origin.y + wr.size.height * 0.5) > winH * 0.55;
-        if (inBottomHalf && SVBIsInputBarClass(low) && wr.size.height >= 30) {
-            SVBHideChromeView(sub);
-            return;   // 找到一个输入栏容器就够 (再往里走会碰到胶囊内部控件)
-        }
-        SVBMapInputBar(sub, depth + 1);
-    }
 }
 
 static void SVBClearMappedChrome(void) {
@@ -774,19 +786,54 @@ static void SVBClearMappedChrome(void) {
     [SVBHiddenChrome removeAllObjects];
 }
 
+// 一轮完整处理: 扫 -> (兜底 nav bar) -> 抓标题 -> 藏 -> 映射
+static void SVBDoChatChrome(UIViewController *vc) {
+    if (!vc || !vc.view) return;
+    NSMutableArray<UIView *> *tops = [NSMutableArray array];
+    NSMutableArray<UIView *> *bottoms = [NSMutableArray array];
+    NSMutableArray<UIView *> *masks = [NSMutableArray array];
+    @try {
+        SVBScanBands(vc.view, vc.view, 0, tops, bottoms, masks);
+    } @catch (NSException *e) {}
+
+    // 几何没找到顶条 -> 退回标准导航栏兜底 (有则藏着无害)
+    if (!tops.count) {
+        UINavigationBar *nav = vc.navigationController.navigationBar;
+        if (nav && nav.window && nav.superview) [tops addObject:nav];
+    }
+    UIView *top = tops.firstObject;
+
+    // 标题先抓后藏 (alpha 不影响读 text)
+    NSString *titleText = nil;
+    UIFont *titleFont = nil;
+    if (top) {
+        @try { SVBPickTitleText(top, 0, &titleText, &titleFont); } @catch (NSException *e) {}
+    }
+    if (!titleText.length) {
+        NSString *t = vc.title;
+        if (!t.length) t = vc.navigationItem.title;
+        if (t.length) titleText = t;
+    }
+
+    for (UIView *v in tops)    SVBHideChromeView(v);
+    for (UIView *v in bottoms) SVBHideChromeView(v);
+    for (UIView *v in masks)   SVBHideChromeView(v);
+
+    if (top) {
+        @try { SVBMapChatTop(vc, top, titleText, titleFont); } @catch (NSException *e) {}
+    }
+}
+
 // 入口: 进对话时调用一次; 与气泡一样做延迟补扫 (系统重建 chrome 后再藏)
 static void SVBApplyChatChrome(UIViewController *vc) {
     if (!vc || !vc.view || !vc.view.window) return;
     if (!SVBBubbleSweepActive()) { SVBClearMappedChrome(); return; }
     if (!SVBHiddenChrome) SVBHiddenChrome = [NSMutableArray new];
     if (!SVBMappedChrome) SVBMappedChrome = [NSMutableArray new];
-    @try {
-        SVBMapNavBar(vc);
-        SVBMapInputBar(vc.view.window, 0);
-    } @catch (NSException *e) {}
+    @try { SVBDoChatChrome(vc); } @catch (NSException *e) {}
     __weak UIViewController *wvc = vc;
-    NSTimeInterval delays[3] = {0.4, 1.2, 2.5};
-    for (int i = 0; i < 3; i++) {
+    NSTimeInterval delays[4] = {0.35, 0.9, 1.8, 3.0};
+    for (int i = 0; i < 4; i++) {
         NSTimeInterval t = delays[i];
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(t * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
@@ -794,8 +841,7 @@ static void SVBApplyChatChrome(UIViewController *vc) {
                 UIViewController *s = wvc;
                 if (!s || !s.isViewLoaded || !s.view.window) return;
                 if (!SVBBubbleSweepActive()) { SVBClearMappedChrome(); return; }
-                SVBMapNavBar(s);
-                SVBMapInputBar(s.view.window, 0);
+                SVBDoChatChrome(s);
             } @catch (NSException *e) {}
         });
     }
