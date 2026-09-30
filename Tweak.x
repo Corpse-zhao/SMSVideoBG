@@ -688,16 +688,18 @@ static void SVBMapNavBar(UIViewController *vc) {
     back.titleLabel.font = [UIFont systemFontOfSize:30 weight:UIFontWeightRegular];
     back.frame = CGRectMake(6, 0, 44, lf.size.height);
     if (@available(iOS 14.0, *)) {
-        // 先摘掉上一轮挂的同名 action (映射层会重复经过这里), 避免叠加
+        // 先摘掉上一轮挂的同名 action (映射层会重复经过这里), 避免叠加。
+        // 注: UIAction.identifier 是 readonly, 只能在构造时给 —— 用
+        // actionWithTitle:image:identifier:handler: 这个带 identifier 的构造器。
         [back removeActionForIdentifier:@"svbBack" forControlEvents:UIControlEventTouchUpInside];
         __weak UIViewController *wvc = vc;
-        UIAction *act = [UIAction actionWithHandler:^(__kindof UIAction *a) {
+        UIAction *act = [UIAction actionWithTitle:nil image:nil identifier:@"svbBack"
+                                          handler:^(__kindof UIAction *a) {
             UIViewController *s = wvc;
             if (!s) return;
             @try { [s.navigationController popViewControllerAnimated:YES]; }
             @catch (NSException *e) {}
         }];
-        act.identifier = @"svbBack";
         [back addAction:act forControlEvents:UIControlEventTouchUpInside];
     }
 }
