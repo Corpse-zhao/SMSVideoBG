@@ -305,6 +305,18 @@ static BOOL SVBMainSweepActive(void) {
     return m.masterEnabled && [m isEnabledForContext:SVBContextMain];
 }
 
+// v10.4.0h: 信息侧「任意页面」清扫门 —— 只要本进程挂着可见的视频背景
+// (哪个语境都行), 列表滚动时重铺的白色卡片就该被清。
+// 此前容器清扫/装饰视图拦截只认「主页面」语境: 用户在「所有信息/已读/未知…」
+// 列表里下滑, 系统重铺的分区白卡没人拦 -> 成条成块的白带 (用户实测视频实锤)。
+// (hasVisibleBackgroundViews 自带 0.5s 缓存, 高频调用无开销)
+static BOOL SVBSMSListSweepActive(void) {
+    if (!SVBIsLicensed()) return NO;
+    SVBManager *m = [SVBManager shared];
+    if (!m.masterEnabled) return NO;
+    return [m hasVisibleBackgroundViews];
+}
+
 // v11.0.1: 备忘录清扫 gate —— 备忘录总开关开 && 本进程有挂载且可见的背景视图。
 // (没有可见背景时绝不清白卡, 否则页面露黑底; hasVisibleBackgroundViews 带 0.5s 缓存)
 static BOOL SVBNotesSweepActive(void) {
@@ -317,9 +329,10 @@ static BOOL SVBNotesSweepActive(void) {
 static void SVBClearContainerBGs(UIView *v, NSInteger depth) {
     if (!v || depth > 14) return;
     if ([v isKindOfClass:[SVBVideoBackgroundView class]]) return;
-    // v11.0.1: 双宿主 gate —— 信息进程看主页面 sweep, 备忘录进程看备忘录 sweep
+    // v11.0.1: 双宿主 gate —— 信息进程看「主页面 或 任意有背景的列表页」sweep,
+    // 备忘录进程看备忘录 sweep (v10.4.0h: 信息侧不再只认主页面)
     if (SVBIsSMSProcess()) {
-        if (!SVBMainSweepActive()) { SVBRestoreHiddenCards(); return; }
+        if (!SVBMainSweepActive() && !SVBSMSListSweepActive()) { SVBRestoreHiddenCards(); return; }
     } else {
         if (!SVBNotesSweepActive()) { SVBRestoreHiddenCards(); return; }
     }
@@ -1113,7 +1126,7 @@ static char SVBDetectedCtxKey;
     %orig;
     @try {
         if (SVBIsSMSProcess()) {
-            if (!SVBMainSweepActive()) return;
+            if (!SVBMainSweepActive() && !SVBSMSListSweepActive()) return;
         } else if (SVBIsNotesProcess()) {
             if (!SVBNotesSweepActive()) return;
         } else {
@@ -1121,6 +1134,109 @@ static char SVBDetectedCtxKey;
         }
         if (color && ![color isEqual:[UIColor clearColor]])
             %orig([UIColor clearColor]);
+    } @catch (NSException *e) {}
+}
+// v10.4.0h: 布局期间就地再清一次 —— 滚动/复用会新建装饰视图, 它的白底可能
+// 不是走 setBackgroundColor: 铺的 (或铺得比我们的钩子早一帧), 只在布局末尾
+// 兜一道, 白带就不会先显示出来。(装饰视图不是 cell, 改色不触发集合布局重入)
+- (void)layoutSubviews {
+    %orig;
+    @try {
+        if (SVBIsSMSProcess()) {
+            if (!SVBMainSweepActive() && !SVBSMSListSweepActive()) return;
+        } else if (SVBIsNotesProcess()) {
+            if (!SVBNotesSweepActive()) return;
+        } else {
+            return;
+        }
+        if (self.backgroundColor && ![self.backgroundColor isEqual:[UIColor clearColor]])
+            self.backgroundColor = [UIColor clearColor];
+        if (self.layer.backgroundColor &&
+            !CGColorEqualToColor(self.layer.backgroundColor, [UIColor clearColor].CGColor))
+            self.layer.backgroundColor = NULL;
+    } @catch (NSException *e) {}
+}
+%end
+
+// ------------------------------------------------------------------
+// v10.4.0h: 滚动期间的白带兜底 —— 系统在滚动/回弹时重铺白色卡片 (分区底、cell 容器),
+// 往往比我们的「源头拦截」早一帧显示出来, 观感就是一条条白带。这里在滚动回调里做
+// **极轻量**清扫: 只抹容器自身底色, 不碰系统托管的 backgroundView/selectedBackgroundView
+// 子树、不藏卡片 —— 避免 v1.7.21 那类「布局重入 -> SIGABRT」。
+// 节流 0.12s, 且只在「本进程有可见视频背景」时才跑。
+// ------------------------------------------------------------------
+static CFAbsoluteTime sSVBLastScrollSweep = 0;
+
+static void SVBScrollSweepList(UIView *scrollView) {
+    for (UIView *v in scrollView.subviews) {
+        if ([v isKindOfClass:[SVBVideoBackgroundView class]]) continue;
+        if ([v isKindOfClass:[UICollectionViewCell class]] ||
+            [v isKindOfClass:[UITableViewCell class]]) {
+            // cell 本体 + contentView 底色 (改 UIView 底色不走集合布局失效, 安全)
+            if (v.backgroundColor && ![v.backgroundColor isEqual:[UIColor clearColor]])
+                v.backgroundColor = [UIColor clearColor];
+            UIView *cv = [(UITableViewCell *)v contentView];
+            if (cv.backgroundColor && ![cv.backgroundColor isEqual:[UIColor clearColor]])
+                cv.backgroundColor = [UIColor clearColor];
+            // cell 内部一层容器 (系统白卡/分区底) 浅清, 跳过文字图标等受保护控件
+            for (UIView *s in v.subviews) {
+                if (s == cv) continue;
+                if ([s isKindOfClass:[SVBVideoBackgroundView class]]) continue;
+                if ([s isKindOfClass:[UILabel class]] || [s isKindOfClass:[UIImageView class]] ||
+                    [s isKindOfClass:[UIControl class]] || [s isKindOfClass:[UITextField class]] ||
+                    [s isKindOfClass:[UIVisualEffectView class]]) continue;
+                if (s.backgroundColor && ![s.backgroundColor isEqual:[UIColor clearColor]])
+                    s.backgroundColor = [UIColor clearColor];
+                if (s.layer.backgroundColor &&
+                    !CGColorEqualToColor(s.layer.backgroundColor, [UIColor clearColor].CGColor))
+                    s.layer.backgroundColor = NULL;
+            }
+        } else {
+            // 装饰视图/容器 (非 cell): 底色 + layer 底色一起抹
+            if (v.backgroundColor && ![v.backgroundColor isEqual:[UIColor clearColor]])
+                v.backgroundColor = [UIColor clearColor];
+            if (v.layer.backgroundColor &&
+                !CGColorEqualToColor(v.layer.backgroundColor, [UIColor clearColor].CGColor))
+                v.layer.backgroundColor = NULL;
+        }
+    }
+}
+
+static void SVBScrollSweepIfNeeded(UIScrollView *sv) {
+    if (!sv) return;
+    if (!SVBIsSMSProcess() && !SVBIsNotesProcess()) return;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (now - sSVBLastScrollSweep < 0.12) return;
+    if (SVBIsSMSProcess()) {
+        if (!SVBSMSListSweepActive()) return;
+    } else {
+        if (!SVBNotesSweepActive()) return;
+    }
+    sSVBLastScrollSweep = now;
+    @try { SVBScrollSweepList(sv); } @catch (NSException *e) {}
+}
+
+%hook UIScrollView
+// 手指拖动/减速期间 UIKit 走 setBounds:, 程序化滚动走 setContentOffset: —— 两个都接
+- (void)setBounds:(CGRect)bounds {
+    %orig;
+    @try {
+        if ([self isKindOfClass:[UICollectionView class]] ||
+            [self isKindOfClass:[UITableView class]]) SVBScrollSweepIfNeeded(self);
+    } @catch (NSException *e) {}
+}
+- (void)setContentOffset:(CGPoint)contentOffset {
+    %orig;
+    @try {
+        if ([self isKindOfClass:[UICollectionView class]] ||
+            [self isKindOfClass:[UITableView class]]) SVBScrollSweepIfNeeded(self);
+    } @catch (NSException *e) {}
+}
+- (void)setContentOffset:(CGPoint)contentOffset animated:(BOOL)animated {
+    %orig;
+    @try {
+        if ([self isKindOfClass:[UICollectionView class]] ||
+            [self isKindOfClass:[UITableView class]]) SVBScrollSweepIfNeeded(self);
     } @catch (NSException *e) {}
 }
 %end
