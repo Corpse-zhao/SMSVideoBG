@@ -579,6 +579,8 @@ static NSMutableArray<UIView *> *SVBTranslucentChrome;
 static char SVBTransBgKey;
 static char SVBTransLayerBgKey;
 static char SVBIconTrayKey;                 // v10.6.3: 标记「底部 App 抽屉」视图
+static NSMutableArray<UIView *> *SVBShiftedViews;   // v10.6.5: 被 transform 下移过的输入栏
+static char SVBShiftKey;                          // v10.6.5: 存原始 transform 以便还原
 
 // 返回按钮的点击目标: UIAction 的 identifier 是 readonly 且 actionWithTitle:image:
 // 传 nil 会撞 -Wnonnull (CI 开了 -Werror), 干脆用一个常驻辅助对象 + target-action,
@@ -1201,6 +1203,14 @@ static void SVBClearMappedChrome(void) {
         objc_setAssociatedObject(v, &SVBChromeHiddenKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
     [SVBHiddenChrome removeAllObjects];
+    // v10.6.5: 还原被下移过的输入栏
+    for (UIView *v in [SVBShiftedViews copy]) {
+        if (!v.superview) continue;
+        NSValue *iv = objc_getAssociatedObject(v, &SVBShiftKey);
+        if (iv) v.transform = iv.CGAffineTransformValue;
+        objc_setAssociatedObject(v, &SVBShiftKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    [SVBShiftedViews removeAllObjects];
 }
 
 // v10.6.3: 系统导航栏**没**显示号码时, 直接从会话对象里把对方号码取出来。
@@ -1337,13 +1347,38 @@ static void SVBDoChatChrome(UIViewController *vc) {
     }
     // v10.6.2: 底条**不再 alpha=0** —— 用户要看到并用到底部输入框 / 上传照片 /
     // 下面那一排功能键。改成「只清掉容器自身白底 + 内部 bar 背景层」, 控件原样保留。
+    // v10.6.5: 用户实测「最底下一栏还是没任何变化」——
+    // 说明我们清了半天的那个视图并不是那条白的来源(透明化两轮都没触达)。
+    // 按用户明确给出的 fallback 走: **整栏隐藏**, 并把输入栏下移填补空出来的位置。
+    UIView *entryView = nil;
+    CGFloat trayH = 0.0;
+    NSUInteger trayCntHidden = 0;
     for (UIView *v in bottoms) {
         SVBTranslucentChromeView(v);
-        // v10.6.4: 判据从「类名/打标」改成「子树里有没有文字输入控件」——
-        //   含输入控件 => 输入栏(CKMessageEntryView), 用户说它已经完美, 保持不动;
-        //   不含      => App 抽屉(功能键那一排), 做**深度**透明化(含摘毛玻璃)。
-        // 上一版只靠 BrowserSwitcher 打标, 那个 VC 根本没被识别到, 所以白条一直在。
-        if (!SVBSubtreeHasTextInput(v, 0)) SVBTranslucentIconTray(v, 0);
+        if (SVBSubtreeHasTextInput(v, 0)) {
+            if (!entryView) entryView = v;               // 输入栏: 保留, 只清背景
+        } else {
+            SVBTranslucentIconTray(v, 0);                // 仍然先试着透明化(无害)
+            SVBHideChromeView(v);                        // v10.6.5: 整栏隐藏
+            trayCntHidden++;
+            // 取「抽屉本体」的高度(限制在 20~120 之间, 排除把输入栏也包进去的父容器)
+            CGFloat h = v.bounds.size.height;
+            if (h >= 20.0 && h <= 120.0)
+                trayH = (trayH < 1.0) ? h : MIN(trayH, h);
+        }
+    }
+    // v10.6.5: 输入栏下移到最底下。用 transform 而不是改 frame/约束 ——
+    // transform 独立于 Auto Layout, 系统重排时不会被覆盖。
+    if (entryView && trayH > 8.0) {
+        if (!SVBShiftedViews) SVBShiftedViews = [NSMutableArray new];
+        if (!objc_getAssociatedObject(entryView, &SVBShiftKey)) {
+            objc_setAssociatedObject(entryView, &SVBShiftKey,
+                [NSValue valueWithCGAffineTransform:entryView.transform],
+                OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            if (![SVBShiftedViews containsObject:entryView])
+                [SVBShiftedViews addObject:entryView];
+        }
+        entryView.transform = CGAffineTransformMakeTranslation(0, trayH);
     }
 
     // v10.6.3: 系统导航栏的返回键/标题此刻是否真的可见 -> 决定自绘层要不要画
@@ -1418,6 +1453,10 @@ static void SVBDoChatChrome(UIViewController *vc) {
                                      (int)SVBSubtreeHasTextInput(v, 0), v.bounds.size.height];
             [[SVBManager shared] log:@"chat chrome 底条明细: %@",
                 bd.length ? bd : @"(无)"];
+            // v10.6.5: 抽屉隐藏 + 输入栏下移的结果 (entryView/trayH 就在本函数作用域内)
+            [[SVBManager shared] log:@"chat chrome 底条处理: 输入栏=%@ 抽屉高=%.0f 隐藏数=%lu",
+                entryView ? NSStringFromClass([entryView class]) : @"(未找到)",
+                trayH, (unsigned long)trayCntHidden];
         }
     } @catch (NSException *e) {}
 }
@@ -1471,6 +1510,7 @@ static void SVBApplyChatChrome(UIViewController *vc) {
 @interface CKTranscriptController : UIViewController @end
 @interface CKConversationListCollectionViewController : UIViewController @end
 @interface CKChatController : UIViewController @end
+@interface CKMessageEntryView : UIViewController @end
 
 #define SVB_SMS_GUARD() if (!SVBIsSMSProcess()) return;
 #define SVB_SAFE_APPLY(ctx) @try { \
@@ -1719,6 +1759,26 @@ static char SVBDetectedCtxKey;
     SVBRestoreChatBlur();
     SVBRestoreMappedBalloons();   // 撤掉气泡隐藏与文字映射
     SVBClearMappedChrome();       // 还原导航栏/输入栏
+}
+%end
+
+// v10.6.5: 输入栏的「首帧闪白」。
+// 输入栏是 inputAccessoryView, 它出现在屏幕上的**第一帧**还带着系统白底;
+// 而主链路要等 viewDidAppear 之后的补扫才去清 => 那一帧被用户看见了(闪一下白)。
+// 直接在输入栏 VC 自己的 viewWillAppear / viewDidAppear 里清, 赶在首帧之前。
+// (Logos 对不存在的类会静默跳过, 所以写死这个类名不会崩, 只是不生效。)
+%hook CKMessageEntryView
+- (void)viewWillAppear:(BOOL)animated {
+    %orig;
+    SVB_SMS_GUARD()
+    if (!SVBBubbleSweepActive()) return;
+    @try { SVBTranslucentChromeView(self.view); } @catch (NSException *e) {}
+}
+- (void)viewDidAppear:(BOOL)animated {
+    %orig;
+    SVB_SMS_GUARD()
+    if (!SVBBubbleSweepActive()) return;
+    @try { SVBTranslucentChromeView(self.view); } @catch (NSException *e) {}
 }
 %end
 
