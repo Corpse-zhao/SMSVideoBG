@@ -830,8 +830,7 @@ BOOL SVBDirWritablePath(NSString *dir) {
     NSString *bid = SVBHostBundleIdentifier();
     NSString *host = [bid isEqualToString:SVB_SMS_BUNDLE_ID] ? @"信息App"
                    : ([bid isEqualToString:SVB_APP_BUNDLE_ID] ? @"控制App"
-                   : ([bid isEqualToString:@"com.apple.mobilenotes"] ? @"备忘录(注入探针)"
-                   : (bid.length ? bid : @"未知进程")));
+                   : (bid.length ? bid : @"未知进程"));
     NSMutableString *s = [NSMutableString string];
     [s appendFormat:@"SMSVideoBG v%@ · 已注入【%@】pid %d\n", SVB_VERSION, host, (int)getpid()];
     [s appendString:[self rootsSummaryForContext:ctx ?: SVBContextAll]];

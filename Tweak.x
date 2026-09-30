@@ -12,12 +12,9 @@
 //  - 所有 Hook 均有异常保护, 不影响宿主 App 正常启动
 //
 //  v1.3 诊断强化:
-//   1. filter 里除 com.apple.MobileSMS 外还挂了 com.apple.mobilenotes
-//      作为「注入探针」: 打开备忘录若也能看到诊断横幅, 说明注入管线本身
-//      是通的, 问题只在信息App 这一侧 (反之说明 dylib 根本没被加载)。
-//   2. 只在信息App 进程里做界面 Hook (SVBIsSMSProcess 守卫), 其它进程
-//      只写心跳 + 显示横幅, 不干扰宿主。
-//   3. 进 App 后窗口顶部会出现一条可点关闭的横幅, 显示注入状态与各素材根
+//   1. 只在信息App 进程里做界面 Hook (SVBIsSMSProcess 守卫), 其它被注入
+//      进程只写心跳 + 显示横幅, 不干扰宿主。
+//   2. 进 App 后窗口顶部会出现一条可点关闭的横幅, 显示注入状态与各素材根
 //      的可见性 —— 这是判断「插件到底进没进信息App」最直接的证据。
 // ============================================================
 
@@ -1061,7 +1058,7 @@ static void SVBScrollSweepIfNeeded(UIScrollView *sv) {
 
 // ------------------------------------------------------------------
 // 插件入口: 写心跳 + 挂横幅 + 注册 Darwin 通知
-// 这段在「任何被注入的进程」里都会跑 (信息App / 备忘录探针 / 其它)
+// 这段在「任何被注入的进程」里都会跑 (信息App / 控制App / 其它)
 // ------------------------------------------------------------------
 %ctor {
     @autoreleasepool {   // 早期加载时主线程还没有 autorelease pool
@@ -1070,7 +1067,7 @@ static void SVBScrollSweepIfNeeded(UIScrollView *sv) {
             BOOL isSB = [proc isEqualToString:@"SpringBoard"];
 
             // v10.4.0g: SpringBoard (桌面) 崩溃 = 全机安全模式, 桌面侧零文件 IO ——
-            // 心跳/日志只在宿主 App (信息/备忘录探针) 里写, 桌面只保留 displayName 钩子
+            // 心跳/日志只在宿主 App (信息/控制App) 里写, 桌面只保留 displayName 钩子
             // SpringBoard 只用 displayName 钩子, 不做素材迁移/诊断横幅 (防干扰桌面启动)
             if (!isSB) {
                 [[SVBManager shared] writeHeartbeat:

@@ -2123,7 +2123,7 @@ static NSString *SVBGenerateDiagnoseReport(void) {
     } else {
         [r appendString:@"未检测到任何心跳 ==> 插件没有被加载进任何进程。\n"];
         [r appendString:@"处理顺序: 1) 上滑彻底关闭信息App 再打开; 2) 仍无 -> 注销(respring)一次;\n"];
-        [r appendString:@"3) 打开「备忘录」等其它 App 看窗口顶部有没有出现诊断横幅 -> 有横幅说明注入管线正常、只差信息App; 无横幅说明 dylib 完全没被加载。\n"];
+        [r appendString:@"3) 打开信息App 后看窗口顶部有没有出现诊断横幅 -> 有横幅说明注入管线正常; 无横幅说明 dylib 完全没被加载。\n"];
     }
 
     [r appendString:@"\n--- 判读要点 (v1.3) ---\n"];
