@@ -570,6 +570,29 @@ static char SVBChromeAlphaKey;
 static char SVBChromeHiddenKey;
 static char SVBChromeMappedKey;
 
+// 返回按钮的点击目标: UIAction 的 identifier 是 readonly 且 actionWithTitle:image:
+// 传 nil 会撞 -Wnonnull (CI 开了 -Werror), 干脆用一个常驻辅助对象 + target-action,
+// 每个按钮把自己的 block 存进关联对象, 辅助对象统一转发。
+@interface SVBChromeActionProxy : NSObject
++ (instancetype)shared;
+- (void)handle:(UIButton *)sender;
+@end
+
+static char SVBChromeActionBlockKey;
+
+@implementation SVBChromeActionProxy
++ (instancetype)shared {
+    static SVBChromeActionProxy *p = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ p = [SVBChromeActionProxy new]; });
+    return p;
+}
+- (void)handle:(UIButton *)sender {
+    void (^blk)(void) = objc_getAssociatedObject(sender, &SVBChromeActionBlockKey);
+    if (blk) @try { blk(); } @catch (NSException *e) {}
+}
+@end
+
 // v10.5.0: 只处理导航栏与输入栏, 用类名关键词 + 层级定位。
 // 已从踩坑记录继承的安全铁律:
 //   ① 绝不碰 UICollectionView 的 backgroundView / selectedBackgroundView 子树 (SIGABRT)
@@ -687,21 +710,22 @@ static void SVBMapNavBar(UIViewController *vc) {
     [back setTitleColor:fg forState:UIControlStateNormal];
     back.titleLabel.font = [UIFont systemFontOfSize:30 weight:UIFontWeightRegular];
     back.frame = CGRectMake(6, 0, 44, lf.size.height);
-    if (@available(iOS 14.0, *)) {
-        // 先摘掉上一轮挂的同名 action (映射层会重复经过这里), 避免叠加。
-        // 注: UIAction.identifier 是 readonly, 只能在构造时给 —— 用
-        // actionWithTitle:image:identifier:handler: 这个带 identifier 的构造器。
-        [back removeActionForIdentifier:@"svbBack" forControlEvents:UIControlEventTouchUpInside];
-        __weak UIViewController *wvc = vc;
-        UIAction *act = [UIAction actionWithTitle:nil image:nil identifier:@"svbBack"
-                                          handler:^(__kindof UIAction *a) {
-            UIViewController *s = wvc;
-            if (!s) return;
-            @try { [s.navigationController popViewControllerAnimated:YES]; }
-            @catch (NSException *e) {}
-        }];
-        [back addAction:act forControlEvents:UIControlEventTouchUpInside];
-    }
+    // 点它 = 原生返回 (走 navigationController pop, 不改系统行为)。
+    // 用辅助对象转发 block: 重复经过这里时先把旧的 block 换掉即可, 不会叠加 target。
+    __weak UIViewController *wvc = vc;
+    objc_setAssociatedObject(back, &SVBChromeActionBlockKey, ^{
+        UIViewController *s = wvc;
+        if (!s) return;
+        @try { [s.navigationController popViewControllerAnimated:YES]; }
+        @catch (NSException *e) {}
+    }, OBJC_ASSOCIATION_COPY_NONATOMIC);
+    // 注: action:nil 会撞 -Wnonnull, 直接指定 selector 移除 (没挂过也无害)
+    [back removeTarget:[SVBChromeActionProxy shared]
+                action:@selector(handle:)
+      forControlEvents:UIControlEventTouchUpInside];
+    [back addTarget:[SVBChromeActionProxy shared]
+             action:@selector(handle:)
+   forControlEvents:UIControlEventTouchUpInside];
 }
 
 #pragma mark - 底部输入栏映射
