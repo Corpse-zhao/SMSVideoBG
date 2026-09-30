@@ -849,6 +849,21 @@ static BOOL SVBTopHasContent(UIView *v, NSInteger d) {
     return NO;
 }
 
+// v10.6.4: 子树里有没有文字输入控件 —— 用来把「输入栏」和「App 抽屉」分开。
+//   有  -> 是 CKMessageEntryView 那条输入栏 (用户说它已经完美, 一律不碰)
+//   没有-> 是 App 抽屉(功能键那一排), 要做深度透明化
+static BOOL SVBSubtreeHasTextInput(UIView *v, NSInteger d) {
+    if (!v || d > 6) return NO;
+    @try {
+        if ([v isKindOfClass:[UITextField class]] ||
+            [v isKindOfClass:[UITextView class]]) return YES;
+    } @catch (NSException *e) {}
+    for (UIView *s2 in v.subviews) {
+        if (SVBSubtreeHasTextInput(s2, d + 1)) return YES;
+    }
+    return NO;
+}
+
 // v10.6.3: 系统导航栏的「返回键 / 标题」现在是不是真的能看见 (alpha>0, 未 hidden, 在屏上)。
 //   YES -> 用系统的, 我们不再自绘 (自绘只会有重影 / 错位风险)
 //   NO  -> 系统内容确实不可见, 才启用自绘兜底
@@ -956,6 +971,14 @@ static void SVBTranslucentIconTray(UIView *v, NSInteger d) {
         NSString *cls = NSStringFromClass([v class]);
         if ([cls hasPrefix:@"_UIBarBackground"] || [cls containsString:@"BarBackground"]) {
             v.hidden = YES;
+            return;
+        }
+        // v10.6.4: 底部那条白在浅色模式下多半是**毛玻璃**而不是纯色背景 ——
+        // 只改 backgroundColor 是清不掉的, 必须把 effect 摘掉(保留视图结构, 不用 hidden)。
+        if ([v isKindOfClass:[UIVisualEffectView class]]) {
+            ((UIVisualEffectView *)v).effect = nil;
+            v.backgroundColor = [UIColor clearColor];
+            if (v.layer.backgroundColor) v.layer.backgroundColor = NULL;
             return;
         }
         if (v.backgroundColor && ![v.backgroundColor isEqual:[UIColor clearColor]])
@@ -1316,12 +1339,11 @@ static void SVBDoChatChrome(UIViewController *vc) {
     // 下面那一排功能键。改成「只清掉容器自身白底 + 内部 bar 背景层」, 控件原样保留。
     for (UIView *v in bottoms) {
         SVBTranslucentChromeView(v);
-        // v10.6.3: 底部 App 抽屉(功能键排) 再做一次**深度**透明化 —— 用户要求
-        // 「最底下的功能键背景跟输入框一样透明」, 那层白底挂在各图标自己的按钮上。
-        NSString *bcls = NSStringFromClass([v class]);
-        if ([bcls containsString:@"BrowserSwitcher"] ||
-            objc_getAssociatedObject(v, &SVBIconTrayKey))
-            SVBTranslucentIconTray(v, 0);
+        // v10.6.4: 判据从「类名/打标」改成「子树里有没有文字输入控件」——
+        //   含输入控件 => 输入栏(CKMessageEntryView), 用户说它已经完美, 保持不动;
+        //   不含      => App 抽屉(功能键那一排), 做**深度**透明化(含摘毛玻璃)。
+        // 上一版只靠 BrowserSwitcher 打标, 那个 VC 根本没被识别到, 所以白条一直在。
+        if (!SVBSubtreeHasTextInput(v, 0)) SVBTranslucentIconTray(v, 0);
     }
 
     // v10.6.3: 系统导航栏的返回键/标题此刻是否真的可见 -> 决定自绘层要不要画
@@ -1389,13 +1411,25 @@ static void SVBDoChatChrome(UIViewController *vc) {
                     (objc_getAssociatedObject(v, &SVBIconTrayKey) != nil)) trayCnt++;
             [[SVBManager shared] log:@"chat chrome 顶部保护: sysOk=%d 抽屉=%lu 明细: %@",
                 (int)sysOkLog, (unsigned long)trayCnt, td];
+            // v10.6.4: 底条逐个元素 + 是否含输入控件(决定谁走深度透明化)
+            NSMutableString *bd = [NSMutableString string];
+            for (UIView *v in bottoms)
+                [bd appendFormat:@"%@(输入=%d h=%.0f) ", NSStringFromClass([v class]),
+                                     (int)SVBSubtreeHasTextInput(v, 0), v.bounds.size.height];
+            [[SVBManager shared] log:@"chat chrome 底条明细: %@",
+                bd.length ? bd : @"(无)"];
         }
     } @catch (NSException *e) {}
 }
 
 // 入口: 进对话时调用一次; 与气泡一样做延迟补扫 (系统重建 chrome 后再藏)
 static void SVBApplyChatChrome(UIViewController *vc) {
-    if (!vc || !vc.view || !vc.view.window) return;
+    // v10.6.4: 原来是 `!vc.view.window` 就直接 return —— 但 push 转场的 viewWillAppear
+    // 阶段 view.window 往往还是 nil, 于是整条链路只能等 viewDidAppear(转场结束)之后
+    // 才第一次生效 => 用户看到「进对话详情要一秒白块才消失」。
+    // 放宽成「有 view 就干活」: 扫描本身只依赖视图树, 不依赖 window。
+    if (!vc || !vc.view) return;
+    if (!vc.view.window && !vc.view.superview) return;
     BOOL active = SVBBubbleSweepActive();
     @try {
         static NSTimeInterval sLastEnterLog = 0;
@@ -1412,16 +1446,18 @@ static void SVBApplyChatChrome(UIViewController *vc) {
     if (!SVBMappedChrome) SVBMappedChrome = [NSMutableArray new];
     @try { SVBDoChatChrome(vc); } @catch (NSException *e) {}
     __weak UIViewController *wvc = vc;
-    // v10.5.2: 补扫点加密到 8 个 (覆盖前 6 秒) —— 顶/底栏可能是进入后晚些才创建/重建的,
-    // 之前只有 4 个点, 漏掉的概率偏高。
-    NSTimeInterval delays[8] = {0.25, 0.6, 1.1, 1.8, 2.6, 3.6, 4.8, 6.0};
-    for (int i = 0; i < 8; i++) {
+    // v10.6.4: 补扫点 8 -> 16 个, 并且把第一个点前移到 **0.0s**(立刻来一发)。
+    // 旧版第一个点是 0.25s 且那时导航栏往往还没建好 => 用户感知「过一秒才消失」。
+    NSTimeInterval delays[16] = {0.0, 0.05, 0.12, 0.2, 0.3, 0.45, 0.6, 0.8,
+                                 1.05, 1.35, 1.75, 2.2, 2.8, 3.6, 4.8, 6.5};
+    for (int i = 0; i < 16; i++) {
         NSTimeInterval t = delays[i];
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(t * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
             @try {
                 UIViewController *s = wvc;
-                if (!s || !s.isViewLoaded || !s.view.window) return;
+                if (!s || !s.isViewLoaded) return;
+                if (!s.view.window && !s.view.superview) return;   // v10.6.4: 同放宽策略
                 if (!SVBBubbleSweepActive()) { SVBClearMappedChrome(); return; }
                 SVBDoChatChrome(s);
             } @catch (NSException *e) {}
@@ -1594,6 +1630,8 @@ static char SVBDetectedCtxKey;
     [[SVBManager shared] logClassOnce:NSStringFromClass([self class]) context:SVBContextChat];
     SVB_SAFE_APPLY(SVBContextChat)
     [[SVBManager shared] setContextActive:YES context:SVBContextChat];
+    // v10.6.4: 转场期间就先处理一次 —— 白块不必等到 viewDidAppear 之后才消失
+    SVBApplyChatChrome(self);
 }
 - (void)viewDidAppear:(BOOL)animated {
     %orig;
@@ -1664,6 +1702,8 @@ static char SVBDetectedCtxKey;
     [[SVBManager shared] logClassOnce:NSStringFromClass([self class]) context:SVBContextChat];
     SVB_SAFE_APPLY(SVBContextChat)
     [[SVBManager shared] setContextActive:YES context:SVBContextChat];
+    // v10.6.4: 转场期间就先处理一次 —— 白块不必等到 viewDidAppear 之后才消失
+    SVBApplyChatChrome(self);
 }
 - (void)viewDidAppear:(BOOL)animated {
     %orig;
