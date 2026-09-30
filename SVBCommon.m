@@ -1435,6 +1435,9 @@ static void SVBCollectToolbars(UIView *view, NSMutableArray<UIToolbar *> *out_, 
         @try {
             NSMutableArray<UIToolbar *> *bars = [NSMutableArray array];
             SVBCollectToolbars(vc.view, bars, 0);
+            // v10.5.2: 工具栏同样可能挂在窗口级容器上 (与 docked inputAccessory 同理),
+            // 只扫 vc.view 会漏 -> 补扫它所在的 window
+            if (vc.view.window) SVBCollectToolbars(vc.view.window, bars, 0);
             for (UIToolbar *tb in bars) {
                 UIToolbarAppearance *tap = [[UIToolbarAppearance alloc] init];
                 [tap configureWithTransparentBackground];

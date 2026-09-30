@@ -624,6 +624,41 @@ static BOOL SVBIsSystemManagedCellBg(UIView *v) {
            (pc.selectedBackgroundView && v == pc.selectedBackgroundView);
 }
 
+// v10.5.2c: 去重加入 (同一个视图可能被几何扫描和 VC 补扫同时收进来)
+static void SVBAddUniqueView(NSMutableArray<UIView *> *a, UIView *v) {
+    if (!v || !a) return;
+    if (![a containsObject:v]) [a addObject:v];
+}
+
+// v10.5.2c: 输入条 / App 抽屉在真机上是**私有 VC** —— 诊断报告实测:
+//   CKMessageEntryView           「名字叫 View, 其实是 UIViewController」= 底部输入栏
+//   CKBrowserSwitcherFooterView  = 底部 App / 表情抽屉
+// 它们的**视图类名**未必等于 VC 类名 (v10.5.0 按视图类名搜就是这么漏的),
+// 几何也可能因内缩边距不满足 fullWidth 而漏判。所以再按 VC 类名在 VC 树里定点补一遍,
+// 命中就把它的 view / inputAccessoryView 一起收进「底部条」集合。
+// 注: VC 树是**全局**的 —— 输入条有时挂在窗口级容器或 nav 栈的兄弟 VC 上,
+//     不在 CKChatController.view 子树里 (v10.5.1 只扫 vc.view 漏掉的真因)。
+static void SVBScanChromeVCs(UIViewController *vc, NSInteger depth,
+                             NSMutableArray<UIView *> *out_) {
+    if (!vc || depth > 8) return;
+    @try {
+        NSString *cls = NSStringFromClass([vc class]);
+        if ([cls containsString:@"MessageEntryView"] ||
+            [cls containsString:@"BrowserSwitcher"] ||
+            [cls containsString:@"ChatInput"]) {
+            if (vc.isViewLoaded && vc.view.superview) SVBAddUniqueView(out_, vc.view);
+            UIView *iav = vc.inputAccessoryView;
+            if (iav && iav.superview) SVBAddUniqueView(out_, iav);
+        }
+    } @catch (NSException *e) {}
+    for (UIViewController *c in vc.childViewControllers)
+        SVBScanChromeVCs(c, depth + 1, out_);
+    @try {
+        UIViewController *pv = vc.presentedViewController;
+        if (pv) SVBScanChromeVCs(pv, depth + 1, out_);
+    } @catch (NSException *e) {}
+}
+
 // 递归扫「条状全宽容器」+「已知遮罩类」。命中即收, 不再往里钻。
 static void SVBScanBands(UIView *root, UIView *space, NSInteger depth,
                          NSMutableArray<UIView *> *tops,
@@ -635,8 +670,11 @@ static void SVBScanBands(UIView *root, UIView *space, NSInteger depth,
     if (W < 1 || H < 1) return;
     CGFloat safeTop = space.safeAreaInsets.top;    if (safeTop < 1) safeTop = 44.0;
     CGFloat safeBot = space.safeAreaInsets.bottom; if (safeBot < 1) safeBot = 34.0;
-    CGFloat topLimit    = safeTop + 74.0;               // 顶条下沿的允许上限
-    CGFloat bottomStart = H - (safeBot + 110.0);        // 底条上沿的允许下限
+    // v10.5.2c: 原 topLimit = safeTop+74 太紧 —— 聊天页顶部是「大头像+名字+副标题」
+    // 的高导航栏 (约 96pt), 从安全区下沿起算时 maxY 会到 safeTop+96, 再加渐变层
+    // 就直接超过 74, 被判成「不是顶条」而漏掉。
+    CGFloat topLimit    = safeTop + 132.0;              // 顶条下沿的允许上限
+    CGFloat bottomStart = H - (safeBot + 150.0);        // 底条上沿的允许下限
 
     for (UIView *sub in root.subviews) {
         if ([sub isKindOfClass:[SVBVideoBackgroundView class]]) continue;
@@ -649,18 +687,20 @@ static void SVBScanBands(UIView *root, UIView *space, NSInteger depth,
 
         // 已知遮罩 (诊断报告实测 CKGradientView = 顶部/底部渐变, 浅色模式下就是那条白):
         // 一律直接藏, 不参与几何判定
-        if ([cls hasPrefix:@"CKGradientView"]) { [masks addObject:sub]; continue; }
+        if ([cls containsString:@"CKGradientView"]) { SVBAddUniqueView(masks, sub); continue; }
 
         CGRect f = [sub convertRect:sub.bounds toView:space];
         BOOL fullWidth = f.size.width >= W * 0.92;
         BOOL strip = (f.size.height >= 22.0) && (f.size.height <= H * 0.34);
         if (fullWidth && strip && CGRectIntersectsRect(f, sb)) {
-            // 顶条: 顶边贴屏幕最上, 或底边不超过安全区 + 74
-            if (f.origin.y <= safeTop * 0.5 || CGRectGetMaxY(f) <= topLimit) {
-                [tops addObject:sub];
+            // 顶条: 顶边贴屏幕最上 (或落在状态栏附近), 或底边不超过安全区 + topLimit 余量
+            // v10.5.2c: 用 SVBAddUniqueView 而非 addObject —— vc.view 本身就是某个 window
+            // 的子树, 两轮扫描会把同一视图收两次, 日志计数会虚高一倍。
+            if (f.origin.y <= safeTop + 8.0 || CGRectGetMaxY(f) <= topLimit) {
+                SVBAddUniqueView(tops, sub);
                 continue;
             }
-            if (f.origin.y >= bottomStart) { [bottoms addObject:sub]; continue; }
+            if (f.origin.y >= bottomStart) { SVBAddUniqueView(bottoms, sub); continue; }
         }
         SVBScanBands(sub, space, depth + 1, tops, bottoms, masks);
     }
@@ -795,6 +835,33 @@ static void SVBDoChatChrome(UIViewController *vc) {
     @try {
         SVBScanBands(vc.view, vc.view, 0, tops, bottoms, masks);
     } @catch (NSException *e) {}
+    // v10.5.2 【关键修复】: 还必须扫 window!
+    // 老坑 (memory 有记): docked inputAccessory (键盘收起时的输入条) 以及部分私有
+    // 顶/底栏挂在**窗口级容器**上, 根本不在 vc.view 里 —— 只在 vc.view 内扫永远找不到。
+    // v10.5.0 本来是从 window 扫的, v10.5.1 改成只扫 vc.view 反而把这个覆盖丢了。
+    // 纯键盘窗口跳过 (键盘子树本来就一律跳过)。
+    @try {
+        for (UIWindow *w in UIApplication.sharedApplication.windows) {
+            NSString *wcls = NSStringFromClass([w class]).lowercaseString;
+            if ([wcls containsString:@"keyboard"]) continue;
+            SVBScanBands(w, w, 0, tops, bottoms, masks);
+        }
+    } @catch (NSException *e) {}
+
+    // v10.5.2c: 再按「私有 VC 类名」定点补一遍底条 (几何 + window 扫描都失效时的保险)。
+    // 同时抓聊天页自己的 inputAccessoryView —— 它可能被系统收进键盘窗口,
+    // 而键盘窗口在上面已被我们跳过, 几何扫不到。
+    @try {
+        SVBScanChromeVCs(vc, 0, bottoms);
+        for (UIWindow *w in UIApplication.sharedApplication.windows) {
+            NSString *wcls = NSStringFromClass([w class]).lowercaseString;
+            if ([wcls containsString:@"keyboard"]) continue;
+            UIViewController *rvc = w.rootViewController;
+            if (rvc) SVBScanChromeVCs(rvc, 0, bottoms);
+        }
+        UIView *iavTop = vc.inputAccessoryView;   // UIResponder 属性, 非第一响应者时可能为 nil
+        if (iavTop && iavTop.superview) SVBAddUniqueView(bottoms, iavTop);
+    } @catch (NSException *e) {}
 
     // 几何没找到顶条 -> 退回标准导航栏兜底 (有则藏着无害)
     if (!tops.count) {
@@ -822,18 +889,52 @@ static void SVBDoChatChrome(UIViewController *vc) {
     if (top) {
         @try { SVBMapChatTop(vc, top, titleText, titleFont); } @catch (NSException *e) {}
     }
+
+    // v10.5.2: 诊断 —— 把本轮命中写进日志 (节流 1.5s)。万一还没生效, 下次诊断报告里
+    // 就能直接看到「扫到了什么/什么都没扫到」, 不用再靠猜。
+    @try {
+        static NSTimeInterval sLastChromeLog = 0;
+        NSTimeInterval nowTs = [NSDate date].timeIntervalSince1970;
+        if (nowTs - sLastChromeLog > 1.5) {
+            sLastChromeLog = nowTs;
+            NSMutableString *desc = [NSMutableString string];
+            for (UIView *v in tops)
+                [desc appendFormat:@"顶[%@ h=%.0f] ", NSStringFromClass([v class]), v.bounds.size.height];
+            for (UIView *v in bottoms)
+                [desc appendFormat:@"底[%@ h=%.0f] ", NSStringFromClass([v class]), v.bounds.size.height];
+            for (UIView *v in masks)
+                [desc appendFormat:@"罩[%@] ", NSStringFromClass([v class])];
+            if (!desc.length) desc = [NSMutableString stringWithString:@"(无命中)"];
+            [[SVBManager shared] log:@"chat chrome 命中 %lu/%lu/%lu -> %@",
+                (unsigned long)tops.count, (unsigned long)bottoms.count,
+                (unsigned long)masks.count, desc];
+        }
+    } @catch (NSException *e) {}
 }
 
 // 入口: 进对话时调用一次; 与气泡一样做延迟补扫 (系统重建 chrome 后再藏)
 static void SVBApplyChatChrome(UIViewController *vc) {
     if (!vc || !vc.view || !vc.view.window) return;
-    if (!SVBBubbleSweepActive()) { SVBClearMappedChrome(); return; }
+    BOOL active = SVBBubbleSweepActive();
+    @try {
+        static NSTimeInterval sLastEnterLog = 0;
+        NSTimeInterval nowTs = [NSDate date].timeIntervalSince1970;
+        if (nowTs - sLastEnterLog > 1.5) {
+            sLastEnterLog = nowTs;
+            [[SVBManager shared] log:@"chat chrome 进入: vc=%@ active=%d windows=%lu",
+                NSStringFromClass([vc class]), (int)active,
+                (unsigned long)UIApplication.sharedApplication.windows.count];
+        }
+    } @catch (NSException *e) {}
+    if (!active) { SVBClearMappedChrome(); return; }
     if (!SVBHiddenChrome) SVBHiddenChrome = [NSMutableArray new];
     if (!SVBMappedChrome) SVBMappedChrome = [NSMutableArray new];
     @try { SVBDoChatChrome(vc); } @catch (NSException *e) {}
     __weak UIViewController *wvc = vc;
-    NSTimeInterval delays[4] = {0.35, 0.9, 1.8, 3.0};
-    for (int i = 0; i < 4; i++) {
+    // v10.5.2: 补扫点加密到 8 个 (覆盖前 6 秒) —— 顶/底栏可能是进入后晚些才创建/重建的,
+    // 之前只有 4 个点, 漏掉的概率偏高。
+    NSTimeInterval delays[8] = {0.25, 0.6, 1.1, 1.8, 2.6, 3.6, 4.8, 6.0};
+    for (int i = 0; i < 8; i++) {
         NSTimeInterval t = delays[i];
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(t * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
@@ -1202,6 +1303,17 @@ static char SVBDetectedCtxKey;
     } @catch (NSException *e) {
         // 保证不崩溃
     }
+}
+// v10.5.2: 聊天页主 VC 的双保险 —— 兜底钩子的 viewWillAppear 里有「视图本体必须是
+// 列表」的限制, CKChatController 走不到; 万一 %hook CKChatController 那条路没生效
+// (类名在不同系统版本上不同), 这里再补一次。只认 ChatController, 不碰别的 VC。
+- (void)viewDidAppear:(BOOL)animated {
+    %orig;
+    SVB_SMS_GUARD()
+    @try {
+        NSString *name = NSStringFromClass([self class]);
+        if ([name containsString:@"ChatController"]) SVBApplyChatChrome(self);
+    } @catch (NSException *e) {}
 }
 // v1.7.19: 只走兜底路径的页面 (如主页面/Filter 类) 离开时也要暂停自己的播放器,
 // 防声音穿透到其它界面。按「实际挂载过的语境」精确暂停。
